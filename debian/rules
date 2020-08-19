@@ -2,24 +2,36 @@
 #export DH_VERBOSE=1
 
 # Don't conflict with the system compiler
-confflags += --prefix=/opt/gcc-10
+confflags += --prefix=/opt/gcc-future
 # We have no interest in multilib
 confflags += --disable-multilib
 # We have no interest in all the other languages
-confflags += --enable-languages=c,c++,lto --enable-default-pie
+confflags += --enable-languages=c,c++,lto
 # We like security!
 confflags += --enable-default-pie
+# Allow us to build using an older compiler, argh
+confflags += --disable-build-format-warnings
+
+# Reset all of these - the default package-build environment sets
+# -Wformat-security etc. which breaks some of the build :-/
+CFLAGS=
+CXXFLAGS=
+CPPFLAGS=
+
+ifneq (,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+	NUMJOBS = $(patsubst parallel=%,%,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+	MAKEFLAGS += -j$(NUMJOBS)
+endif
 
 %:
-	dh $@ --with=autoreconf
+	dh $@ --parallel
 
 override_dh_auto_configure:
-	dh_auto_configure -Bdebian/build-deb -- $(confflags)
+	mkdir -p debian/build-deb
+	cd debian/build-deb && ../../configure $(confflags)
 
 override_dh_auto_build:
 	dh_auto_build -Bdebian/build-deb
 
 override_dh_auto_install:
 	dh_auto_install -Bdebian/build-deb
-
-.PHONY: binary binary-arch binary-indep build-arch build-indep clean

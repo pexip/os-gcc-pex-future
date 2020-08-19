@@ -1,4 +1,4 @@
-gcc-10-pex-snapshot (10.2.0-0pexip1) pexip; urgency=medium
+gcc-pex-future (10.2.0-0pexip1) pexip; urgency=medium
 
   * Initial release
   * Simple binary build of gcc-10 for us to use in CI
