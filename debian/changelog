@@ -1,6 +1,0 @@
-gcc-10-pex-snapshot (10.2-pexip0) pexip; urgency=medium
-
-  * Initial release
-  * Simple binary build of gcc-10 for us to use in CI
-
- -- Steve McIntyre <steve.mcintyre@pexip.com>  Wed, 19 Aug 2020 12:15:41 +0100
