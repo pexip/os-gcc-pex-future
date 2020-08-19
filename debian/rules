@@ -1,0 +1,25 @@
+#!/usr/bin/make -f
+#export DH_VERBOSE=1
+
+# Don't conflict with the system compiler
+confflags += --prefix=/opt/gcc-10
+# We have no interest in multilib
+confflags += --disable-multilib
+# We have no interest in all the other languages
+confflags += --enable-languages=c,c++,lto --enable-default-pie
+# We like security!
+confflags += --enable-default-pie
+
+%:
+	dh $@ --with=autoreconf
+
+override_dh_auto_configure:
+	dh_auto_configure -Bdebian/build-deb -- $(confflags)
+
+override_dh_auto_build:
+	dh_auto_build -Bdebian/build-deb
+
+override_dh_auto_install:
+	dh_auto_install -Bdebian/build-deb
+
+.PHONY: binary binary-arch binary-indep build-arch build-indep clean

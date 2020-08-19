@@ -1,0 +1,19 @@
+Source: gcc-10-pex-snapshot
+Section: devel
+Priority: optional
+Maintainer: Pexip AS <packaging@pexip.com>
+Standards-Version: 4.3.0
+Build-Depends: debhelper (>= 9), wget
+Vcs-Browser: https://github.com/pexip/os-gcc10-pex-snapshot/
+Vcs-Git: https://github.com/pexip/os-gcc10-pex-snapshot.git
+
+Package: gcc-10-pex-snapshot
+Architecture: amd64
+Depends: ${misc:Depends},
+ gcc-multilib,
+ lib32stdc++6,
+ libc6,
+ libgcc1
+Description: Simple packaged version of gcc-10
+ Simple packaged version of gcc-10 to live in /opt/gcc-10, ready for
+ us to use with CI in buster.
