@@ -1,3 +1,5 @@
+# Trivial patch to stop the build failing. Older versions of gcc/g++
+# error out later in the build as they don't deal with -Wno-error=format-diag
 diff --git a/gcc/configure b/gcc/configure
 index eb6061c16..43f60eb17 100755
 --- a/gcc/configure

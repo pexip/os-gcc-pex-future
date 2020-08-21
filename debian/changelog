@@ -3,4 +3,4 @@ gcc-pex-future (10.2.0-0pexip1) pexip; urgency=medium
   * Initial release
   * Simple binary build of gcc-10 for us to use in CI
 
- -- Steve McIntyre <steve.mcintyre@pexip.com>  Wed, 19 Aug 2020 12:15:41 +0100
+ -- Steve McIntyre <steve.mcintyre@pexip.com>  Fri, 21 Aug 2020 09:24:41 +0100

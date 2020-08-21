@@ -1,47 +1,12 @@
-This is a hacky local Debian package of a version of gcc 10, including
-*only* gcc and g++.
+This is a hacky local Debian package of a newer version of gcc (10.2.0
+at the time of writing), including *only* language support for gcc and
+g++ and installing into /opt/gcc-future
 
-This package was built using a simple local build of gcc-10.2 on a
-Debian 10.5 (buster) host using:
+This package was built using sources from
 
- $ ../configure --prefix=/opt/gcc-10 --with-gcc-major-version-only \
-                --disable-multilib --enable-languages=c,c++,lto \
-                --enable-default-pie
+ftp://ftp.mirrorservice.org/sites/sourceware.org/pub/gcc/releases/gcc-10.2.0/gcc-10.2.0.tar.xz
 
- $ make -j32
- $ sudo make install
-
-then the contents of /opt/gcc-10 was put into the "source" tarball, as
-found at
-
-http://ukfs1.rd.pexip.com/dav/os-gcc-10-pex-snapshot-10.2-binary1.tar.xz
-
-Due to this special setup, this package build does *NOT* have a normal
-source package. Instead, it will grab that file and extract it as
-necessary.
-
-Full licence text from the Debian gcc-10 package is appended here:
-
-This is a hacky Debian package of a local version of gcc 10.
-
-This package was built using a simple local build of gcc-10.2 on a
-Debian buster host using:
-
- $ ../configure --prefix=/opt/gcc-10 --with-gcc-major-version-only \
-                --disable-multilib --enable-languages=c,c++,lto \
-                --enable-default-pie
-
- $ make -j32
- $ sudo make install
-
-then the contents of /opt/gcc-10 was put into the "source" tarball, as
-found at
-
-http://ukfs1.rd.pexip.com/dav/os-gcc-10-pex-snapshot-10.2-binary1.tar.xz
-
-Due to this special setup, this package build does *NOT* have a normal
-source package. Instead, it will grab that file and extract it as
-necessary.
+To use the binaries here, prepend /opt/gcc-future/bin to your PATH.
 
 Full licence text from the normal Debian gcc-10 package is appended
 here for information. Ignore anything about the Ada, Fortran and other
