@@ -3,6 +3,7 @@
 
 # Don't conflict with the system compiler
 confflags += --prefix=/opt/gcc-future
+confflags += --program-prefix=pexip-future-
 # We have no interest in multilib
 confflags += --disable-multilib
 # We have no interest in all the other languages

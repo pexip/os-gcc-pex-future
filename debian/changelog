@@ -1,3 +1,9 @@
+gcc-pex-future (10.2.0-0pexip2) pexip; urgency=medium
+
+  * Tweak build setup to use different prefix
+
+ -- Steve McIntyre <steve.mcintyre@pexip.com>  Fri, 21 Aug 2020 15:56:08 +0100
+
 gcc-pex-future (10.2.0-0pexip1) pexip; urgency=medium
 
   * Initial release
