@@ -28,8 +28,8 @@ Build-Depends: debhelper (>= 9),
  libmpc-dev (>= 1.0),
  libmpfr-dev (>= 3.0.0-9~),
  libgmp-dev (>= 2:5.0.1~),
-Vcs-Browser: https://github.com/pexip/os-gcc10-pex-snapshot/
-Vcs-Git: https://github.com/pexip/os-gcc10-pex-snapshot.git
+Vcs-Browser: https://github.com/pexip/os-gcc-pex-future/
+Vcs-Git: https://github.com/pexip/os-gcc-pex-future.git
 
 Package: gcc-pex-future
 Architecture: amd64
