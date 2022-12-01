@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2020 Free Software Foundation, Inc.
+// Copyright (C) 2019-2022 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
 
 constexpr bool
 test()
@@ -31,7 +32,10 @@ test()
   const auto outy = std::is_sorted_until(aus.begin(), aus.end(),
 					 std::less<int>());
 
-  return true;
+  const auto outz = std::is_sorted_until(outx - 1, aus.end(),
+					 std::greater<int>());
+
+  return outx == aus.begin() + 7 && outy == outx && outz == (outx + 1);
 }
 
 static_assert(test());

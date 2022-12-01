@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2020 Free Software Foundation, Inc.
+// Copyright (C) 2019-2022 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
 
 constexpr bool
 test()
@@ -36,7 +37,7 @@ test()
 					   cas.begin(), cas.end(),
 					   out0.begin(), std::less<int>());
 
-  return true;
+  return outxx == (out0.begin() + 9) && outyy == outxx;
 }
 
 static_assert(test());

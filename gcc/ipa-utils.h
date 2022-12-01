@@ -1,5 +1,5 @@
 /* Utilities for ipa analysis.
-   Copyright (C) 2004-2020 Free Software Foundation, Inc.
+   Copyright (C) 2004-2022 Free Software Foundation, Inc.
    Contributed by Kenneth Zadeck <zadeck@naturalbridge.com>
 
 This file is part of GCC.
@@ -34,7 +34,7 @@ struct ipa_dfs_info {
 };
 
 
-/* In ipa-utils.c  */
+/* In ipa-utils.cc  */
 void ipa_print_order (FILE*, const char *, struct cgraph_node**, int);
 int ipa_reduced_postorder (struct cgraph_node **, bool,
 			  bool (*ignore_edge) (struct cgraph_edge *));
@@ -47,10 +47,16 @@ void ipa_merge_profiles (struct cgraph_node *dst,
 			 struct cgraph_node *src, bool preserve_body = false);
 bool recursive_call_p (tree, tree);
 
-/* In ipa-profile.c  */
+/* In ipa-pure-const.cc  */
+bool finite_function_p ();
+bool builtin_safe_for_const_function_p (bool *, tree);
+bool ipa_make_function_const (cgraph_node *, bool, bool);
+bool ipa_make_function_pure (cgraph_node *, bool, bool);
+
+/* In ipa-profile.cc  */
 bool ipa_propagate_frequency (struct cgraph_node *node);
 
-/* In ipa-devirt.c  */
+/* In ipa-devirt.cc  */
 
 struct odr_type_d;
 typedef odr_type_d *odr_type;
@@ -97,6 +103,8 @@ tree prevailing_odr_type (tree type);
 void enable_odr_based_tbaa (tree type);
 bool odr_based_tbaa_p (const_tree type);
 void set_type_canonical_for_odr_type (tree type, tree canonical);
+
+void register_odr_enum (tree type);
 
 /* Return vector containing possible targets of polymorphic call E.
    If COMPLETEP is non-NULL, store true if the list is complete. 
@@ -209,8 +217,6 @@ type_with_linkage_p (const_tree t)
   if (!TYPE_CONTEXT (t))
     return false;
 
-  gcc_checking_assert (TREE_CODE (t) == ENUMERAL_TYPE || TYPE_CXX_ODR_P (t));
-
   return true;
 }
 
@@ -243,7 +249,7 @@ odr_type_p (const_tree t)
 {
   /* We do not have this information when not in LTO, but we do not need
      to care, since it is used only for type merging.  */
-  gcc_checking_assert (in_lto_p || flag_lto);
+  gcc_checking_assert (in_lto_p || flag_lto || flag_generate_offload);
   return TYPE_NAME (t) && TREE_CODE (TYPE_NAME (t)) == TYPE_DECL
          && DECL_ASSEMBLER_NAME_SET_P (TYPE_NAME (t));
 }
@@ -261,6 +267,18 @@ get_odr_name_for_type (tree type)
     return NULL;
 
   return IDENTIFIER_POINTER (DECL_ASSEMBLER_NAME (type_name));
+}
+
+/* Return true if we are going to do LTO streaming.  */
+
+inline bool
+lto_streaming_expected_p ()
+{
+  /* Compilation before LTO stremaing.  */
+  if (flag_lto && !in_lto_p && symtab->state < IPA_SSA_AFTER_INLINING)
+    return true;
+  /* WPA or incremental link.  */
+  return (flag_wpa || flag_incremental_link == INCREMENTAL_LINK_LTO);
 }
 
 #endif  /* GCC_IPA_UTILS_H  */

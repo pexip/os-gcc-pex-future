@@ -1,5 +1,5 @@
 /* Define per-register tables for data flow info and register allocation.
-   Copyright (C) 1987-2020 Free Software Foundation, Inc.
+   Copyright (C) 1987-2022 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -88,7 +88,7 @@ REG_N_SETS (int regno)
 /* Given a REG, return TRUE if the reg is a PARM_DECL, FALSE otherwise.  */
 extern bool reg_is_parm_p (rtx);
 
-/* Functions defined in regstat.c.  */
+/* Functions defined in regstat.cc.  */
 extern void regstat_init_n_sets_and_refs (void);
 extern void regstat_free_n_sets_and_refs (void);
 extern void regstat_compute_ri (void);
@@ -128,7 +128,8 @@ extern size_t reg_info_p_size;
    or profile driven feedback is available and the function is never executed,
    frequency is always equivalent.  Otherwise rescale the basic block
    frequency.  */
-#define REG_FREQ_FROM_BB(bb) (optimize_function_for_size_p (cfun)	      \
+#define REG_FREQ_FROM_BB(bb) ((optimize_function_for_size_p (cfun)	      \
+			       || !cfun->cfg->count_max.initialized_p ())     \
 			      ? REG_FREQ_MAX				      \
 			      : ((bb)->count.to_frequency (cfun)	      \
 				* REG_FREQ_MAX / BB_FREQ_MAX)		      \
@@ -201,6 +202,9 @@ struct target_regs {
      registers that a given machine mode occupies.  */
   unsigned char x_hard_regno_nregs[FIRST_PSEUDO_REGISTER][MAX_MACHINE_MODE];
 
+  /* The max value found in x_hard_regno_nregs.  */
+  unsigned char x_hard_regno_max_nregs;
+
   /* For each hard register, the widest mode object that it can contain.
      This will be a MODE_INT mode if the register can hold integers.  Otherwise
      it will be a MODE_FLOAT or a MODE_CC mode, whichever is valid for the
@@ -234,6 +238,8 @@ extern struct target_regs *this_target_regs;
 #else
 #define this_target_regs (&default_target_regs)
 #endif
+#define hard_regno_max_nregs \
+  (this_target_regs->x_hard_regno_max_nregs)
 #define reg_raw_mode \
   (this_target_regs->x_reg_raw_mode)
 #define have_regs_of_mode \
