@@ -2,6 +2,7 @@ gcc-pex-future (12.2.0-0pexip1) pexip; urgency=medium
 
   * Switch to using gcc-12.2.0
   * Build for arm64 too
+  * Remove old patche 01-remove-format-diag, no longer needed.
 
  -- Steve McIntyre <steve.mcintyre@pexip.com>  Thu, 01 Dec 2022 15:14:41 +0000
 
