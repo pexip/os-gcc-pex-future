@@ -1,3 +1,9 @@
+gcc-pex-future (12.2.0-0pexip1) pexip; urgency=medium
+
+  * Switch to using gcc-12.2.0
+
+ -- Steve McIntyre <steve.mcintyre@pexip.com>  Thu, 21 Aug 2020 15:11:27 +0000
+
 gcc-pex-future (10.2.0-0pexip2) pexip; urgency=medium
 
   * Tweak build setup to use different prefix
