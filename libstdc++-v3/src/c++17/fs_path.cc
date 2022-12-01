@@ -1,6 +1,6 @@
 // Class filesystem::path -*- C++ -*-
 
-// Copyright (C) 2014-2020 Free Software Foundation, Inc.
+// Copyright (C) 2014-2022 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -33,6 +33,7 @@
 
 #include <filesystem>
 #include <algorithm>
+#include <array>
 #include <bits/stl_uninitialized.h>
 
 namespace fs = std::filesystem;
@@ -81,7 +82,7 @@ struct path::_Parser
     const size_t len = input.size();
 
     // look for root name or root directory
-    if (is_dir_sep(input[0]))
+    if (len && is_dir_sep(input[0]))
       {
 #if SLASHSLASH_IS_ROOTNAME
 	// look for root name, such as "//foo"
@@ -1872,11 +1873,6 @@ path::_M_split_cmpts()
       _M_cmpts.type(_Type::_Filename);
       return;
     }
-  if (_M_pathname.length() == 1 && _M_pathname[0] == preferred_separator)
-    {
-      _M_cmpts.type(_Type::_Root_dir);
-      return;
-    }
 
   _Parser parser(_M_pathname);
 
@@ -1907,10 +1903,9 @@ path::_M_split_cmpts()
 	  _M_cmpts.type(_Type::_Multi);
 	  _M_cmpts.reserve(_M_cmpts.size() + buf.size());
 	  auto output = _M_cmpts._M_impl->end();
-	  for (auto& c : buf)
+	  for (const auto& c : buf)
 	    {
-	      auto pos = c.str.data() - _M_pathname.data();
-	      ::new(output++) _Cmpt(c.str, c.type, pos);
+	      ::new(output++) _Cmpt(c.str, c.type, parser.offset(c));
 	      ++_M_cmpts._M_impl->_M_size;
 	    }
 	  next = buf.begin();
@@ -1930,9 +1925,8 @@ path::_M_split_cmpts()
       auto output = _M_cmpts._M_impl->end();
       for (int i = 0; i < n; ++i)
 	{
-	  auto c = buf[i];
-	  auto pos = c.str.data() - _M_pathname.data();
-	  ::new(output++) _Cmpt(c.str, c.type, pos);
+	  const auto& c = buf[i];
+	  ::new(output++) _Cmpt(c.str, c.type, parser.offset(c));
 	  ++_M_cmpts._M_impl->_M_size;
 	}
     }
@@ -1949,11 +1943,7 @@ path::_S_convert_loc(const char* __first, const char* __last,
     _GLIBCXX_THROW_OR_ABORT(filesystem_error(
 	  "Cannot convert character sequence",
 	  std::make_error_code(errc::illegal_byte_sequence)));
-#ifdef _GLIBCXX_FILESYSTEM_IS_WINDOWS
-  return __ws;
-#else
-  return _Cvt<wchar_t>::_S_convert(__ws.data(), __ws.data() + __ws.size());
-#endif
+  return _S_convert(std::move(__ws));
 #else
   return {__first, __last};
 #endif

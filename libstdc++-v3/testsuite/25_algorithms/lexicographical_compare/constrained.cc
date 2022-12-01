@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -19,6 +19,7 @@
 // { dg-do run { target c++2a } }
 
 #include <algorithm>
+#include <functional>
 #include <testsuite_hooks.h>
 #include <testsuite_iterators.h>
 
@@ -136,7 +137,7 @@ test03()
       VERIFY( !ranges::lexicographical_compare(cy.begin(), cy.end(),
 					       cz.begin(), cz.end()) );
 
-      std::vector<int> vx(x, x+5), vy(y, y+5);
+      std::vector<int> vx(x, x+5), vy(y, y+4);
       VERIFY( ranges::lexicographical_compare(vx, vy) );
       VERIFY( !ranges::lexicographical_compare(vx, vy, ranges::greater{}) );
       VERIFY( !ranges::lexicographical_compare(vy, vx) );

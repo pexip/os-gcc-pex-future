@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2020 Free Software Foundation, Inc.
+// Copyright (C) 2019-2022 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
 
 constexpr bool
 test()
@@ -31,7 +32,10 @@ test()
   const auto out5 = std::binary_search(ca0.begin(), ca0.end(), 5,
 				       std::less<int>());
 
-  return true;
+  const auto out6 = std::binary_search(ca0.begin(), ca0.end(), 4.5,
+				       std::less<>());
+
+  return out4 && out5 && !out6;
 }
 
 static_assert(test());
