@@ -3,8 +3,9 @@ gcc-pex-future (12.2.0-0pexip1) pexip; urgency=medium
   * Switch to using gcc-12.2.0
   * Build for arm64 too
   * Remove old patche 01-remove-format-diag, no longer needed.
+  * Disable gcov for now, it doesn't link with our config
 
- -- Steve McIntyre <steve.mcintyre@pexip.com>  Thu, 01 Dec 2022 15:14:41 +0000
+ -- Steve McIntyre <steve.mcintyre@pexip.com>  Fri, 02 Dec 2022 11:48:42 +0000
 
 gcc-pex-future (10.2.0-0pexip2) pexip; urgency=medium
 

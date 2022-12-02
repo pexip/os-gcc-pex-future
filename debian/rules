@@ -12,6 +12,8 @@ confflags += --enable-languages=c,c++,lto
 confflags += --enable-default-pie
 # Allow us to build using an older compiler, argh
 confflags += --disable-build-format-warnings
+# gcov fails to link in this config, yay. Just disable it for now.
+confflags += --disable-gcov
 
 # Reset all of these - the default package-build environment sets
 # -Wformat-security etc. which breaks some of the build :-/
