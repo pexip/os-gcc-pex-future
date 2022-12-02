@@ -4,8 +4,8 @@ Priority: optional
 Maintainer: Pexip AS <packaging@pexip.com>
 Standards-Version: 4.3.0
 Build-Depends: debhelper (>= 9),
- libc6-dev-i386,
- libc6-dev-x32,
+ libc6-dev-i386 [amd64],
+ libc6-dev-x32 [amd64],
  libc6-dbg,
  binutils,
  m4,
@@ -35,10 +35,10 @@ Package: gcc-pex-future
 Architecture: amd64 arm64
 Depends: ${misc:Depends},
  gcc-multilib,
- lib32stdc++6,
+ lib32stdc++6 [amd64],
  libc6,
  libgcc1,
- lib32gcc1,
+ lib32gcc1 [amd64],
 Description: Simple packaged version of a future gcc
  Simple packaged version of a future gcc version to live in
  /opt/gcc-future, ready for us to use with CI in older releases.
