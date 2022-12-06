@@ -28,6 +28,7 @@ Build-Depends: debhelper (>= 9),
  libmpc-dev (>= 1.0),
  libmpfr-dev (>= 3.0.0-9~),
  libgmp-dev (>= 2:5.0.1~),
+ libisl-dev,
 Vcs-Browser: https://github.com/pexip/os-gcc-pex-future/
 Vcs-Git: https://github.com/pexip/os-gcc-pex-future.git
 

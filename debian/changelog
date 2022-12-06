@@ -6,6 +6,7 @@ gcc-pex-future (12.2.0-0pexip1) pexip; urgency=medium
   * Disable gcov for now, it doesn't link with our config
   * Enable arm64
   * Fix up build-deps and deps for arm64
+  * Tweak build-deps
 
  -- Steve McIntyre <steve.mcintyre@pexip.com>  Fri, 02 Dec 2022 11:48:42 +0000
 
