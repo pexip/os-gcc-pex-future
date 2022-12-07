@@ -33,7 +33,7 @@ Vcs-Browser: https://github.com/pexip/os-gcc-pex-future/
 Vcs-Git: https://github.com/pexip/os-gcc-pex-future.git
 
 Package: gcc-pex-future
-Architecture: amd64 arm64
+Architecture: amd64
 Depends: ${misc:Depends},
  gcc-multilib,
  lib32stdc++6 [amd64],
