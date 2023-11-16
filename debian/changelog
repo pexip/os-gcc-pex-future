@@ -1,3 +1,9 @@
+gcc-pex-future (12.2.0-0pexip3) pexip-bookworm; urgency=medium
+
+  * Initial bookworm build
+
+ -- Mark Hymers <mark.hymers@pexip.com>  Thu, 16 Nov 2023 09:59:46 +0000
+
 gcc-pex-future (12.2.0-0pexip2) pexip; urgency=medium
 
   * Remove dependency on lib32gcc1, it's gone away
