@@ -1,3 +1,10 @@
+gcc-pex-future (14.3.0-0+pexip24u1) pexip; urgency=medium
+
+  * Switch to using gcc-14.3.0
+  * Tweak build-deps
+
+ -- Steve McIntyre <steve.mcintyre@pexip.com>  Tue, 05 Aug 2025 17:21:59 +0100
+
 gcc-pex-future (12.2.0-0+pexip24u5) pexip-bookworm; urgency=medium
 
   * New versioning scheme
