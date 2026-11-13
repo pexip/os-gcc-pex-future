@@ -6,7 +6,7 @@
 --                                                                          --
 --                                  B o d y                                 --
 --                                                                          --
---         Copyright (C) 1992-2024, Free Software Foundation, Inc.          --
+--         Copyright (C) 1992-2026, Free Software Foundation, Inc.          --
 --                                                                          --
 -- GNARL is free software; you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -208,7 +208,9 @@ package body System.Interrupts is
      (Vector    : Interrupt_Vector;
       Handler   : Interrupt_Handler;
       Parameter : System.Address := System.Null_Address) return STATUS;
-   --  Profile must match VxWorks intConnect()
+   --  Profile must match VxWorks intConnect() for VxWorks prior to 7.
+   --  VxWorks 7 does not support intConnect(). The Vxbus subsystem
+   --  should be used instead.
 
    Interrupt_Connect : Interrupt_Connector :=
      System.OS_Interface.Interrupt_Connect'Access;
@@ -864,20 +866,22 @@ package body System.Interrupts is
          --  We don't check anything if Restoration is True, since we may be
          --  detaching a static handler to restore a dynamic one.
 
-         if not Restoration and then not Static
-           and then (User_Handler (Interrupt).Static
-
+         if not Restoration and then not Static then
             --  Trying to overwrite a static Interrupt Handler with a dynamic
             --  Handler
+            if User_Handler (Interrupt).Static then
+               raise Program_Error
+                 with
+                   "trying to overwrite a static Interrupt Handler with a "
+                   & "dynamic handler";
+            end if;
 
-            --  The new handler is not specified as an Interrupt Handler by a
-            --  pragma.
-
-           or else not Is_Registered (New_Handler))
-         then
-            raise Program_Error with
-               "trying to overwrite a static interrupt handler with a "
-               & "dynamic handler";
+            --  The new handler is not specified as an interrupt handler by an
+            --  aspect (see the second sentence of RM C.3.2 (17/3)).
+            if not Is_Registered (New_Handler) then
+               raise Program_Error
+                 with "trying to attach procedure without Interrupt_Handler";
+            end if;
          end if;
 
          --  Save the old handler

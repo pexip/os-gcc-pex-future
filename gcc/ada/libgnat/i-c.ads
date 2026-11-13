@@ -24,6 +24,9 @@ pragma Assertion_Policy (Pre            => Ignore,
                          Contract_Cases => Ignore,
                          Ghost          => Ignore);
 
+--  Pre/postconditions use a fully qualified name for the standard "+" operator
+--  in order to work around an internal limitation of the compiler.
+
 with System;
 with System.Parameters;
 
@@ -130,6 +133,7 @@ is
    function C_Length_Ghost (Item : char_array) return size_t
    with
      Ghost,
+     Import,
      Pre  => Is_Nul_Terminated (Item),
      Post => C_Length_Ghost'Result <= Item'Last - Item'First
        and then Item (Item'First + C_Length_Ghost'Result) = nul
@@ -146,7 +150,7 @@ is
      Pre  => not (Append_Nul = False and then Item'Length = 0),
      Post => To_C'Result'First = 0
        and then To_C'Result'Length =
-         (if Append_Nul then Item'Length + 1 else Item'Length)
+         (if Append_Nul then Standard."+" (Item'Length, 1) else Item'Length)
        and then (for all J in Item'Range =>
                    To_C'Result (size_t (J - Item'First)) = To_C (Item (J)))
        and then (if Append_Nul then To_C'Result (To_C'Result'Last) = nul);
@@ -190,7 +194,7 @@ is
    with
      Relaxed_Initialization => Target,
      Pre  => Target'Length >=
-       (if Append_Nul then Item'Length + 1 else Item'Length),
+       (if Append_Nul then Standard."+" (Item'Length, 1) else Item'Length),
      Post => Count = (if Append_Nul then Item'Length + 1 else Item'Length)
        and then
          (if Count /= 0 then
@@ -271,6 +275,7 @@ is
    function C_Length_Ghost (Item : wchar_array) return size_t
    with
      Ghost,
+     Import,
      Pre  => Is_Nul_Terminated (Item),
      Post => C_Length_Ghost'Result <= Item'Last - Item'First
        and then Item (Item'First + C_Length_Ghost'Result) = wide_nul
@@ -287,7 +292,7 @@ is
      Pre  => not (Append_Nul = False and then Item'Length = 0),
      Post => To_C'Result'First = 0
        and then To_C'Result'Length =
-         (if Append_Nul then Item'Length + 1 else Item'Length)
+         (if Append_Nul then Standard."+" (Item'Length, 1) else Item'Length)
        and then (for all J in Item'Range =>
                    To_C'Result (size_t (J - Item'First)) = To_C (Item (J)))
        and then (if Append_Nul then To_C'Result (To_C'Result'Last) = wide_nul);
@@ -316,7 +321,7 @@ is
    with
      Relaxed_Initialization => Target,
      Pre  => Target'Length >=
-       (if Append_Nul then Item'Length + 1 else Item'Length),
+       (if Append_Nul then Standard."+" (Item'Length, 1) else Item'Length),
      Post => Count = (if Append_Nul then Item'Length + 1 else Item'Length)
        and then
          (if Count /= 0 then
@@ -392,6 +397,7 @@ is
    function C_Length_Ghost (Item : char16_array) return size_t
    with
      Ghost,
+     Import,
      Pre  => Is_Nul_Terminated (Item),
      Post => C_Length_Ghost'Result <= Item'Last - Item'First
        and then Item (Item'First + C_Length_Ghost'Result) = char16_nul
@@ -408,7 +414,7 @@ is
      Pre  => not (Append_Nul = False and then Item'Length = 0),
      Post => To_C'Result'First = 0
        and then To_C'Result'Length =
-         (if Append_Nul then Item'Length + 1 else Item'Length)
+         (if Append_Nul then Standard."+" (Item'Length, 1) else Item'Length)
        and then (for all J in Item'Range =>
                    To_C'Result (size_t (J - Item'First)) = To_C (Item (J)))
        and then
@@ -440,7 +446,7 @@ is
    with
      Relaxed_Initialization => Target,
      Pre  => Target'Length >=
-       (if Append_Nul then Item'Length + 1 else Item'Length),
+       (if Append_Nul then Standard."+" (Item'Length, 1) else Item'Length),
      Post => Count = (if Append_Nul then Item'Length + 1 else Item'Length)
        and then
          (if Count /= 0 then
@@ -507,6 +513,7 @@ is
    function C_Length_Ghost (Item : char32_array) return size_t
    with
      Ghost,
+     Import,
      Pre  => Is_Nul_Terminated (Item),
      Post => C_Length_Ghost'Result <= Item'Last - Item'First
        and then Item (Item'First + C_Length_Ghost'Result) = char32_nul
@@ -528,7 +535,7 @@ is
      Pre  => not (Append_Nul = False and then Item'Length = 0),
      Post => To_C'Result'First = 0
        and then To_C'Result'Length =
-         (if Append_Nul then Item'Length + 1 else Item'Length)
+         (if Append_Nul then Standard."+" (Item'Length, 1) else Item'Length)
        and then (for all J in Item'Range =>
                    To_C'Result (size_t (J - Item'First)) = To_C (Item (J)))
        and then
@@ -560,7 +567,7 @@ is
    with
      Relaxed_Initialization => Target,
      Pre  => Target'Length >=
-       (if Append_Nul then Item'Length + 1 else Item'Length),
+       (if Append_Nul then Standard."+" (Item'Length, 1) else Item'Length),
      Post => Count = (if Append_Nul then Item'Length + 1 else Item'Length)
        and then
          (if Count /= 0 then

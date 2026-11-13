@@ -1,5 +1,5 @@
 // { dg-do run }
-// { dg-additional-options "-fstack-protector-strong" }
+// { dg-additional-options "-fstack-protector-strong -fno-late-combine-instructions" }
 // { dg-require-effective-target fstack_protector }
 // { dg-require-effective-target c++11 }
 

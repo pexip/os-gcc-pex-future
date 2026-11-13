@@ -1,4 +1,5 @@
 /* { dg-additional-options "-Wno-analyzer-too-complex" } */
+/* { dg-skip-if "requires hosted libstdc++ for stdlib malloc" { ! hostedlib } } */
 
 #include <stdlib.h>
 
@@ -14,14 +15,14 @@ test (int n) {
 
   for (i = 0; i < n; i++) {
     if ((arr[i] = (struct foo *)malloc(sizeof(struct foo))) == NULL) {
-      for (; i >= 0; i++) { /* { dg-warning "infinite loop" } */
+      for (; i >= 0; i++) { /* { dg-warning "infinite loop" "" { xfail *-*-* } } */
 	/* This loop is in the wrong direction, so not technically an
 	   infinite loop ("i" will eventually wrap around), but the
 	   analyzer's condition handling treats the overflow as such.
 	   In any case, the code is suspect and warrants a warning.  */
 	free(arr[i]); /* { dg-bogus "double-'free'" } */
       }
-      free(arr); /* { dg-warning "leak" } */
+      free(arr); /* { dg-warning "leak" "" { xfail *-*-* } } */
       return NULL;
     }
   }

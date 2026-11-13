@@ -1,3 +1,4 @@
+/* { dg-additional-options "-fno-exceptions" } */
 typedef unsigned int __u32;
 __extension__ typedef __signed__ long long __s64;
 __extension__ typedef unsigned long long __u64;
@@ -5,9 +6,6 @@ typedef __u32 u32;
 typedef __s64 s64;
 typedef __u64 u64;
 typedef long long __kernel_time64_t;
-#ifndef __cplusplus
-typedef _Bool bool;
-#endif
 typedef __s64 time64_t;
 struct __kernel_timespec {
  __kernel_time64_t tv_sec;

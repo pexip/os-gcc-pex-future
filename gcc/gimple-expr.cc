@@ -1,6 +1,6 @@
 /* Gimple decl, type, and expression support functions.
 
-   Copyright (C) 2007-2024 Free Software Foundation, Inc.
+   Copyright (C) 2007-2026 Free Software Foundation, Inc.
    Contributed by Aldy Hernandez <aldyh@redhat.com>
 
 This file is part of GCC.
@@ -841,6 +841,11 @@ is_gimple_val (tree t)
       && !is_gimple_reg (t))
     return false;
 
+  /* These eventually expand into constants, so treat them like that.  */
+  if (TREE_CODE (t) == OMP_NEXT_VARIANT
+      || TREE_CODE (t) == OMP_TARGET_DEVICE_MATCHES)
+    return true;
+
   return (is_gimple_variable (t) || is_gimple_min_invariant (t));
 }
 
@@ -860,7 +865,7 @@ is_gimple_asm_val (tree t)
 bool
 is_gimple_min_lval (tree t)
 {
-  if (!(t = CONST_CAST_TREE (strip_invariant_refs (t))))
+  if (!(t = const_cast<tree> (strip_invariant_refs (t))))
     return false;
   return (is_gimple_id (t) || TREE_CODE (t) == MEM_REF);
 }

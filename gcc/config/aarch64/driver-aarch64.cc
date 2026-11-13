@@ -1,5 +1,5 @@
 /* Native CPU detection for aarch64.
-   Copyright (C) 2015-2024 Free Software Foundation, Inc.
+   Copyright (C) 2015-2026 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -63,7 +63,7 @@ struct aarch64_core_data
 #define DEFAULT_CPU "generic-armv8-a"
 
 #define AARCH64_CORE(CORE_NAME, CORE_IDENT, SCHED, ARCH, FLAGS, COSTS, IMP, PART, VARIANT) \
-  { CORE_NAME, #ARCH, IMP, PART, VARIANT, feature_deps::cpu_##CORE_IDENT },
+  { CORE_NAME, #ARCH, IMP, PART, unsigned(VARIANT), feature_deps::cpu_##CORE_IDENT },
 
 static CONSTEXPR const aarch64_core_data aarch64_cpu_data[] =
 {
@@ -270,9 +270,9 @@ host_detect_local_cpu (int argc, const char **argv)
   bool cpu = false;
   unsigned int i = 0;
   unsigned char imp = INVALID_IMP;
-  unsigned int cores[2] = { INVALID_CORE, INVALID_CORE };
+  unsigned int cores[3] = { INVALID_CORE, INVALID_CORE, INVALID_CORE };
   unsigned int n_cores = 0;
-  unsigned int variants[2] = { ALL_VARIANTS, ALL_VARIANTS };
+  unsigned int variants[3] = { ALL_VARIANTS, ALL_VARIANTS, ALL_VARIANTS };
   unsigned int n_variants = 0;
   bool processed_exts = false;
   aarch64_feature_flags extension_flags = 0;
@@ -328,7 +328,7 @@ host_detect_local_cpu (int argc, const char **argv)
 	  unsigned cvariant = parse_field (buf);
 	  if (!contains_core_p (variants, cvariant))
 	    {
-              if (n_variants == 2)
+	      if (n_variants == 3)
                 goto not_found;
 
               variants[n_variants++] = cvariant;
@@ -340,7 +340,7 @@ host_detect_local_cpu (int argc, const char **argv)
 	  unsigned ccore = parse_field (buf);
 	  if (!contains_core_p (cores, ccore))
 	    {
-	      if (n_cores == 2)
+	      if (n_cores == 3)
 		goto not_found;
 
 	      cores[n_cores++] = ccore;
@@ -368,18 +368,30 @@ host_detect_local_cpu (int argc, const char **argv)
 		  continue;
 		}
 
+	      /* This may be a multi-token feature string.  We need to match
+		 all parts in one of the "|" separated sublists.  */
 	      bool enabled = true;
+	      size_t cur = 0;
+	      while (cur < val.length ())
+		{
+		  size_t end = val.find_first_of (" ", cur);
+		  if (end == std::string::npos)
+		    end = val.length ();
+		  std::string word = val.substr (cur, end - cur);
+		  cur = end + 1;
 
-	      /* This may be a multi-token feature string.  We need
-		 to match all parts, which could be in any order.  */
-	      std::set<std::string> tokens;
-	      split_words (val, tokens);
-	      std::set<std::string>::iterator it;
-
-	      /* Iterate till the first feature isn't found or all of them
-		 are found.  */
-	      for (it = tokens.begin (); enabled && it != tokens.end (); ++it)
-		enabled = enabled && features.count (*it);
+		  if (word == "|")
+		    {
+		      /* If we've matched everything in the current sublist, we
+			 can stop now.  */
+		      if (enabled)
+			break;
+		      /* Otherwise, start again with the next sublist.  */
+		      enabled = true;
+		      continue;
+		    }
+		  enabled = enabled && features.count (word);
+		}
 
 	      if (enabled)
 		extension_flags |= aarch64_extensions[i].flag;
@@ -397,10 +409,14 @@ host_detect_local_cpu (int argc, const char **argv)
   /* Weird cpuinfo format that we don't know how to handle.  */
   if (n_cores == 0
       || n_cores > 2
-      || (n_cores == 1 && n_variants != 1)
       || imp == INVALID_IMP
       || !processed_exts)
     goto not_found;
+
+  /* If we have one core type but multiple variants, consider
+     that as one variant with ALL_VARIANTS instead.  */
+  if (n_cores == 1 && n_variants != 1)
+    variants[0] = ALL_VARIANTS;
 
   /* Simple case, one core type or just looking for the arch. */
   if (n_cores == 1 || arch)
@@ -500,4 +516,3 @@ not_found:
     return NULL;
   }
 }
-

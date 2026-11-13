@@ -1,5 +1,5 @@
 /* Loop header copying on trees.
-   Copyright (C) 2004-2024 Free Software Foundation, Inc.
+   Copyright (C) 2004-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -115,13 +115,13 @@ loop_static_stmt_p (class loop *loop,
 		    gimple *stmt)
 {
   tree type = gimple_range_type (stmt);
-  if (!type || !Value_Range::supports_type_p (type))
+  if (!type || !value_range::supports_type_p (type))
     return false;
 
   if (!query)
     query = get_range_query (loop, gimple_bb (stmt), ranger);
 
-  Value_Range r (gimple_range_type (stmt));
+  value_range r (gimple_range_type (stmt));
   if (!query->range_of_stmt (r, stmt))
     return false;
   return r.singleton_p ();
@@ -185,19 +185,23 @@ enum ch_decision
   /* We want to copy.  */
   ch_win,
   /* We want to copy and we will eliminate loop exit.  */
-  ch_win_invariant_exit
+  ch_win_invariant_exit,
+  
 };
 
 /* Check whether we should duplicate HEADER of LOOP.  At most *LIMIT
    instructions should be duplicated, limit is decreased by the actual
-   amount.  */
+   amount.  In the case of *CANBE_NEVEREXECUTED, if there is a exit edge
+   of the HEADER that is most likely never executed then consider that
+   as invariant and continue. Set *CANBE_NEVEREXECUTED to false otherwise.  */
 
 static ch_decision
 should_duplicate_loop_header_p (basic_block header, class loop *loop,
 				gimple_ranger *ranger,
 				int *limit,
 				hash_set <edge> *invariant_exits,
-				hash_set <edge> *static_exits)
+				hash_set <edge> *static_exits,
+				bool *canbe_neverexecuted)
 {
   gimple_stmt_iterator bsi;
 
@@ -349,7 +353,7 @@ should_duplicate_loop_header_p (basic_block header, class loop *loop,
 		  /* Duplicating loop header with combned conditional will
 		     remove this statement in each copy.  But we account for
 		     that later when seeing that condition.
-		     
+
 		     Note that this may be overly optimistic for bit operations
 		     where the static parameter may still result in non-trivial
 		     bit operation.  */
@@ -460,6 +464,28 @@ should_duplicate_loop_header_p (basic_block header, class loop *loop,
 	}
       return ch_win_invariant_exit;
     }
+  if (!static_exit && *canbe_neverexecuted)
+    {
+      /* See if one of the edges are an exit edge that is probable
+         never executed.
+	 If so treat it as invariant exit win.  */
+      edge e;
+      edge_iterator ei;
+      bool hasone = false;
+      FOR_EACH_EDGE (e, ei, header->succs)
+	if (loop_exit_edge_p (loop, e)
+	    && probably_never_executed_edge_p (cfun, e))
+	  {
+	    hasone = true;
+	    if (dump_file && (dump_flags & TDF_DETAILS))
+	      fprintf (dump_file,
+		       "    `never executed` exit %i->%i\n",
+		       e->src->index, e->dest->index);
+	  }
+      if (hasone)
+	return ch_win_invariant_exit;
+    }
+  *canbe_neverexecuted = false;
 
   /* If the static exit fully optimize out, it is win to "duplicate"
      it.
@@ -839,17 +865,19 @@ ch_base::copy_headers (function *fun)
 	 copied.  TODO -- handle while (a || b) - like cases, by not requiring
 	 the header to have just a single successor and copying up to
 	 postdominator.  */
-      int nheaders = 0;
-      int last_win_nheaders = 0;
+      unsigned int nheaders = 0;
+      unsigned int last_win_nheaders = 0;
       bool last_win_invariant_exit = false;
       ch_decision ret;
       auto_vec <ch_decision, 32> decision;
       hash_set <edge> *invariant_exits = new hash_set <edge>;
       hash_set <edge> *static_exits = new hash_set <edge>;
+      bool canbe_neverexecuted = true;
       while ((ret = should_duplicate_loop_header_p (header, loop, ranger,
 						    &remaining_limit,
 						    invariant_exits,
-						    static_exits))
+						    static_exits,
+						    &canbe_neverexecuted))
 	     != ch_impossible)
 	{
 	  nheaders++;
@@ -893,7 +921,7 @@ ch_base::copy_headers (function *fun)
 	}
       /* "Duplicate" all BBs with zero cost following last basic blocks we
 	 decided to copy.  */
-      while (last_win_nheaders < (int)decision.length ()
+      while (last_win_nheaders < decision.length ()
 	     && decision[last_win_nheaders] == ch_possible_zero_cost)
 	{
 	  if (dump_file && (dump_flags & TDF_DETAILS))

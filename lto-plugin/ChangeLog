@@ -1,33 +1,49 @@
-2025-05-23  Release Manager
+2026-08-07  Release Manager
 
-	* GCC 14.3.0 released.
+	* GCC 16.2.0 released.
 
-2024-09-04  H.J. Lu  <hjl.tools@gmail.com>
+2026-04-30  Release Manager
 
-	Backported from master:
-	2024-08-23  H.J. Lu  <hjl.tools@gmail.com>
+	* GCC 16.1.0 released.
+
+2025-12-29  Rainer Orth  <ro@CeBiTec.Uni-Bielefeld.DE>
+
+	* configure: Regenerate.
+
+2025-11-03  Sam James  <sam@gentoo.org>
+
+	* configure: Regenerate.
+
+2025-10-05  Sam James  <sam@gentoo.org>
+
+	* Makefile.in: Regenerate.
+	* aclocal.m4: Regenerate.
+	* configure: Regenerate.
+
+2025-03-06  Michal Jires  <mjires@suse.cz>
+
+	* lto-plugin.c (cleanup_handler): Keep only files in ltrans
+	cache.
+
+2025-01-15  Michal Jires  <mjires@suse.cz>
+
+	PR lto/118238
+	* lto-plugin.c (cleanup_handler):
+	Keep output_files when using Incremental LTO.
+	(onload): Detect Incremental LTO.
+
+2024-08-23  H.J. Lu  <hjl.tools@gmail.com>
 
 	PR lto/116361
 	* lto-plugin.c (claim_file_handler_v2): Don't check obj.found
 	for the offload section.
 
-2024-09-04  H.J. Lu  <hjl.tools@gmail.com>
-
-	Backported from master:
-	2024-08-22  H.J. Lu  <hjl.tools@gmail.com>
+2024-08-22  H.J. Lu  <hjl.tools@gmail.com>
 
 	PR lto/116361
 	* lto-plugin.c (claim_file_handler_v2): Rename claimed to
 	can_be_claimed.  Include the LTO object only if it is known to
 	be included in link output.
-
-2024-08-01  Release Manager
-
-	* GCC 14.2.0 released.
-
-2024-05-07  Release Manager
-
-	* GCC 14.1.0 released.
 
 2023-10-22  Iain Sandoe  <iain@sandoe.co.uk>
 

@@ -1,5 +1,5 @@
 /* Classes for styling text cells (color, URLs).
-   Copyright (C) 2023-2024 Free Software Foundation, Inc.
+   Copyright (C) 2023-2026 Free Software Foundation, Inc.
    Contributed by David Malcolm <dmalcolm@redhat.com>.
 
 This file is part of GCC.
@@ -20,18 +20,16 @@ along with GCC; see the file COPYING3.  If not see
 
 #include "config.h"
 #define INCLUDE_ALGORITHM
-#define INCLUDE_MEMORY
 #define INCLUDE_VECTOR
 #include "system.h"
 #include "coretypes.h"
-#include "make-unique.h"
 #include "pretty-print.h"
 #include "intl.h"
 #include "selftest.h"
 #include "text-art/selftests.h"
 #include "text-art/types.h"
 #include "color-macros.h"
-#include "diagnostic-color.h"
+#include "diagnostics/color.h"
 
 using namespace text_art;
 
@@ -232,7 +230,7 @@ style::print_changes (pretty_printer *pp,
     {
       if (!old_style.m_url.empty ())
 	pp_end_url (pp);
-      if (pp->url_format != URL_FORMAT_NONE
+      if (pp->supports_urls_p ()
 	  && !new_style.m_url.empty ())
 	{
 	  /* Adapted from pp_begin_url, but encoding the
@@ -241,7 +239,7 @@ style::print_changes (pretty_printer *pp,
 	  pp_string (pp, "\33]8;;");
 	  for (auto ch : new_style.m_url)
 	    pp_unicode_character (pp, ch);
-	  switch (pp->url_format)
+	  switch (pp->get_url_format ())
 	    {
 	    default:
 	    case URL_FORMAT_NONE:

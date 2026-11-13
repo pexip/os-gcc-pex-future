@@ -1,5 +1,5 @@
 /* Definition of RISC-V target for GNU compiler.
-   Copyright (C) 2011-2024 Free Software Foundation, Inc.
+   Copyright (C) 2011-2026 Free Software Foundation, Inc.
    Contributed by Andrew Waterman (andrew@sifive.com).
    Based on MIPS target for GNU compiler.
 
@@ -112,7 +112,7 @@ extern bool riscv_valid_base_register_p (rtx, machine_mode, bool);
 extern enum reg_class riscv_index_reg_class ();
 extern int riscv_regno_ok_for_index_p (int);
 extern int riscv_address_insns (rtx, machine_mode, bool);
-extern int riscv_const_insns (rtx);
+extern int riscv_const_insns (rtx, bool);
 extern int riscv_split_const_insns (rtx);
 extern int riscv_load_store_insns (rtx, rtx_insn *);
 extern rtx riscv_emit_move (rtx, rtx);
@@ -133,6 +133,18 @@ extern void riscv_asm_output_external (FILE *, const tree, const char *);
 extern bool
 riscv_zcmp_valid_stack_adj_bytes_p (HOST_WIDE_INT, int);
 extern void riscv_legitimize_poly_move (machine_mode, rtx, rtx, rtx);
+extern void riscv_expand_usadd (rtx, rtx, rtx);
+extern void riscv_expand_ssadd (rtx, rtx, rtx);
+extern void riscv_expand_ussub (rtx, rtx, rtx);
+extern void riscv_expand_sssub (rtx, rtx, rtx);
+extern void riscv_expand_usmul (rtx, rtx, rtx);
+extern void riscv_expand_ustrunc (rtx, rtx);
+extern void riscv_expand_sstrunc (rtx, rtx);
+extern int riscv_register_move_cost (machine_mode, reg_class_t, reg_class_t);
+extern bool synthesize_ior_xor (rtx_code, rtx [3]);
+extern bool synthesize_and (rtx [3]);
+extern bool synthesize_add (rtx [3]);
+extern bool synthesize_add_extended (rtx [3]);
 
 #ifdef RTX_CODE
 extern void riscv_expand_int_scc (rtx, enum rtx_code, rtx, rtx, bool *invert_ptr = 0);
@@ -157,14 +169,21 @@ extern rtx riscv_gen_gpr_save_insn (struct riscv_frame_info *);
 extern bool riscv_gpr_save_operation_p (rtx);
 extern void riscv_reinit (void);
 extern poly_uint64 riscv_regmode_natural_size (machine_mode);
-extern bool riscv_v_ext_vector_mode_p (machine_mode);
-extern bool riscv_v_ext_tuple_mode_p (machine_mode);
-extern bool riscv_v_ext_vls_mode_p (machine_mode);
+extern bool riscv_vla_mode_p (machine_mode);
+extern bool riscv_tuple_mode_p (machine_mode);
+extern bool riscv_vls_mode_p (machine_mode);
 extern int riscv_get_v_regno_alignment (machine_mode);
 extern bool riscv_shamt_matches_mask_p (int, HOST_WIDE_INT);
 extern void riscv_subword_address (rtx, rtx *, rtx *, rtx *, rtx *);
 extern void riscv_lshift_subword (machine_mode, rtx, rtx, rtx *);
 extern enum memmodel riscv_union_memmodels (enum memmodel, enum memmodel);
+extern bool riscv_reg_frame_related (rtx);
+extern void riscv_split_sum_of_two_s12 (HOST_WIDE_INT, HOST_WIDE_INT *,
+					HOST_WIDE_INT *);
+extern bool riscv_vector_float_type_p (const_tree type);
+extern void generate_reflecting_code_using_brev (rtx *);
+extern void expand_crc_using_clmul (scalar_mode, scalar_mode, rtx *);
+extern void expand_reversed_crc_using_clmul (scalar_mode, scalar_mode, rtx *);
 
 /* Routines implemented in riscv-c.cc.  */
 void riscv_cpu_cpp_builtins (cpp_reader *);
@@ -186,9 +205,21 @@ extern bool riscv_hard_regno_rename_ok (unsigned, unsigned);
 rtl_opt_pass * make_pass_shorten_memrefs (gcc::context *ctxt);
 rtl_opt_pass * make_pass_avlprop (gcc::context *ctxt);
 rtl_opt_pass * make_pass_vsetvl (gcc::context *ctxt);
+rtl_opt_pass * make_pass_insert_landing_pad (gcc::context *ctxt);
+rtl_opt_pass * make_pass_vector_permconst (gcc::context *ctxt);
+rtl_opt_pass * make_pass_bclr_lowest_set_bit (gcc::context *ctxt);
+rtl_opt_pass * make_pass_combine_popretz (gcc::context *ctxt);
+
+/* Routines implemented in riscv-vsetvl.cc.  */
+extern bool has_vtype_op (rtx_insn *);
+extern bool mask_agnostic_p (rtx_insn *);
+extern rtx get_avl (rtx_insn *);
+extern bool vsetvl_insn_p (rtx_insn *);
 
 /* Routines implemented in riscv-string.c.  */
+extern bool riscv_expand_block_compare (rtx, rtx, rtx, rtx);
 extern bool riscv_expand_block_move (rtx, rtx, rtx);
+extern bool riscv_expand_block_clear (rtx, rtx);
 
 /* Information about one CPU we know about.  */
 struct riscv_cpu_info {
@@ -218,6 +249,15 @@ struct common_vector_cost
   /* Gather/scatter vectorization cost.  */
   const int gather_load_cost;
   const int scatter_store_cost;
+
+  /* Segment load/store permute cost.  */
+  const int segment_permute_2;
+  const int segment_permute_3;
+  const int segment_permute_4;
+  const int segment_permute_5;
+  const int segment_permute_6;
+  const int segment_permute_7;
+  const int segment_permute_8;
 
   /* Cost of a vector-to-scalar operation.  */
   const int vec_to_scalar_cost;
@@ -341,7 +381,7 @@ enum insn_flags : unsigned int
   /* Means using VUNDEF for merge operand.  */
   USE_VUNDEF_MERGE_P = 1 << 5,
 
-  /* flags for tail policy and mask plicy operands.  */
+  /* flags for tail policy and mask policy operands.  */
   /* Means the tail policy is TAIL_UNDISTURBED.  */
   TU_POLICY_P = 1 << 6,
   /* Means the tail policy is default (return by get_prefer_tail_policy).  */
@@ -383,8 +423,14 @@ enum insn_flags : unsigned int
   /* Means INSN has VXRM operand and the value is VXRM_RNU.  */
   VXRM_RNU_P = 1 << 20,
 
+  /* Means INSN has VXRM operand and the value is VXRM_RNE.  */
+  VXRM_RNE_P = 1 << 21,
+
   /* Means INSN has VXRM operand and the value is VXRM_RDN.  */
-  VXRM_RDN_P = 1 << 21,
+  VXRM_RDN_P = 1 << 22,
+
+  /* Means INSN has VXRM operand and the value is VXRM_ROD.  */
+  VXRM_ROD_P = 1 << 23,
 };
 
 enum insn_type : unsigned int
@@ -446,7 +492,9 @@ enum insn_type : unsigned int
   BINARY_OP_TUMA = __MASK_OP_TUMA | BINARY_OP_P,
   BINARY_OP_FRM_DYN = BINARY_OP | FRM_DYN_P,
   BINARY_OP_VXRM_RNU = BINARY_OP | VXRM_RNU_P,
+  BINARY_OP_VXRM_RNE = BINARY_OP | VXRM_RNE_P,
   BINARY_OP_VXRM_RDN = BINARY_OP | VXRM_RDN_P,
+  BINARY_OP_VXRM_ROD = BINARY_OP | VXRM_ROD_P,
 
   /* Ternary operator. Always have real merge operand.  */
   TERNARY_OP = HAS_DEST_P | HAS_MASK_P | USE_ALL_TRUES_MASK_P | HAS_MERGE_P
@@ -476,7 +524,7 @@ enum insn_type : unsigned int
   CPOP_OP = HAS_DEST_P | HAS_MASK_P | USE_ALL_TRUES_MASK_P | UNARY_OP_P
 	    | VTYPE_MODE_FROM_OP1_P,
 
-  /* For mask instrunctions, no tail and mask policy operands.  */
+  /* For mask instructions, no tail and mask policy operands.  */
   UNARY_MASK_OP = HAS_DEST_P | HAS_MASK_P | USE_ALL_TRUES_MASK_P | HAS_MERGE_P
 		  | USE_VUNDEF_MERGE_P | UNARY_OP_P,
   BINARY_MASK_OP = HAS_DEST_P | HAS_MASK_P | USE_ALL_TRUES_MASK_P | HAS_MERGE_P
@@ -573,6 +621,7 @@ void emit_vlmax_vsetvl (machine_mode, rtx);
 void emit_hard_vlmax_vsetvl (machine_mode, rtx);
 void emit_vlmax_insn (unsigned, unsigned, rtx *);
 void emit_nonvlmax_insn (unsigned, unsigned, rtx *, rtx);
+void emit_avltype_insn (unsigned, unsigned, rtx *, avl_type, rtx = nullptr);
 void emit_vlmax_insn_lra (unsigned, unsigned, rtx *, rtx);
 enum vlmul_type get_vlmul (machine_mode);
 rtx get_vlmax_rtx (machine_mode);
@@ -603,6 +652,8 @@ enum mask_policy
 enum tail_policy get_prefer_tail_policy ();
 enum mask_policy get_prefer_mask_policy ();
 rtx get_avl_type_rtx (enum avl_type);
+opt_machine_mode get_lmul_mode (scalar_mode, int);
+opt_machine_mode get_m1_mode (machine_mode, bool = false);
 opt_machine_mode get_vector_mode (scalar_mode, poly_uint64);
 opt_machine_mode get_tuple_mode (machine_mode, unsigned int);
 bool simm5_p (rtx);
@@ -614,6 +665,7 @@ bool expand_vec_cmp_float (rtx, rtx_code, rtx, rtx, bool);
 void expand_cond_len_unop (unsigned, rtx *);
 void expand_cond_len_binop (unsigned, rtx *);
 void expand_reduction (unsigned, unsigned, unsigned, rtx *, rtx);
+void expand_mask_reduction (rtx *, rtx_code);
 void expand_vec_ceil (rtx, rtx, machine_mode, machine_mode);
 void expand_vec_floor (rtx, rtx, machine_mode, machine_mode);
 void expand_vec_nearbyint (rtx, rtx, machine_mode, machine_mode);
@@ -625,6 +677,23 @@ void expand_vec_lrint (rtx, rtx, machine_mode, machine_mode, machine_mode);
 void expand_vec_lround (rtx, rtx, machine_mode, machine_mode, machine_mode);
 void expand_vec_lceil (rtx, rtx, machine_mode, machine_mode);
 void expand_vec_lfloor (rtx, rtx, machine_mode, machine_mode);
+void expand_vec_usadd (rtx, rtx, rtx, machine_mode);
+void expand_vec_ssadd (rtx, rtx, rtx, machine_mode);
+void expand_vec_ussub (rtx, rtx, rtx, machine_mode);
+void expand_vec_sssub (rtx, rtx, rtx, machine_mode);
+void expand_vec_double_ustrunc (rtx, rtx, machine_mode);
+void expand_vec_double_sstrunc (rtx, rtx, machine_mode);
+void expand_vec_quad_ustrunc (rtx, rtx, machine_mode, machine_mode);
+void expand_vec_quad_sstrunc (rtx, rtx, machine_mode, machine_mode);
+void expand_vec_oct_ustrunc (rtx, rtx, machine_mode, machine_mode,
+			     machine_mode);
+void expand_vec_oct_sstrunc (rtx, rtx, machine_mode, machine_mode,
+			     machine_mode);
+void expand_vx_binary_vec_dup_vec (rtx, rtx, rtx, rtx_code, machine_mode);
+void expand_vx_binary_vec_vec_dup (rtx, rtx, rtx, rtx_code, machine_mode);
+void expand_vx_binary_vxrm_vec_vec_dup (rtx, rtx, rtx, int, int, machine_mode);
+void expand_vx_binary_vxrm_vec_dup_vec (rtx, rtx, rtx, int, int, machine_mode);
+void expand_vx_cmp_vec_dup_vec (rtx, rtx, rtx, rtx_code, machine_mode);
 #endif
 bool sew64_scalar_helper (rtx *, rtx *, rtx, machine_mode,
 			  bool, void (*)(rtx *, rtx), enum avl_type);
@@ -644,10 +713,13 @@ bool slide1_sew64_helper (int, machine_mode, machine_mode,
 			  machine_mode, rtx *);
 rtx gen_avl_for_scalar_move (rtx);
 void expand_tuple_move (rtx *);
-bool expand_block_move (rtx, rtx, rtx);
+bool expand_block_move (rtx, rtx, rtx, bool);
 machine_mode preferred_simd_mode (scalar_mode);
 machine_mode get_mask_mode (machine_mode);
 void expand_vec_series (rtx, rtx, rtx, rtx = 0);
+void expand_broadcast (machine_mode, rtx *, rtx = 0);
+void expand_set_first (machine_mode, rtx *, rtx = 0);
+void expand_set_first_tu (machine_mode, rtx *, rtx = 0);
 void expand_vec_init (rtx, rtx);
 void expand_vec_perm (rtx, rtx, rtx, rtx);
 void expand_select_vl (rtx *);
@@ -664,6 +736,10 @@ void expand_popcount (rtx *);
 void expand_rawmemchr (machine_mode, rtx, rtx, rtx, bool = false);
 bool expand_strcmp (rtx, rtx, rtx, rtx, unsigned HOST_WIDE_INT, bool);
 void emit_vec_extract (rtx, rtx, rtx);
+bool expand_vec_setmem (rtx, rtx, rtx);
+bool expand_vec_cmpmem (rtx, rtx, rtx, rtx);
+void expand_strided_load (machine_mode, rtx *);
+void expand_strided_store (machine_mode, rtx *);
 
 /* Rounding mode bitfield for fixed point VXRM.  */
 enum fixed_point_rounding_mode
@@ -699,7 +775,7 @@ opt_machine_mode vectorize_related_mode (machine_mode, scalar_mode,
 unsigned int autovectorize_vector_modes (vec<machine_mode> *, bool);
 bool cmp_lmul_le_one (machine_mode);
 bool cmp_lmul_gt_one (machine_mode);
-bool vls_mode_valid_p (machine_mode);
+bool vls_mode_valid_p (machine_mode, bool allow_up_to_lmul_8 = true);
 bool vlmax_avl_type_p (rtx_insn *);
 bool has_vl_op (rtx_insn *);
 bool tail_agnostic_p (rtx_insn *);
@@ -710,11 +786,13 @@ uint8_t get_sew (rtx_insn *);
 enum vlmul_type get_vlmul (rtx_insn *);
 int count_regno_occurrences (rtx_insn *, unsigned int);
 bool imm_avl_p (machine_mode);
-bool can_be_broadcasted_p (rtx);
+bool can_be_broadcast_p (rtx);
+bool strided_broadcast_p (rtx);
 bool gather_scatter_valid_offset_p (machine_mode);
 HOST_WIDE_INT estimated_poly_value (poly_int64, unsigned int);
 bool whole_reg_to_reg_move_p (rtx *, machine_mode, int);
 bool splat_to_scalar_move_p (rtx *);
+rtx get_fp_rounding_coefficient (machine_mode);
 }
 
 /* We classify builtin types into two classes:
@@ -762,13 +840,27 @@ extern const char *th_output_move (rtx, rtx);
 extern bool th_print_operand_address (FILE *, machine_mode, rtx);
 #endif
 
+extern bool strided_load_broadcast_p (void);
+extern bool riscv_prefer_agnostic_p (void);
 extern bool riscv_use_divmod_expander (void);
-void riscv_init_cumulative_args (CUMULATIVE_ARGS *, tree, rtx, tree, int);
+void riscv_init_cumulative_args (CUMULATIVE_ARGS *, const_tree,
+				 rtx, tree, int, bool);
 extern bool
 riscv_option_valid_attribute_p (tree, tree, tree, int);
+extern bool
+riscv_option_valid_version_attribute_p (tree, tree, tree, int);
+extern bool
+riscv_process_target_attr_for_pragma (tree);
+extern bool
+riscv_process_target_version_attr (tree, location_t *);
+extern bool
+riscv_process_target_version_str (string_slice, location_t *);
 extern void
 riscv_override_options_internal (struct gcc_options *);
 extern void riscv_option_override (void);
+extern void riscv_reset_previous_fndecl (void);
+extern rtx riscv_prefetch_cookie (rtx, rtx);
+extern bool riscv_prefetch_offset_address_p (rtx, machine_mode);
 
 struct riscv_tune_param;
 /* Information about one micro-arch we know about.  */
@@ -786,6 +878,10 @@ struct riscv_tune_info {
 const struct riscv_tune_info *
 riscv_parse_tune (const char *, bool);
 const cpu_vector_cost *get_vector_costs ();
+int get_gr2vr_cost ();
+int get_vr2gr_cost ();
+int get_fr2vr_cost ();
+int get_vr2fr_cost ();
 
 enum
 {

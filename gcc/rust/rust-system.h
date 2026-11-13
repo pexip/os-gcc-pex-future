@@ -1,5 +1,5 @@
 // rust-system.h -- Rust frontend inclusion of gcc header files   -*- C++ -*-
-// Copyright (C) 2009-2024 Free Software Foundation, Inc.
+// Copyright (C) 2009-2026 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -36,6 +36,8 @@
 #include <map>
 #include <set>
 #include <vector>
+#include <queue>
+#include <stack>
 #include <sstream>
 #include <string>
 #include <deque>
@@ -45,6 +47,9 @@
 #include <fstream>
 #include <array>
 #include <algorithm>
+#include <stack>
+#include <limits>
+#include <numeric>
 
 // Rust frontend requires C++11 minimum, so will have unordered_map and set
 #include <unordered_map>
@@ -84,10 +89,8 @@ constexpr static const char *file_separator = "/";
  */
 #define rust_unreachable() (fancy_abort (__FILE__, __LINE__, __FUNCTION__))
 
-extern void
-rust_preserve_from_gc (tree t);
+extern void rust_preserve_from_gc (tree t);
 
-extern const char *
-rust_localize_identifier (const char *ident);
+extern const char *rust_localize_identifier (const char *ident);
 
 #endif // !defined(RUST_SYSTEM_H)

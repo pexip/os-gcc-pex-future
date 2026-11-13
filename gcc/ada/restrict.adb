@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2026, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -25,7 +25,6 @@
 
 with Atree;          use Atree;
 with Casing;         use Casing;
-with Einfo;          use Einfo;
 with Einfo.Entities; use Einfo.Entities;
 with Einfo.Utils;    use Einfo.Utils;
 with Errout;         use Errout;
@@ -34,7 +33,6 @@ with Fname;          use Fname;
 with Fname.UF;       use Fname.UF;
 with Lib;            use Lib;
 with Opt;            use Opt;
-with Sinfo;          use Sinfo;
 with Sinfo.Nodes;    use Sinfo.Nodes;
 with Sinfo.Utils;    use Sinfo.Utils;
 with Sinput;         use Sinput;
@@ -1262,7 +1260,7 @@ package body Restrict is
          --  Set as warning if warning case
 
          if Restriction_Warnings (R) then
-            Add_Str ("??");
+            Add_Str ("?*?");
          end if;
 
          --  Set main message
@@ -1704,16 +1702,16 @@ package body Restrict is
    --------------------------------
 
    procedure Violation_Of_No_Dependence (Unit : Int; N : Node_Id) is
+      Unit_Node : constant Node_Id := No_Dependences.Table (Unit).Unit;
    begin
-      Error_Msg_Node_1 := No_Dependences.Table (Unit).Unit;
-      Error_Msg_Sloc   := Sloc (Error_Msg_Node_1);
+      Error_Msg_Sloc := Sloc (Unit_Node);
 
       if No_Dependences.Table (Unit).Warn then
-         Error_Msg
-           ("?*?violation of restriction `No_Dependence '='> &`#", Sloc (N));
+         Error_Msg_NE ("?*?violation of restriction `No_Dependence '='> &`#",
+           N, Unit_Node);
       else
-         Error_Msg
-           ("|violation of restriction `No_Dependence '='> &`#", Sloc (N));
+         Error_Msg_NE ("|violation of restriction `No_Dependence '='> &`#", N,
+           Unit_Node);
       end if;
    end Violation_Of_No_Dependence;
 

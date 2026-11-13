@@ -1,5 +1,5 @@
 /* Handle exceptional things in C++.
-   Copyright (C) 1989-2024 Free Software Foundation, Inc.
+   Copyright (C) 1989-2026 Free Software Foundation, Inc.
    Contributed by Michael Tiemann <tiemann@cygnus.com>
    Rewritten by Mike Stump <mrs@cygnus.com>, based upon an
    initial re-implementation courtesy Tad Hunt.
@@ -42,6 +42,28 @@ static tree wrap_cleanups_r (tree *, int *, void *);
 static bool is_admissible_throw_operand_or_catch_parameter (tree, bool,
 							    tsubst_flags_t);
 
+/* Initializes the node to std::terminate, which is used in exception
+  handling and contract handling.  */
+
+void
+init_terminate_fn (void)
+{
+  if (terminate_fn)
+    return;
+
+  tree tmp;
+
+  push_nested_namespace (std_node);
+  tmp = build_function_type_list (void_type_node, NULL_TREE);
+  terminate_fn = build_cp_library_fn_ptr ("terminate", tmp,
+					   ECF_NOTHROW | ECF_NORETURN
+					   | ECF_COLD);
+  gcc_checking_assert (TREE_THIS_VOLATILE (terminate_fn)
+		       && TREE_NOTHROW (terminate_fn));
+  pop_nested_namespace (std_node);
+
+}
+
 /* Sets up all the global eh stuff that needs to be initialized at the
    start of compilation.  */
 
@@ -51,14 +73,7 @@ init_exception_processing (void)
   tree tmp;
 
   /* void std::terminate (); */
-  push_nested_namespace (std_node);
-  tmp = build_function_type_list (void_type_node, NULL_TREE);
-  terminate_fn = build_cp_library_fn_ptr ("terminate", tmp,
-					   ECF_NOTHROW | ECF_NORETURN
-					   | ECF_COLD);
-  gcc_checking_assert (TREE_THIS_VOLATILE (terminate_fn)
-		       && TREE_NOTHROW (terminate_fn));
-  pop_nested_namespace (std_node);
+  init_terminate_fn ();
 
   /* void __cxa_call_unexpected(void *); */
   tmp = build_function_type_list (void_type_node, ptr_type_node, NULL_TREE);
@@ -352,6 +367,8 @@ initialize_handler_parm (tree decl, tree exp)
 	 MUST_NOT_THROW_EXPR.  */
       init = fold_build_cleanup_point_expr (TREE_TYPE (init), init);
       init = build_must_not_throw_expr (init, NULL_TREE);
+      if (init && TREE_CODE (init) == MUST_NOT_THROW_EXPR)
+	MUST_NOT_THROW_CATCH_P (init) = 1;
     }
 
   decl = pushdecl (decl);
@@ -508,6 +525,7 @@ begin_eh_spec_block (void)
       r = build_stmt (spec_location, MUST_NOT_THROW_EXPR,
 		      NULL_TREE, NULL_TREE);
       TREE_SIDE_EFFECTS (r) = 1;
+      MUST_NOT_THROW_NOEXCEPT_P (r) = 1;
     }
   else
     r = build_stmt (spec_location, EH_SPEC_BLOCK, NULL_TREE, NULL_TREE);
@@ -599,6 +617,7 @@ wrap_cleanups_r (tree *tp, int *walk_subtrees, void * /*data*/)
     {
       cleanup = build2 (MUST_NOT_THROW_EXPR, void_type_node, cleanup,
 			NULL_TREE);
+      MUST_NOT_THROW_THROW_P (cleanup) = 1;
       TARGET_EXPR_CLEANUP (exp) = cleanup;
     }
 
@@ -697,7 +716,12 @@ build_throw (location_t loc, tree exp, tsubst_flags_t complain)
       allocate_expr = do_allocate_exception (temp_type);
       if (allocate_expr == error_mark_node)
 	return error_mark_node;
-      allocate_expr = get_target_expr (allocate_expr);
+      /* Copy ptr inside of the CLEANUP_POINT_EXPR
+	 added below to a TARGET_EXPR slot added outside of it,
+	 otherwise during constant evaluation of throw expression
+	 we'd diagnose accessing ptr outside of its lifetime.  */
+      tree ptr_copy = get_internal_target_expr (null_pointer_node);
+      allocate_expr = get_internal_target_expr (allocate_expr);
       ptr = TARGET_EXPR_SLOT (allocate_expr);
       TARGET_EXPR_CLEANUP (allocate_expr) = do_free_exception (ptr);
       CLEANUP_EH_ONLY (allocate_expr) = 1;
@@ -721,6 +745,7 @@ build_throw (location_t loc, tree exp, tsubst_flags_t complain)
 	    exp = moved;
 
 	  /* Call the copy constructor.  */
+	  auto_diagnostic_group d;
 	  releasing_vec exp_vec (make_tree_vector_single (exp));
 	  exp = build_special_member_call (object, complete_ctor_identifier,
 					   &exp_vec, TREE_TYPE (object), flags,
@@ -747,9 +772,16 @@ build_throw (location_t loc, tree exp, tsubst_flags_t complain)
       /* Prepend the allocation.  */
       exp = build2 (COMPOUND_EXPR, TREE_TYPE (exp), allocate_expr, exp);
 
+      exp = build2 (COMPOUND_EXPR, void_type_node, exp,
+		    build2 (MODIFY_EXPR, void_type_node,
+			    TARGET_EXPR_SLOT (ptr_copy), ptr));
+      ptr = TARGET_EXPR_SLOT (ptr_copy);
+
       /* Force all the cleanups to be evaluated here so that we don't have
 	 to do them during unwinding.  */
       exp = build1 (CLEANUP_POINT_EXPR, void_type_node, exp);
+
+      exp = build2 (COMPOUND_EXPR, TREE_TYPE (exp), ptr_copy, exp);
 
       throw_type = build_eh_type_type (prepare_eh_type (TREE_TYPE (object)));
 
@@ -1059,8 +1091,6 @@ check_noexcept_r (tree *tp, int *walk_subtrees, void *)
 
          We could use TREE_NOTHROW (t) for !TREE_PUBLIC fns, though... */
       tree fn = cp_get_callee (t);
-      if (concept_check_p (fn))
-	return NULL_TREE;
       tree type = TREE_TYPE (fn);
       gcc_assert (INDIRECT_TYPE_P (type));
       type = TREE_TYPE (type);
@@ -1186,6 +1216,20 @@ expr_noexcept_p (tree expr, tsubst_flags_t complain)
     }
   else
     return true;
+}
+
+/* If EXPR is not noexcept, explain why.  */
+
+void
+explain_not_noexcept (tree expr)
+{
+  tree fn = cp_walk_tree_without_duplicates (&expr, check_noexcept_r, 0);
+  if (!fn)
+    /* The call was noexcept, nothing to do.  */;
+  else if (DECL_P (fn))
+    inform (DECL_SOURCE_LOCATION (fn), "%qD is not %<noexcept%>", fn);
+  else
+    inform (location_of (fn), "%qT is not %<noexcept%>", TREE_TYPE (fn));
 }
 
 /* Return true iff SPEC is throw() or noexcept(true).  */

@@ -1,6 +1,6 @@
 /* Process target.def to create initialization macros definition in
    target-hooks-def.h and documentation in target-hooks.texi.
-   Copyright (C) 2009-2024 Free Software Foundation, Inc.
+   Copyright (C) 2009-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -36,6 +36,7 @@ static struct hook_desc hook_array[] = {
 #include "common/common-target.def"
 #include "d/d-target.def"
 #include "rust/rust-target.def"
+#include "jit/jit-target.def"
 #undef DEFHOOK
 };
 
@@ -67,7 +68,7 @@ s_hook_hash (const void *p)
 static int
 s_hook_eq_p (const void *p1, const void *p2)
 {
-  return (strcmp (((const struct s_hook *) p1)->name, 
+  return (strcmp (((const struct s_hook *) p1)->name,
 		  ((const struct s_hook *) p2)->name) == 0);
 }
 
@@ -198,7 +199,7 @@ emit_documentation (const char *in_fname)
 	      if (i != shp->pos)
 		printf ("\n\n");
 
-	      /* Print header.  Function-valued hooks have a parameter list, 
+	      /* Print header.  Function-valued hooks have a parameter list,
 		 unlike POD-valued ones.  */
 	      deftype = hook_array[i].param ? "deftypefn" : "deftypevr";
 	      printf ("@%s {%s} ", deftype, hook_array[i].docname);

@@ -25,12 +25,12 @@ subroutine common
   use m
   integer :: a,b,c(5)
   common /my/ a,b,c  ! { dg-error "Sorry, !.OMP allocate for COMMON block variable 'my' at .1. not supported" }
-  !$omp allocate(/my/) allocator(omp_cgroup_mem_alloc)
+  !$omp allocate(/my/) allocator(omp_low_lat_mem_alloc)
 end
 
 integer function allocators() result(res)
   use m
-  integer, save :: a(5) = [1,2,3,4,5]  ! { dg-error "Sorry, !.OMP allocate for variable 'a' at .1. with SAVE attribute not yet implemented" }
+  integer, save :: a(5) = [1,2,3,4,5]
   !$omp allocate(a) allocator(omp_high_bw_mem_alloc)
   res = a(4)
 end

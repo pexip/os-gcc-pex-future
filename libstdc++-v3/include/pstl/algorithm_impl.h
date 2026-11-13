@@ -79,7 +79,7 @@ template <class _ForwardIterator, class _Size, class _Function>
 _ForwardIterator
 __for_each_n_it_serial(_ForwardIterator __first, _Size __n, _Function __f)
 {
-    for (; __n > 0; ++__first, --__n)
+    for (; __n > 0; ++__first, (void) --__n)
         __f(__first);
     return __first;
 }
@@ -221,7 +221,7 @@ _ForwardIterator2
 __brick_walk2(_ForwardIterator1 __first1, _ForwardIterator1 __last1, _ForwardIterator2 __first2, _Function __f,
               /*vector=*/std::false_type) noexcept
 {
-    for (; __first1 != __last1; ++__first1, ++__first2)
+    for (; __first1 != __last1; ++__first1, (void) ++__first2)
         __f(*__first1, *__first2);
     return __first2;
 }
@@ -240,7 +240,7 @@ _ForwardIterator2
 __brick_walk2_n(_ForwardIterator1 __first1, _Size __n, _ForwardIterator2 __first2, _Function __f,
                 /*vector=*/std::false_type) noexcept
 {
-    for (; __n > 0; --__n, ++__first1, ++__first2)
+    for (; __n > 0; --__n, (void) ++__first1, ++__first2)
         __f(*__first1, *__first2);
     return __first2;
 }
@@ -364,7 +364,7 @@ _ForwardIterator3
 __brick_walk3(_ForwardIterator1 __first1, _ForwardIterator1 __last1, _ForwardIterator2 __first2,
               _ForwardIterator3 __first3, _Function __f, /*vector=*/std::false_type) noexcept
 {
-    for (; __first1 != __last1; ++__first1, ++__first2, ++__first3)
+    for (; __first1 != __last1; ++__first1, (void) ++__first2, ++__first3)
         __f(*__first1, *__first2, *__first3);
     return __first3;
 }
@@ -961,7 +961,7 @@ struct __brick_move_destroy
     {
         using _IteratorValueType = typename std::iterator_traits<_RandomAccessIterator1>::value_type;
 
-        for (; __first != __last; ++__first, ++__result)
+        for (; __first != __last; ++__first, (void) ++__result)
         {
             *__result = std::move(*__first);
             (*__first).~_IteratorValueType();
@@ -1027,7 +1027,7 @@ __brick_calc_mask_1(_ForwardIterator __first, _ForwardIterator __last, bool* __r
     static_assert(__are_random_access_iterators<_ForwardIterator>::value,
                   "Pattern-brick error. Should be a random access iterator.");
 
-    for (; __first != __last; ++__first, ++__mask)
+    for (; __first != __last; ++__first, (void) ++__mask)
     {
         *__mask = __pred(*__first);
         if (*__mask)
@@ -1052,7 +1052,7 @@ void
 __brick_copy_by_mask(_ForwardIterator __first, _ForwardIterator __last, _OutputIterator __result, bool* __mask,
                      _Assigner __assigner, /*vector=*/std::false_type) noexcept
 {
-    for (; __first != __last; ++__first, ++__mask)
+    for (; __first != __last; ++__first, (void) ++__mask)
     {
         if (*__mask)
         {
@@ -1079,7 +1079,7 @@ void
 __brick_partition_by_mask(_ForwardIterator __first, _ForwardIterator __last, _OutputIterator1 __out_true,
                           _OutputIterator2 __out_false, bool* __mask, /*vector=*/std::false_type) noexcept
 {
-    for (; __first != __last; ++__first, ++__mask)
+    for (; __first != __last; ++__first, (void) ++__mask)
     {
         if (*__mask)
         {
@@ -1297,7 +1297,8 @@ __remove_elements(__parallel_tag<_IsVector> __tag, _ExecutionPolicy&& __exec, _F
                     [](_ForwardIterator __x, _Tp* __z)
                     {
                         __internal::__invoke_if_else(
-                            std::is_trivial<_Tp>(), [&]() { *__z = std::move(*__x); },
+                            std::conjunction<std::is_trivially_copyable<_Tp>, std::is_trivially_default_constructible<_Tp>>(),
+                            [&]() { *__z = std::move(*__x); },
                             [&]() { ::new (std::addressof(*__z)) _Tp(std::move(*__x)); });
                     },
                     _IsVector{});
@@ -1310,7 +1311,8 @@ __remove_elements(__parallel_tag<_IsVector> __tag, _ExecutionPolicy&& __exec, _F
             [__result, __first](_Tp* __i, _Tp* __j)
             {
                 __invoke_if_else(
-                    std::is_trivial<_Tp>(), [&]() { __brick_move(__i, __j, __first + (__i - __result), _IsVector{}); },
+                    std::conjunction<std::is_trivially_copyable<_Tp>, std::is_trivially_default_constructible<_Tp>>(),
+                    [&]() { __brick_move(__i, __j, __first + (__i - __result), _IsVector{}); },
                     [&]() { __brick_move_destroy()(__i, __j, __first + (__i - __result), _IsVector{}); });
             });
         return __first + __m;
@@ -1381,7 +1383,7 @@ __brick_calc_mask_2(_RandomAccessIterator __first, _RandomAccessIterator __last,
                     _BinaryPredicate __pred, /*vector=*/std::false_type) noexcept
 {
     _DifferenceType __count = 0;
-    for (; __first != __last; ++__first, ++__mask)
+    for (; __first != __last; ++__first, (void) ++__mask)
     {
         *__mask = !__pred(*__first, *(__first - 1));
         __count += *__mask;
@@ -1481,7 +1483,7 @@ void
 __brick_reverse(_BidirectionalIterator __first, _BidirectionalIterator __last, _BidirectionalIterator __d_last,
                 /*is_vector=*/std::false_type) noexcept
 {
-    for (--__d_last; __first != __last; ++__first, --__d_last)
+    for (--__d_last; __first != __last; ++__first, (void) --__d_last)
     {
         using std::iter_swap;
         iter_swap(__first, __d_last);
@@ -2331,7 +2333,7 @@ __pattern_partial_sort_copy(__parallel_tag<_IsVector> __tag, _ExecutionPolicy&& 
                     _RandomAccessIterator1 __it = __first + (__i - __r);
 
                     // 1. Copy elements from input to raw memory
-                    for (_T1* __k = __i; __k != __j; ++__k, ++__it)
+                    for (_T1* __k = __i; __k != __j; ++__k, (void) ++__it)
                     {
                         ::new (__k) _T2(*__it);
                     }
@@ -2794,7 +2796,8 @@ __pattern_inplace_merge(__parallel_tag<_IsVector> __tag, _ExecutionPolicy&& __ex
             auto __move_values = [](_RandomAccessIterator __x, _Tp* __z)
             {
                 __internal::__invoke_if_else(
-                    std::is_trivial<_Tp>(), [&]() { *__z = std::move(*__x); },
+                    std::conjunction<std::is_trivially_copyable<_Tp>, std::is_trivially_default_constructible<_Tp>>(),
+                    [&]() { *__z = std::move(*__x); },
                     [&]() { ::new (std::addressof(*__z)) _Tp(std::move(*__x)); });
             };
 
@@ -2890,7 +2893,7 @@ __pattern_includes(__parallel_tag<_IsVector> __tag, _ExecutionPolicy&& __exec, _
         });
 }
 
-constexpr auto __set_algo_cut_off = 1000;
+inline constexpr auto __set_algo_cut_off = 1000;
 
 template <class _IsVector, class _ExecutionPolicy, class _ForwardIterator1, class _ForwardIterator2,
           class _OutputIterator, class _Compare, class _SizeFunction, class _SetOP>
@@ -3645,7 +3648,7 @@ __mismatch_serial(_ForwardIterator1 __first1, _ForwardIterator1 __last1, _Forwar
 #if defined(_PSTL_CPP14_2RANGE_MISMATCH_EQUAL_PRESENT)
     return std::mismatch(__first1, __last1, __first2, __last2, __pred);
 #else
-    for (; __first1 != __last1 && __first2 != __last2 && __pred(*__first1, *__first2); ++__first1, ++__first2)
+    for (; __first1 != __last1 && __first2 != __last2 && __pred(*__first1, *__first2); ++__first1, (void) ++__first2)
     {
     }
     return std::make_pair(__first1, __first2);

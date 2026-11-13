@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2026, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -27,7 +27,6 @@ with Accessibility;  use Accessibility;
 with Atree;          use Atree;
 with Checks;         use Checks;
 with Debug;          use Debug;
-with Einfo;          use Einfo;
 with Einfo.Entities; use Einfo.Entities;
 with Einfo.Utils;    use Einfo.Utils;
 with Elists;         use Elists;
@@ -61,7 +60,6 @@ with Sem_Eval;       use Sem_Eval;
 with Sem_Res;        use Sem_Res;
 with Sem_Type;       use Sem_Type;
 with Sem_Util;       use Sem_Util;
-with Sinfo;          use Sinfo;
 with Sinfo.Nodes;    use Sinfo.Nodes;
 with Sinfo.Utils;    use Sinfo.Utils;
 with Snames;         use Snames;
@@ -70,6 +68,7 @@ with Stringt;        use Stringt;
 with Strub;          use Strub;
 with SCIL_LL;        use SCIL_LL;
 with Tbuild;         use Tbuild;
+with Ttypes;         use Ttypes;
 
 package body Exp_Disp is
 
@@ -412,14 +411,16 @@ package body Exp_Disp is
             if Nkind (D) = N_Package_Declaration then
                Build_Package_Dispatch_Tables (D);
 
-            elsif Nkind (D) = N_Package_Body then
+            elsif Nkind (D) = N_Package_Body
+              and then Ekind (Corresponding_Spec (D)) /= E_Generic_Package
+            then
                Build_Dispatch_Tables (Declarations (D));
 
             elsif Nkind (D) = N_Package_Body_Stub
-              and then Present (Library_Unit (D))
+              and then Present (Stub_Subunit (D))
             then
                Build_Dispatch_Tables
-                 (Declarations (Proper_Body (Unit (Library_Unit (D)))));
+                 (Declarations (Proper_Body (Unit (Stub_Subunit (D)))));
 
             --  Handle full type declarations and derivations of library level
             --  tagged types
@@ -798,7 +799,7 @@ package body Exp_Disp is
 
         --  No action needed if the dispatching call has been already expanded
 
-        or else Is_Expanded_Dispatching_Call (Name (Call_Node))
+        or else Is_Expanded_Dispatching_Call (Call_Node)
       then
          return;
       end if;
@@ -923,6 +924,8 @@ package body Exp_Disp is
          New_Formal  : Entity_Id;
          Last_Formal : Entity_Id := Empty;
 
+         use Deferred_Extra_Formals_Support;
+
       begin
          if Present (Old_Formal) then
             New_Formal := New_Copy (Old_Formal);
@@ -959,51 +962,21 @@ package body Exp_Disp is
          end if;
 
          --  Now that the explicit formals have been duplicated, any extra
-         --  formals needed by the subprogram must be duplicated; we know
-         --  that extra formals are available because they were added when
-         --  the tagged type was frozen (see Expand_Freeze_Record_Type).
+         --  formals needed by the subprogram must be added; we know that
+         --  extra formals are available because they were added when the
+         --  tagged type was frozen (see Expand_Freeze_Record_Type).
 
          pragma Assert (Is_Frozen (Typ));
 
-         --  Warning: The addition of the extra formals cannot be performed
-         --  here invoking Create_Extra_Formals since we must ensure that all
-         --  the extra formals of the pointer type and the target subprogram
-         --  match (and for functions that return a tagged type the profile of
-         --  the built subprogram type always returns a class-wide type, which
-         --  may affect the addition of some extra formals).
+         if Extra_Formals_Known (Subp) then
+            Create_Extra_Formals (Subp_Typ, Related_Nod => Call_Node);
 
-         if Present (Last_Formal)
-           and then Present (Extra_Formal (Last_Formal))
-         then
-            Old_Formal := Extra_Formal (Last_Formal);
-            New_Formal := New_Copy (Old_Formal);
-            Set_Scope (New_Formal, Subp_Typ);
+         --  Extra formals were previously deferred
 
-            Set_Extra_Formal (Last_Formal, New_Formal);
-            Set_Extra_Formals (Subp_Typ, New_Formal);
-
-            if Ekind (Subp) = E_Function
-              and then Present (Extra_Accessibility_Of_Result (Subp))
-              and then Extra_Accessibility_Of_Result (Subp) = Old_Formal
-            then
-               Set_Extra_Accessibility_Of_Result (Subp_Typ, New_Formal);
-            end if;
-
-            Old_Formal := Extra_Formal (Old_Formal);
-            while Present (Old_Formal) loop
-               Set_Extra_Formal (New_Formal, New_Copy (Old_Formal));
-               New_Formal := Extra_Formal (New_Formal);
-               Set_Scope (New_Formal, Subp_Typ);
-
-               if Ekind (Subp) = E_Function
-                 and then Present (Extra_Accessibility_Of_Result (Subp))
-                 and then Extra_Accessibility_Of_Result (Subp) = Old_Formal
-               then
-                  Set_Extra_Accessibility_Of_Result (Subp_Typ, New_Formal);
-               end if;
-
-               Old_Formal := Extra_Formal (Old_Formal);
-            end loop;
+         else
+            pragma Assert (Is_Deferred_Extra_Formals_Entity (Subp));
+            Register_Deferred_Extra_Formals_Entity (Subp_Typ);
+            Register_Deferred_Extra_Formals_Call (Call_Node, Current_Scope);
          end if;
       end;
 
@@ -1230,10 +1203,11 @@ package body Exp_Disp is
          Set_SCIL_Node (SCIL_Related_Node, SCIL_Node);
       end if;
 
-      --  Suppress all checks during the analysis of the expanded code to avoid
-      --  the generation of spurious warnings under ZFP run-time.
+      --  Suppress null access checks during the analysis of the expanded code
 
-      Analyze_And_Resolve (Call_Node, Call_Typ, Suppress => All_Checks);
+      Analyze_And_Resolve (Call_Node, Call_Typ, Suppress => Access_Check);
+
+      Set_Is_Expanded_Dispatching_Call (Call_Node);
    end Expand_Dispatching_Call;
 
    ---------------------------------
@@ -1524,10 +1498,8 @@ package body Exp_Disp is
                 Defining_Identifier => Make_Temporary (Loc, 'T'),
                 Type_Definition =>
                   Make_Access_To_Object_Definition (Loc,
-                    All_Present            => True,
-                    Null_Exclusion_Present => False,
-                    Constant_Present       => False,
-                    Subtype_Indication     =>
+                    All_Present        => True,
+                    Subtype_Indication =>
                       New_Occurrence_Of (Desig_Typ, Loc)));
 
             Stats := New_List (
@@ -1733,6 +1705,7 @@ package body Exp_Disp is
                end if;
 
                Conversion := Convert_To (Formal_Typ, Relocate_Node (Actual));
+               Flag_Interface_Pointer_Displacement (Conversion);
                Rewrite (Actual, Conversion);
                Analyze_And_Resolve (Actual, Formal_Typ);
             end if;
@@ -1801,6 +1774,8 @@ package body Exp_Disp is
 
                Conversion := Convert_To (Formal_Typ, Actual_Dup);
                Rewrite (Actual, Conversion);
+               Flag_Interface_Pointer_Displacement (Actual);
+
                Analyze_And_Resolve (Actual, Formal_Typ);
             end if;
          end if;
@@ -1973,7 +1948,6 @@ package body Exp_Disp is
                   Make_Access_To_Object_Definition (Loc,
                     All_Present            => True,
                     Null_Exclusion_Present => False,
-                    Constant_Present       => False,
                     Subtype_Indication     =>
                       New_Occurrence_Of (Ftyp, Loc)));
 
@@ -2358,7 +2332,7 @@ package body Exp_Disp is
 
       E := Next_Entity (Typ);
       while Present (E) loop
-         if Ekind (E) = E_Function and then Is_Constructor (E) then
+         if Ekind (E) = E_Function and then Is_CPP_Constructor (E) then
             return True;
          end if;
 
@@ -2377,17 +2351,6 @@ package body Exp_Disp is
       return not Is_Interface (Typ)
         and then not Restriction_Active (No_Dispatching_Calls);
    end Has_DT;
-
-   ----------------------------------
-   -- Is_Expanded_Dispatching_Call --
-   ----------------------------------
-
-   function Is_Expanded_Dispatching_Call (N : Node_Id) return Boolean is
-   begin
-      return Nkind (N) in N_Subprogram_Call
-        and then Nkind (Name (N)) = N_Explicit_Dereference
-        and then Is_Dispatch_Table_Entity (Etype (Name (N)));
-   end Is_Expanded_Dispatching_Call;
 
    -------------------------------------
    -- Is_Predefined_Dispatching_Alias --
@@ -4598,10 +4561,15 @@ package body Exp_Disp is
       --    (2) External_Tag (combined with Internal_Tag) is used for object
       --        streaming and No_Tagged_Streams inhibits the generation of
       --        streams.
+      --  Instead of No_Tagged_Streams, which applies either to a single
+      --  type or to a declarative region, it is possible to use restriction
+      --  No_Streams, which prevents stream objects from being created in the
+      --  entire partition.
 
       Discard_Names : constant Boolean :=
-                        Present (No_Tagged_Streams_Pragma (Typ))
-                          and then
+        (Present (No_Tagged_Streams_Pragma (Typ))
+           or else Restriction_Active (No_Streams))
+          and then
         (Global_Discard_Names or else Einfo.Entities.Discard_Names (Typ));
 
       --  The following name entries are used by Make_DT to generate a number
@@ -4625,8 +4593,7 @@ package body Exp_Disp is
       Name_TSD          : constant Name_Id :=
                             New_External_Name (Tname, 'B', Suffix_Index => -1);
 
-      Saved_GM  : constant Ghost_Mode_Type := Ghost_Mode;
-      Saved_IGR : constant Node_Id         := Ignored_Ghost_Region;
+      Saved_Ghost_Config : constant Ghost_Config_Type := Ghost_Config;
       --  Save the Ghost-related attributes to restore on exit
 
       AI                 : Elmt_Id;
@@ -4644,7 +4611,6 @@ package body Exp_Disp is
       Name_ITable        : Name_Id;
       Nb_Prim            : Nat := 0;
       New_Node           : Node_Id;
-      Num_Ifaces         : Nat := 0;
       Parent_Typ         : Entity_Id;
       Predef_Prims       : Entity_Id;
       Prim               : Entity_Id;
@@ -4917,7 +4883,7 @@ package body Exp_Disp is
       if not Building_Static_DT (Typ) then
 
          --  Generate:
-         --    DT     : No_Dispatch_Table_Wrapper;
+         --    DT     : aliased No_Dispatch_Table_Wrapper;
          --    DT_Ptr : Tag := !Tag (DT.NDT_Prims_Ptr'Address);
 
          if not Has_DT (Typ) then
@@ -4925,7 +4891,6 @@ package body Exp_Disp is
               Make_Object_Declaration (Loc,
                 Defining_Identifier => DT,
                 Aliased_Present     => True,
-                Constant_Present    => False,
                 Object_Definition   =>
                   New_Occurrence_Of
                     (RTE (RE_No_Dispatch_Table_Wrapper), Loc)));
@@ -4968,7 +4933,7 @@ package body Exp_Disp is
             end if;
 
          --  Generate:
-         --    DT : Dispatch_Table_Wrapper (Nb_Prim);
+         --    DT : aliased Dispatch_Table_Wrapper (Nb_Prim);
          --    DT_Ptr : Tag := !Tag (DT.Prims_Ptr'Address);
 
          else
@@ -4987,7 +4952,6 @@ package body Exp_Disp is
               Make_Object_Declaration (Loc,
                 Defining_Identifier => DT,
                 Aliased_Present     => True,
-                Constant_Present    => False,
                 Object_Definition   =>
                   Make_Subtype_Indication (Loc,
                     Subtype_Mark =>
@@ -5212,8 +5176,10 @@ package body Exp_Disp is
                             Chars => New_External_Name (Tname, 'A'));
             Full_Name : constant String_Id :=
                             Fully_Qualified_Name_String (First_Subtype (Typ));
-            Str1_Id   : String_Id;
-            Str2_Id   : String_Id;
+
+            Address_Image : RE_Id;
+            Str1_Id       : String_Id;
+            Str2_Id       : String_Id;
 
          begin
             --  Generate:
@@ -5235,7 +5201,17 @@ package body Exp_Disp is
             --    Exname : constant String :=
             --               Str1 & Address_Image (Tag) & Str2;
 
-            if RTE_Available (RE_Address_Image) then
+            --  We use Address_Image64 for Morello because Integer_Address
+            --  is 64-bit large even though Address is 128-bit large.
+
+            case System_Address_Size is
+               when 32     => Address_Image := RE_Address_Image32;
+               when 64     => Address_Image := RE_Address_Image64;
+               when 128    => Address_Image := RE_Address_Image64;
+               when others => raise Program_Error;
+            end case;
+
+            if RTE_Available (Address_Image) then
                Append_To (Result,
                  Make_Object_Declaration (Loc,
                    Defining_Identifier => Exname,
@@ -5251,7 +5227,7 @@ package body Exp_Disp is
                              Make_Function_Call (Loc,
                                Name =>
                                  New_Occurrence_Of
-                                   (RTE (RE_Address_Image), Loc),
+                                   (RTE (Address_Image), Loc),
                                Parameter_Associations => New_List (
                                  Unchecked_Convert_To (RTE (RE_Address),
                                    New_Occurrence_Of (DT_Ptr, Loc)))),
@@ -5476,23 +5452,18 @@ package body Exp_Disp is
 
          Collect_Interfaces (Typ, Typ_Ifaces);
 
-         AI := First_Elmt (Typ_Ifaces);
-         while Present (AI) loop
-            Num_Ifaces := Num_Ifaces + 1;
-            Next_Elmt (AI);
-         end loop;
-
-         if Num_Ifaces = 0 then
+         if Is_Empty_Elmt_List (Typ_Ifaces) then
             Iface_Table_Node := Make_Null (Loc);
 
          --  Generate the Interface_Table object
 
          else
             declare
-               TSD_Ifaces_List  : constant List_Id := New_List;
-               Elmt             : Elmt_Id;
-               Offset_To_Top    : Node_Id;
-               Sec_DT_Tag       : Node_Id;
+               Num_Ifaces      : constant Pos := List_Length (Typ_Ifaces);
+               TSD_Ifaces_List : constant List_Id := New_List;
+               Elmt            : Elmt_Id;
+               Offset_To_Top   : Node_Id;
+               Sec_DT_Tag      : Node_Id;
 
                Dummy_Object_Ifaces_List      : Elist_Id := No_Elist;
                Dummy_Object_Ifaces_Comp_List : Elist_Id := No_Elist;
@@ -6085,7 +6056,7 @@ package body Exp_Disp is
                     --  Skip ignored Ghost subprograms as those will be removed
                     --  from the executable.
 
-                    and then not Is_Ignored_Ghost_Entity (E)
+                    and then not Is_Ignored_Ghost_Entity_In_Codegen (E)
                   then
                      pragma Assert
                        (UI_To_Int (DT_Position (Prim)) <= Nb_Prim);
@@ -6554,7 +6525,7 @@ package body Exp_Disp is
       Register_CG_Node (Typ);
 
    <<Leave>>
-      Restore_Ghost_Region (Saved_GM, Saved_IGR);
+      Restore_Ghost_Region (Saved_Ghost_Config);
 
       return Result;
    end Make_DT;
@@ -7560,11 +7531,7 @@ package body Exp_Disp is
             if Chars (Prim) = Name_uSize
               and then RTE_Record_Component_Available (RE_Size_Func)
             then
-               DT_Ptr := Node (First_Elmt (Access_Disp_Table (Tag_Typ)));
-               Append_To (L,
-                 Build_Set_Size_Function (Loc,
-                   Tag_Node  => New_Occurrence_Of (DT_Ptr, Loc),
-                   Size_Func => Prim));
+               Append_To (L, Build_Set_Size_Function (Loc, Tag_Typ, Prim));
             end if;
 
          else
@@ -7863,9 +7830,6 @@ package body Exp_Disp is
       Parent_Typ : constant Entity_Id := Etype (Typ);
       First_Prim : constant Elmt_Id := First_Elmt (Primitive_Operations (Typ));
       The_Tag    : constant Entity_Id := First_Tag_Component (Typ);
-
-      Adjusted  : Boolean := False;
-      Finalized : Boolean := False;
 
       Count_Prim : Nat;
       DT_Length  : Nat;
@@ -8194,14 +8158,6 @@ package body Exp_Disp is
             Validate_Position (Prim);
          end if;
 
-         if Chars (Prim) = Name_Finalize then
-            Finalized := True;
-         end if;
-
-         if Chars (Prim) = Name_Adjust then
-            Adjusted := True;
-         end if;
-
          --  An abstract operation cannot be declared in the private part for a
          --  visible abstract type, because it can't be overridden outside this
          --  package hierarchy. For explicit declarations this is checked at
@@ -8247,19 +8203,6 @@ package body Exp_Disp is
 
          Next_Elmt (Prim_Elmt);
       end loop;
-
-      --  Additional check
-
-      if Is_Controlled (Typ) then
-         if not Finalized then
-            Error_Msg_N
-              ("controlled type has no explicit Finalize method??", Typ);
-
-         elsif not Adjusted then
-            Error_Msg_N
-              ("controlled type has no explicit Adjust method??", Typ);
-         end if;
-      end if;
 
       --  Set the final size of the Dispatch Table
 
@@ -8342,7 +8285,7 @@ package body Exp_Disp is
       E := Next_Entity (Typ);
       while Present (E) loop
          if Ekind (E) = E_Function
-           and then Is_Constructor (E)
+           and then Is_CPP_Constructor (E)
          then
             Found := True;
             Loc   := Sloc (E);
@@ -8364,13 +8307,15 @@ package body Exp_Disp is
                         Defining_Unit_Name       => IP,
                         Parameter_Specifications => Parms)));
 
-               Set_Init_Proc (Typ, IP);
-               Set_Is_Imported    (IP);
-               Set_Is_Constructor (IP);
-               Set_Interface_Name (IP, Interface_Name (E));
-               Set_Convention     (IP, Convention_CPP);
-               Set_Is_Public      (IP);
-               Set_Has_Completion (IP);
+               Set_Init_Proc     (Typ, IP);
+               Set_Is_Imported        (IP);
+               Set_Is_CPP_Constructor (IP);
+               Set_Interface_Name     (IP, Interface_Name (E));
+               Set_Convention         (IP, Convention_CPP);
+               Set_Is_Public          (IP);
+               Set_Has_Completion     (IP);
+               Mutate_Ekind           (IP, E_Procedure);
+               Freeze_Extra_Formals   (IP);
 
             --  Case 2: Constructor of a tagged type
 
@@ -8406,12 +8351,12 @@ package body Exp_Disp is
                         Defining_Unit_Name => Constructor_Id,
                         Parameter_Specifications => Parms));
 
-                  Set_Is_Imported    (Constructor_Id);
-                  Set_Is_Constructor (Constructor_Id);
-                  Set_Interface_Name (Constructor_Id, Interface_Name (E));
-                  Set_Convention     (Constructor_Id, Convention_CPP);
-                  Set_Is_Public      (Constructor_Id);
-                  Set_Has_Completion (Constructor_Id);
+                  Set_Is_Imported        (Constructor_Id);
+                  Set_Is_CPP_Constructor (Constructor_Id);
+                  Set_Interface_Name     (Constructor_Id, Interface_Name (E));
+                  Set_Convention         (Constructor_Id, Convention_CPP);
+                  Set_Is_Public          (Constructor_Id);
+                  Set_Has_Completion     (Constructor_Id);
 
                   --  Build the init procedure as a wrapper of this constructor
 
@@ -8503,6 +8448,8 @@ package body Exp_Disp is
 
                   Discard_Node (IP_Body);
                   Set_Init_Proc (Typ, IP);
+                  Mutate_Ekind (IP, E_Procedure);
+                  Freeze_Extra_Formals (IP);
                end;
             end if;
 
@@ -8568,6 +8515,8 @@ package body Exp_Disp is
 
             Discard_Node (IP_Body);
             Set_Init_Proc (Typ, IP);
+            Mutate_Ekind (IP, E_Procedure);
+            Freeze_Extra_Formals (IP);
          end;
       end if;
 
@@ -8695,9 +8644,10 @@ package body Exp_Disp is
 
    begin
       --  Protect this procedure against wrong usage. Required because it will
-      --  be used directly from GDB
+      --  be used directly from GDB.
 
-      if not (Typ <= Last_Node_Id)
+      if Typ not in First_Node_Id .. Last_Node_Id
+        or else Nkind (Typ) not in N_Entity
         or else not Is_Tagged_Type (Typ)
       then
          Write_Str ("wrong usage: Write_DT must be used with tagged types");
@@ -8739,6 +8689,10 @@ package body Exp_Disp is
 
          if Is_Predefined_Dispatching_Operation (Prim) then
             Write_Str ("(predefined) ");
+         end if;
+
+         if Is_Wrapper (Prim) then
+            Write_Str ("(wrapper) ");
          end if;
 
          --  Prefix the name of the primitive with its corresponding tagged

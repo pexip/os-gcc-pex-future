@@ -1,4 +1,4 @@
-// Copyright (C) 2020-2024 Free Software Foundation, Inc.
+// Copyright (C) 2020-2026 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -19,6 +19,7 @@
 #ifndef RUST_BIR_BUILDER_EXPR_H
 #define RUST_BIR_BUILDER_EXPR_H
 
+#include "rust-hir-expr.h"
 #include "rust-hir-visitor.h"
 #include "rust-bir-builder-internal.h"
 
@@ -30,15 +31,16 @@ namespace BIR {
  * See AbstractExprBuilder for API usage docs (mainly `return_place` and
  * `return_expr`).
  */
-class ExprStmtBuilder : public AbstractExprBuilder, public HIR::HIRStmtVisitor
+class ExprStmtBuilder final : public AbstractExprBuilder,
+			      public HIR::HIRStmtVisitor
 {
 public:
   explicit ExprStmtBuilder (BuilderContext &ctx) : AbstractExprBuilder (ctx) {}
 
   /** Entry point. */
-  PlaceId build (HIR::Expr &expr, PlaceId place = INVALID_PLACE)
+  PlaceId build (HIR::Expr &expr, PlaceId destination = INVALID_PLACE)
   {
-    return visit_expr (expr, place);
+    return visit_expr (expr, destination);
   }
 
 private:
@@ -83,6 +85,8 @@ protected: // Expr
   void visit (HIR::MethodCallExpr &expr) override;
   void visit (HIR::FieldAccessExpr &expr) override;
   void visit (HIR::BlockExpr &block) override;
+  void visit (HIR::AnonConst &block) override;
+  void visit (HIR::ConstBlock &block) override;
   void visit (HIR::ContinueExpr &cont) override;
   void visit (HIR::BreakExpr &brk) override;
   void visit (HIR::RangeFromToExpr &range) override;
@@ -98,9 +102,10 @@ protected: // Expr
   void visit (HIR::WhileLetLoopExpr &expr) override;
   void visit (HIR::IfExpr &expr) override;
   void visit (HIR::IfExprConseqElse &expr) override;
+  void visit (HIR::InlineAsm &expr) override;
+  void visit (HIR::LlvmInlineAsm &expr) override;
+  void visit (HIR::OffsetOf &expr) override;
 
-  void visit (HIR::IfLetExpr &expr) override;
-  void visit (HIR::IfLetExprConseqElse &expr) override;
   void visit (HIR::MatchExpr &expr) override;
   void visit (HIR::AwaitExpr &expr) override;
   void visit (HIR::AsyncBlockExpr &expr) override;

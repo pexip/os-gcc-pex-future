@@ -84,24 +84,6 @@ AC_DEFUN([LIBAT_TEST_ATOMIC_BUILTIN],[
 ])
 
 dnl
-dnl Test if the host assembler supports armv9.4-a LSE128 isns.
-dnl
-AC_DEFUN([LIBAT_TEST_FEAT_AARCH64_LSE128],[
-  AC_CACHE_CHECK([for armv9.4-a LSE128 insn support],
-    [libat_cv_have_feat_lse128],[
-    AC_LANG_CONFTEST([AC_LANG_PROGRAM([],[asm(".arch armv9-a+lse128")])])
-    if AC_TRY_EVAL(ac_compile); then
-      eval libat_cv_have_feat_lse128=yes
-    else
-      eval libat_cv_have_feat_lse128=no
-    fi
-    rm -f conftest*
-  ])
-  LIBAT_DEFINE_YESNO([HAVE_FEAT_LSE128], [$libat_cv_have_feat_lse128],
-	[Have LSE128 support for 16 byte integers.])
-])
-
-dnl
 dnl Test if we have __atomic_load and __atomic_store for mode $1, size $2
 dnl
 AC_DEFUN([LIBAT_HAVE_ATOMIC_LOADSTORE],[
@@ -318,6 +300,7 @@ dnl Sets:
 dnl  with_gnu_ld
 dnl  libat_ld_is_gold (possibly)
 dnl  libat_ld_is_mold (possibly)
+dnl  libat_ld_is_wild (possibly)
 dnl  libat_gnu_ld_version (possibly)
 dnl
 dnl The last will be a single integer, e.g., version 1.23.45.0.67.89 will
@@ -351,17 +334,25 @@ AC_DEFUN([LIBAT_CHECK_LINKER_FEATURES], [
   # does some of this, but throws away the result.
   libat_ld_is_gold=no
   libat_ld_is_mold=no
+  libat_ld_is_wild=no
   if $LD --version 2>/dev/null | grep 'GNU gold'> /dev/null 2>&1; then
     libat_ld_is_gold=yes
   elif $LD --version 2>/dev/null | grep 'mold' >/dev/null 2>&1; then
     libat_ld_is_mold=yes
+  elif $LD --version 2>/dev/null | grep 'Wild' >/dev/null 2>&1; then
+    libat_ld_is_wild=yes
   fi
   changequote(,)
   ldver=`$LD --version 2>/dev/null |
          sed -e 's/[. ][0-9]\{8\}$//;s/.* \([^ ]\{1,\}\)$/\1/; q'`
+  ldasneeded=`$LD --help 2>/dev/null | grep as-needed`
   changequote([,])
   libat_gnu_ld_version=`echo $ldver | \
          $AWK -F. '{ if (NF<3) [$]3=0; print ([$]1*100+[$]2)*100+[$]3 }'`
+  libat_ld_asneeded=no
+  if test -n "$ldasneeded"; then
+    libat_ld_asneeded=yes
+  fi
 
   # Set --gc-sections.
   if test "$with_gnu_ld" = "notbroken"; then
@@ -408,6 +399,7 @@ AC_DEFUN([LIBAT_CHECK_LINKER_FEATURES], [
 
   AC_SUBST(SECTION_LDFLAGS)
   AC_SUBST(OPT_LDFLAGS)
+  AM_CONDITIONAL(LIBAT_BUILD_ASNEEDED_SOLINK, test $libat_ld_asneeded != no)
 ])
 
 
@@ -511,6 +503,8 @@ if test $enable_symvers != no && test $libat_shared_libgcc = yes; then
     elif test $libat_ld_is_gold = yes ; then
       enable_symvers=gnu
     elif test $libat_ld_is_mold = yes ; then
+      enable_symvers=gnu
+    elif test $libat_ld_is_wild = yes ; then
       enable_symvers=gnu
     else
       # The right tools, the right setup, but too old.  Fallbacks?

@@ -1,5 +1,5 @@
 /* Support for fully folding sub-trees of an expression for C compiler.
-   Copyright (C) 1992-2024 Free Software Foundation, Inc.
+   Copyright (C) 1992-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -73,11 +73,12 @@ c_fold_array_ref (tree type, tree ary, tree index)
   unsigned elem_nchars = (TYPE_PRECISION (elem_type)
 			  / TYPE_PRECISION (char_type_node));
   unsigned len = (unsigned) TREE_STRING_LENGTH (ary) / elem_nchars;
-  tree nelts = array_type_nelts (TREE_TYPE (ary));
+  tree nelts_minus_one = array_type_nelts_minus_one (TREE_TYPE (ary));
   bool dummy1 = true, dummy2 = true;
-  nelts = c_fully_fold_internal (nelts, true, &dummy1, &dummy2, false, false);
+  nelts_minus_one = c_fully_fold_internal (nelts_minus_one, true, &dummy1,
+					   &dummy2, false, false);
   unsigned HOST_WIDE_INT i = tree_to_uhwi (index);
-  if (!tree_int_cst_le (index, nelts)
+  if (!tree_int_cst_le (index, nelts_minus_one)
       || i >= len
       || i + elem_nchars > len)
     return NULL_TREE;
@@ -326,6 +327,8 @@ c_fully_fold_internal (tree expr, bool in_init, bool *maybe_const_operands,
     case EXACT_DIV_EXPR:
     case LSHIFT_EXPR:
     case RSHIFT_EXPR:
+    case LROTATE_EXPR:
+    case RROTATE_EXPR:
     case BIT_IOR_EXPR:
     case BIT_XOR_EXPR:
     case BIT_AND_EXPR:
@@ -366,7 +369,25 @@ c_fully_fold_internal (tree expr, bool in_init, bool *maybe_const_operands,
 			    || TREE_CODE (op1) != INTEGER_CST))
 	goto out;
 
-      if (op0 != orig_op0 || op1 != orig_op1 || in_init)
+      if (TREE_CODE_CLASS (code) == tcc_comparison
+	  && TREE_CODE (TREE_TYPE (op0)) == NULLPTR_TYPE
+	  && TREE_CODE (TREE_TYPE (op1)) == NULLPTR_TYPE)
+	{
+	  switch (code)
+	    {
+	    case EQ_EXPR:
+	      ret = constant_boolean_node (true, TREE_TYPE (expr));
+	      break;
+	    case NE_EXPR:
+	      ret = constant_boolean_node (false, TREE_TYPE (expr));
+	      break;
+	    default:
+	      gcc_unreachable ();
+	    }
+	  ret = omit_two_operands_loc (loc, TREE_TYPE (expr), ret,
+				       op0, op1);
+	}
+      else if (op0 != orig_op0 || op1 != orig_op1 || in_init)
 	ret = in_init
 	  ? fold_build2_initializer_loc (loc, code, TREE_TYPE (expr), op0, op1)
 	  : fold_build2_loc (loc, code, TREE_TYPE (expr), op0, op1);
@@ -387,7 +408,10 @@ c_fully_fold_internal (tree expr, bool in_init, bool *maybe_const_operands,
 	  && tree_int_cst_sgn (op0) < 0)
 	warning_at (loc, OPT_Wshift_negative_value,
 		    "left shift of negative value");
-      if ((code == LSHIFT_EXPR || code == RSHIFT_EXPR)
+      if ((code == LSHIFT_EXPR
+	   || code == RSHIFT_EXPR
+	   || code == LROTATE_EXPR
+	   || code == RROTATE_EXPR)
 	  && TREE_CODE (orig_op1) != INTEGER_CST
 	  && TREE_CODE (op1) == INTEGER_CST
 	  && TREE_CODE (TREE_TYPE (orig_op1)) == INTEGER_TYPE
@@ -403,7 +427,8 @@ c_fully_fold_internal (tree expr, bool in_init, bool *maybe_const_operands,
 		    || TREE_CODE (TREE_TYPE (orig_op0)) == FIXED_POINT_TYPE)
 		   && compare_tree_int (op1,
 					TYPE_PRECISION (TREE_TYPE (orig_op0)))
-		      >= 0)
+		      >= 0
+		   && !warning_suppressed_p (expr, OPT_Wshift_count_overflow))
 	    warning_at (loc, OPT_Wshift_count_overflow,
 			(code == LSHIFT_EXPR
 			 ? G_("left shift count >= width of type")

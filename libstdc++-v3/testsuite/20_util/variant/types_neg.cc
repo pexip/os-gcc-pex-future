@@ -1,5 +1,4 @@
 // { dg-do compile { target c++17 } }
-// { dg-add-options strict_std }
 
 # include <variant>
 

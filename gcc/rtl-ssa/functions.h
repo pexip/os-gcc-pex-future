@@ -1,5 +1,5 @@
 // Function-related RTL SSA classes                                 -*- C++ -*-
-// Copyright (C) 2020-2024 Free Software Foundation, Inc.
+// Copyright (C) 2020-2026 Free Software Foundation, Inc.
 //
 // This file is part of GCC.
 //
@@ -131,7 +131,22 @@ public:
 
   // Look for a definition of RESOURCE at INSN.  Return the result of the
   // search as a def_lookup; see the comments there for more details.
+  //
+  // NOTE: This is not the function to use if INSN is known to be a real
+  // instruction (one with an RTL pattern) and if the caller is only
+  // interested in definitions within INSN itself.  In those cases
+  // it is better to use find_access.
   def_lookup find_def (resource_info resource, insn_info *insn);
+
+  // Search for a use of DEF around non-debug instruction INSN and return the
+  // result of the search as a use_lookup.  See the comment above the class
+  // for more details about the result means.
+  //
+  // NOTE: This is not the function to use if INSN is known to be a real
+  // instruction (one with an RTL pattern) and if the caller is only
+  // interested in uses within INSN itself.  In those cases it is better
+  // to use find_access.
+  use_lookup find_use (set_info *def, insn_info *insn);
 
   // Return an RAII object that owns all temporary RTL SSA memory
   // allocated during a change attempt.  The object should remain in
@@ -165,16 +180,22 @@ public:
 
   // If CHANGE doesn't already clobber REGNO, try to add such a clobber,
   // limiting the movement range in order to make the clobber valid.
-  // When determining whether REGNO is live, ignore accesses made by an
-  // instruction I if IGNORE (I) is true.  The caller then assumes the
-  // responsibility of ensuring that CHANGE and I are placed in a valid order.
+  // Use IGNORE to guide this process, where IGNORE is an object that
+  // provides the same interface as ignore_nothing.
+  //
+  // That is, when determining whether REGNO is live, ignore accesses made
+  // by an instruction I if IGNORE says that I should be ignored.  The caller
+  // then assumes the responsibility of ensuring that CHANGE and I are placed
+  // in a valid order.  Similarly, ignore live ranges associated with a
+  // definition of REGNO if IGNORE says that that definition should be
+  // ignored.
   //
   // Return true on success.  Leave CHANGE unmodified when returning false.
   //
   // WATERMARK is a watermark returned by new_change_attempt ().
-  template<typename IgnorePredicate>
+  template<typename IgnorePredicates>
   bool add_regno_clobber (obstack_watermark &watermark, insn_change &change,
-			  unsigned int regno, IgnorePredicate ignore);
+			  unsigned int regno, IgnorePredicates ignore);
 
   // Return true if change_insns will be able to perform the changes
   // described by CHANGES.
@@ -251,7 +272,8 @@ private:
   void append_clobber_to_group (clobber_info *, clobber_group *);
   void merge_clobber_groups (clobber_info *, clobber_info *,
 			     def_info *);
-  clobber_info *split_clobber_group (clobber_group *, insn_info *);
+  std::array<clobber_group *, 2> split_clobber_group (clobber_group *,
+						      insn_info *);
 
   void append_def (def_info *);
   void add_def (def_info *);
@@ -268,6 +290,7 @@ private:
   insn_info::order_node *need_order_node (insn_info *);
 
   void add_insn_after (insn_info *, insn_info *);
+  void replace_nondebug_insn (insn_info *, insn_info *);
   void append_insn (insn_info *);
   void remove_insn (insn_info *);
 
@@ -285,7 +308,7 @@ private:
   void add_reg_unused_notes (insn_info *);
 
   void add_live_out_use (bb_info *, set_info *);
-  set_info *live_out_value (bb_info *, set_info *);
+  void commit_make_use_available (use_info *);
 
   void append_phi (ebb_info *, phi_info *);
   void remove_phi (phi_info *);
@@ -312,6 +335,7 @@ private:
   void create_ebbs (build_info &);
   void add_entry_block_defs (build_info &);
   void calculate_ebb_live_in_for_debug (build_info &);
+  phi_info *create_degenerate_phi (build_info &, set_info *);
   void add_phi_nodes (build_info &);
   void add_artificial_accesses (build_info &, df_ref_flags);
   void add_block_contents (build_info &);

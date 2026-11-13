@@ -1,5 +1,6 @@
 /* { dg-do compile } */
-/* { dg-options "-O2 -msse2" } */
+/* { dg-options "-O2 -msse2 -mno-avx2 -mno-avx512vl" } */
+/* { dg-additional-options "-fno-PIE" { target ia32 } } */
 
 #define N 4
 
@@ -28,7 +29,7 @@ __vu srl_c (__vu a)
   return a >> 5;
 }
 
-/* { dg-final { scan-assembler-times "psrlw" 2 } } */
+/* { dg-final { scan-assembler-times "psrlw" 5 } } */
 
 __vi sra (__vi a, int n)
 {

@@ -1,5 +1,5 @@
 ;; Constraint definitions for RISC-V target.
-;; Copyright (C) 2011-2024 Free Software Foundation, Inc.
+;; Copyright (C) 2011-2026 Free Software Foundation, Inc.
 ;; Contributed by Andrew Waterman (andrew@sifive.com).
 ;; Based on MIPS target for GNU compiler.
 ;;
@@ -28,10 +28,24 @@
 (define_register_constraint "j" "SIBCALL_REGS"
   "@internal")
 
+(define_register_constraint "R" "GR_REGS"
+  "Even-odd general purpose register pair."
+  "regno % 2 == 0")
+
 ;; Avoid using register t0 for JALR's argument, because for some
 ;; microarchitectures that is a return-address stack hint.
 (define_register_constraint "l" "JALR_REGS"
   "@internal")
+
+(define_register_constraint "cr" "RVC_GR_REGS"
+  "RVC general purpose register (x8-x15).")
+
+(define_register_constraint "cf" "TARGET_HARD_FLOAT ? RVC_FP_REGS : (TARGET_ZFINX ? RVC_GR_REGS : NO_REGS)"
+  "RVC floating-point registers (f8-f15), if available, reuse GPR as FPR when use zfinx.")
+
+(define_register_constraint "cR" "RVC_GR_REGS"
+  "Even-odd RVC general purpose register (x8-x15)."
+  "regno % 2 == 0")
 
 ;; General constraints
 
@@ -45,30 +59,35 @@
   (and (match_code "const_int")
        (match_test "ival == 0")))
 
-(define_constraint "c01"
+(define_constraint "k01"
   "Constant value 1."
   (and (match_code "const_int")
        (match_test "ival == 1")))
 
-(define_constraint "c02"
+(define_constraint "k02"
   "Constant value 2"
   (and (match_code "const_int")
        (match_test "ival == 2")))
 
-(define_constraint "c03"
+(define_constraint "k03"
   "Constant value 3"
   (and (match_code "const_int")
        (match_test "ival == 3")))
 
-(define_constraint "c04"
+(define_constraint "k04"
   "Constant value 4"
   (and (match_code "const_int")
        (match_test "ival == 4")))
 
-(define_constraint "c08"
+(define_constraint "k08"
   "Constant value 8"
   (and (match_code "const_int")
        (match_test "ival == 8")))
+
+(define_constraint "P"
+  "A 5-bit signed immediate for vmv.v.i."
+  (and (match_code "const_int")
+       (match_test "IN_RANGE (ival, -16, 15)")))
 
 (define_constraint "K"
   "A 5-bit unsigned immediate for CSR access instructions."
@@ -79,6 +98,12 @@
   "A U-type 20-bit signed immediate."
   (and (match_code "const_int")
        (match_test "LUI_OPERAND (ival)")))
+
+(define_constraint "MiG"
+  "const can be represented as sum of any S12 values."
+  (and (match_code "const_int")
+       (ior (match_test "IN_RANGE (ival,  2048,  4094)")
+	    (match_test "IN_RANGE (ival, -4096, -2049)"))))
 
 (define_constraint "Ds3"
   "@internal
@@ -212,10 +237,11 @@
  (and (match_code "const_vector")
       (match_test "rtx_equal_p (op, riscv_vector::gen_scalar_move_mask (GET_MODE (op)))")))
 
-(define_memory_constraint "Wdm"
+(define_constraint "Wdm"
   "Vector duplicate memory operand"
-  (and (match_code "mem")
-       (match_code "reg" "0")))
+  (and (match_test "strided_load_broadcast_p ()")
+       (and (match_code "mem")
+	    (match_code "reg" "0"))))
 
 ;; Vendor ISA extension constraints.
 
@@ -242,6 +268,15 @@
    A MEM with a valid address for th.[l|s]*ur* instructions."
   (and (match_code "mem")
        (match_test "th_memidx_legitimate_index_p (op, true)")))
+
+(define_memory_constraint "th_m_noi"
+  "@internal
+   A MEM with does not match XTheadMemIdx operands."
+  (and (match_code "mem")
+       (and (match_test "!th_memidx_legitimate_modify_p (op, true)")
+	    (and (match_test "!th_memidx_legitimate_modify_p (op, false)")
+		 (and (match_test "!th_memidx_legitimate_index_p (op, false)")
+		      (match_test "!th_memidx_legitimate_index_p (op, true)"))))))
 
 ;; CORE-V Constraints
 (define_constraint "CV_alu_pow2"
@@ -281,3 +316,31 @@
   "Shifting immediate for SIMD shufflei3."
   (and (match_code "const_int")
        (match_test "IN_RANGE (ival, -64, -1)")))
+
+(define_constraint "Ou01"
+  "A 1-bit unsigned immediate."
+  (and (match_code "const_int")
+       (match_test "IN_RANGE (ival, 0, 1)")))
+
+(define_constraint "Ou02"
+  "A 2-bit unsigned immediate."
+  (and (match_code "const_int")
+       (match_test "IN_RANGE (ival, 0, 3)")))
+
+(define_constraint "Q"
+  "An address operand that is valid for a prefetch instruction"
+  (match_operand 0 "prefetch_operand"))
+
+(define_address_constraint "ZD"
+  "An address operand that is valid for a mips prefetch instruction"
+  (match_test "TARGET_XMIPSCBOP && riscv_prefetch_offset_address_p (op, mode)"))
+
+(define_constraint "Ou07"
+  "A 7-bit unsigned immediate."
+  (and (match_code "const_int")
+       (match_test "IN_RANGE (ival, 0, 127)")))
+
+(define_constraint "ads_Bext"
+  "Sequence bit extract."
+  (and (match_code "const_int")
+       (match_test "(ival & (ival + 1)) == 0")))

@@ -1,5 +1,5 @@
 /* Vectorizer
-   Copyright (C) 2003-2024 Free Software Foundation, Inc.
+   Copyright (C) 2003-2026 Free Software Foundation, Inc.
    Contributed by Dorit Naishlos <dorit@il.ibm.com>
 
 This file is part of GCC.
@@ -83,6 +83,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "internal-fn.h"
 #include "tree-ssa-sccvn.h"
 #include "tree-into-ssa.h"
+#include "gimple-range.h"
 
 /* Loop or bb location, with hotness information.  */
 dump_user_location_t vect_location;
@@ -463,7 +464,10 @@ shrink_simd_arrays
 vec_info::vec_info (vec_info::vec_kind kind_in, vec_info_shared *shared_)
   : kind (kind_in),
     shared (shared_),
-    stmt_vec_info_ro (false)
+    stmt_vec_info_ro (false),
+    bbs (NULL),
+    nbbs (0),
+    inv_pattern_def_seq (NULL)
 {
   stmt_vec_infos.create (50);
 }
@@ -477,8 +481,7 @@ vec_info::~vec_info ()
 }
 
 vec_info_shared::vec_info_shared ()
-  : n_stmts (0),
-    datarefs (vNULL),
+  : datarefs (vNULL),
     datarefs_copy (vNULL),
     ddrs (vNULL)
 {
@@ -532,9 +535,33 @@ stmt_vec_info
 vec_info::add_pattern_stmt (gimple *stmt, stmt_vec_info stmt_info)
 {
   stmt_vec_info res = new_stmt_vec_info (stmt);
+  res->pattern_stmt_p = true;
   set_vinfo_for_stmt (stmt, res, false);
   STMT_VINFO_RELATED_STMT (res) = stmt_info;
   return res;
+}
+
+/* If STMT was previously associated with a stmt_vec_info and STMT now resides
+   at a different address than before (e.g., because STMT is a phi node that has
+   been resized), update the stored address to match the new one.  It is not
+   possible to use lookup_stmt () to perform this task, because that function
+   returns NULL if the stored stmt pointer does not match the one being looked
+   up.  */
+
+stmt_vec_info
+vec_info::resync_stmt_addr (gimple *stmt)
+{
+  unsigned int uid = gimple_uid (stmt);
+  if (uid > 0 && uid - 1 < stmt_vec_infos.length ())
+    {
+      stmt_vec_info res = stmt_vec_infos[uid - 1];
+      if (res && res->stmt)
+	{
+	  res->stmt = stmt;
+	  return res;
+	}
+    }
+  return nullptr;
 }
 
 /* If STMT has an associated stmt_vec_info, return that vec_info, otherwise
@@ -605,6 +632,10 @@ vec_info::move_dr (stmt_vec_info new_stmt_info, stmt_vec_info old_stmt_info)
     = STMT_VINFO_DR_WRT_VEC_LOOP (old_stmt_info);
   STMT_VINFO_GATHER_SCATTER_P (new_stmt_info)
     = STMT_VINFO_GATHER_SCATTER_P (old_stmt_info);
+  STMT_VINFO_STRIDED_P (new_stmt_info)
+    = STMT_VINFO_STRIDED_P (old_stmt_info);
+  STMT_VINFO_SIMD_LANE_ACCESS_P (new_stmt_info)
+    = STMT_VINFO_SIMD_LANE_ACCESS_P (old_stmt_info);
 }
 
 /* Permanently remove the statement described by STMT_INFO from the
@@ -660,9 +691,8 @@ vec_info::insert_seq_on_entry (stmt_vec_info context, gimple_seq seq)
     }
   else
     {
-      bb_vec_info bb_vinfo = as_a <bb_vec_info> (this);
       gimple_stmt_iterator gsi_region_begin
-	= gsi_after_labels (bb_vinfo->bbs[0]);
+	= gsi_after_labels (bbs[0]);
       gsi_insert_seq_before (&gsi_region_begin, seq, GSI_SAME_STMT);
     }
 }
@@ -686,18 +716,14 @@ vec_info::new_stmt_vec_info (gimple *stmt)
   stmt_vec_info res = XCNEW (class _stmt_vec_info);
   res->stmt = stmt;
 
-  STMT_VINFO_TYPE (res) = undef_vec_info_type;
   STMT_VINFO_RELEVANT (res) = vect_unused_in_scope;
   STMT_VINFO_VECTORIZABLE (res) = true;
   STMT_VINFO_REDUC_TYPE (res) = TREE_CODE_REDUCTION;
   STMT_VINFO_REDUC_CODE (res) = ERROR_MARK;
-  STMT_VINFO_REDUC_FN (res) = IFN_LAST;
   STMT_VINFO_REDUC_IDX (res) = -1;
+  STMT_VINFO_REDUC_DEF (res) = NULL;
   STMT_VINFO_SLP_VECT_ONLY (res) = false;
   STMT_VINFO_SLP_VECT_ONLY_PATTERN (res) = false;
-  STMT_VINFO_VEC_STMTS (res) = vNULL;
-  res->reduc_initial_values = vNULL;
-  res->reduc_scalar_results = vNULL;
 
   if (is_a <loop_vec_info> (this)
       && gimple_code (stmt) == GIMPLE_PHI
@@ -706,7 +732,7 @@ vec_info::new_stmt_vec_info (gimple *stmt)
   else
     STMT_VINFO_DEF_TYPE (res) = vect_internal_def;
 
-  STMT_SLP_TYPE (res) = loop_vect;
+  STMT_SLP_TYPE (res) = not_vect;
 
   /* This is really "uninitialized" until vect_compute_data_ref_alignment.  */
   res->dr_aux.misalignment = DR_MISALIGNMENT_UNINITIALIZED;
@@ -759,10 +785,6 @@ vec_info::free_stmt_vec_info (stmt_vec_info stmt_info)
 	release_ssa_name (lhs);
     }
 
-  stmt_info->reduc_initial_values.release ();
-  stmt_info->reduc_scalar_results.release ();
-  STMT_VINFO_SIMD_CLONE_INFO (stmt_info).release ();
-  STMT_VINFO_VEC_STMTS (stmt_info).release ();
   free (stmt_info);
 }
 
@@ -943,7 +965,7 @@ set_uid_loop_bbs (loop_vec_info loop_vinfo, gimple *loop_vectorized_call,
   class loop *scalar_loop = get_loop (fun, tree_to_shwi (arg));
 
   LOOP_VINFO_SCALAR_LOOP (loop_vinfo) = scalar_loop;
-  LOOP_VINFO_SCALAR_IV_EXIT (loop_vinfo)
+  LOOP_VINFO_SCALAR_MAIN_EXIT (loop_vinfo)
     = vec_init_loop_exit_info (scalar_loop);
   gcc_checking_assert (vect_loop_vectorized_call (scalar_loop)
 		       == loop_vectorized_call);
@@ -997,10 +1019,19 @@ vect_transform_loops (hash_table<simduid_to_vf> *&simduid_to_vf_htab,
     {
       if (GET_MODE_SIZE (loop_vinfo->vector_mode).is_constant (&bytes))
 	dump_printf_loc (MSG_OPTIMIZED_LOCATIONS, vect_location,
-			 "loop vectorized using %wu byte vectors\n", bytes);
+			 "%sloop vectorized using %s%wu byte vectors and"
+			 " unroll factor %u\n",
+			 LOOP_VINFO_EPILOGUE_P (loop_vinfo)
+			 ? "epilogue " : "",
+			 LOOP_VINFO_USING_PARTIAL_VECTORS_P (loop_vinfo)
+			 ? "masked " : "", bytes,
+			 (unsigned int) LOOP_VINFO_VECT_FACTOR
+						 (loop_vinfo).to_constant ());
       else
 	dump_printf_loc (MSG_OPTIMIZED_LOCATIONS, vect_location,
-			 "loop vectorized using variable length vectors\n");
+			 "%sloop vectorized using variable length vectors\n",
+			 LOOP_VINFO_EPILOGUE_P (loop_vinfo)
+			 ? "epilogue " : "");
     }
 
   loop_p new_loop = vect_transform_loop (loop_vinfo,
@@ -1107,7 +1138,7 @@ try_vectorize_loop_1 (hash_table<simduid_to_vf> *&simduid_to_vf_htab,
 		      || ifn == IFN_MASK_STORE
 		      || ifn == IFN_MASK_CALL
 		      /* Don't keep the if-converted parts when the ifn with
-			 specifc type is not supported by the backend.  */
+			 specific type is not supported by the backend.  */
 		      || (direct_internal_fn_p (ifn)
 			  && !direct_internal_fn_supported_p
 			  (call, OPTIMIZE_FOR_SPEED)))
@@ -1249,6 +1280,7 @@ pass_vectorize::execute (function *fun)
     note_simd_array_uses (&simd_array_to_simduid_htab, fun);
 
   /*  ----------- Analyze loops. -----------  */
+  enable_ranger (fun);
 
   /* If some loop was duplicated, it gets bigger number
      than all previously defined loops.  This fact allows us to run
@@ -1311,6 +1343,7 @@ pass_vectorize::execute (function *fun)
                      num_vectorized_loops);
 
   /*  ----------- Finalize. -----------  */
+  disable_ranger (fun);
 
   if (any_ifcvt_loops)
     for (i = 1; i < number_of_loops (fun); i++)
@@ -1322,6 +1355,7 @@ pass_vectorize::execute (function *fun)
 	    if (g)
 	      {
 		fold_loop_internal_call (g, boolean_false_node);
+		loop->dont_vectorize = false;
 		ret |= TODO_cleanup_cfg;
 		g = NULL;
 	      }
@@ -1331,6 +1365,7 @@ pass_vectorize::execute (function *fun)
 	    if (g)
 	      {
 		fold_loop_internal_call (g, boolean_false_node);
+		loop->dont_vectorize = false;
 		ret |= TODO_cleanup_cfg;
 	      }
 	  }
@@ -1568,7 +1603,7 @@ static hash_map<tree, unsigned> *type_align_map;
 /* Return alignment of array's vector type corresponding to scalar type.
    0 if no vector type exists.  */
 static unsigned
-get_vec_alignment_for_array_type (tree type) 
+get_vec_alignment_for_array_type (tree type)
 {
   gcc_assert (TREE_CODE (type) == ARRAY_TYPE);
   poly_uint64 array_size, vector_size;
@@ -1589,7 +1624,7 @@ get_vec_alignment_for_array_type (tree type)
    offset is a multiple of it's vector alignment.
    0 if no suitable field is found.  */
 static unsigned
-get_vec_alignment_for_record_type (tree type) 
+get_vec_alignment_for_record_type (tree type)
 {
   gcc_assert (TREE_CODE (type) == RECORD_TYPE);
 
@@ -1608,7 +1643,7 @@ get_vec_alignment_for_record_type (tree type)
        field != NULL_TREE;
        field = DECL_CHAIN (field))
     {
-      /* Skip if not FIELD_DECL or if alignment is set by user.  */ 
+      /* Skip if not FIELD_DECL or if alignment is set by user.  */
       if (TREE_CODE (field) != FIELD_DECL
 	  || DECL_USER_ALIGN (field)
 	  || DECL_ARTIFICIAL (field))
@@ -1626,11 +1661,11 @@ get_vec_alignment_for_record_type (tree type)
       if (!tree_fits_uhwi_p (offset_tree))
 	break;
 
-      offset = tree_to_uhwi (offset_tree); 
+      offset = tree_to_uhwi (offset_tree);
       alignment = get_vec_alignment_for_type (TREE_TYPE (field));
 
       /* Get maximum alignment of vectorized field/array among those members
-	 whose offset is multiple of the vector alignment.  */ 
+	 whose offset is multiple of the vector alignment.  */
       if (alignment
 	  && (offset % alignment == 0)
 	  && (alignment > max_align))

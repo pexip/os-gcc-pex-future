@@ -1,5 +1,5 @@
 /* RTL-based forward propagation pass for GNU compiler.
-   Copyright (C) 2005-2024 Free Software Foundation, Inc.
+   Copyright (C) 2005-2026 Free Software Foundation, Inc.
    Contributed by Paolo Bonzini and Steven Bosscher.
 
 This file is part of GCC.
@@ -20,6 +20,7 @@ along with GCC; see the file COPYING3.  If not see
 
 #define INCLUDE_ALGORITHM
 #define INCLUDE_FUNCTIONAL
+#define INCLUDE_ARRAY
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
@@ -144,10 +145,11 @@ should_replace_address (int old_num_changes, rtx mem, rtx_insn *insn)
 
   /* Prefer the new address if it is less expensive.  */
   bool speed = optimize_bb_for_speed_p (BLOCK_FOR_INSN (insn));
-  temporarily_undo_changes (old_num_changes);
-  gain = address_cost (XEXP (mem, 0), GET_MODE (mem),
-		       MEM_ADDR_SPACE (mem), speed);
-  redo_changes (old_num_changes);
+  {
+    undo_recog_changes undo (old_num_changes);
+    gain = address_cost (XEXP (mem, 0), GET_MODE (mem),
+			 MEM_ADDR_SPACE (mem), speed);
+  }
   gain -= address_cost (XEXP (mem, 0), GET_MODE (mem),
 			MEM_ADDR_SPACE (mem), speed);
 
@@ -158,9 +160,8 @@ should_replace_address (int old_num_changes, rtx mem, rtx_insn *insn)
   if (gain == 0)
     {
       gain = set_src_cost (XEXP (mem, 0), VOIDmode, speed);
-      temporarily_undo_changes (old_num_changes);
+      undo_recog_changes undo (old_num_changes);
       gain -= set_src_cost (XEXP (mem, 0), VOIDmode, speed);
-      redo_changes (old_num_changes);
     }
 
   return (gain > 0);
@@ -218,9 +219,11 @@ fwprop_propagation::check_mem (int old_num_changes, rtx mem)
       return false;
     }
 
-  temporarily_undo_changes (old_num_changes);
-  bool can_simplify = can_simplify_addr (XEXP (mem, 0));
-  redo_changes (old_num_changes);
+  bool can_simplify = [&]()
+    {
+      undo_recog_changes undo (old_num_changes);
+      return can_simplify_addr (XEXP (mem, 0));
+    } ();
   if (!can_simplify)
     {
       failure_reason = "would replace a frame address";
@@ -412,9 +415,10 @@ try_fwprop_subst_note (insn_info *use_insn, set_info *def,
     {
       fprintf (dump_file, "\nin notes of insn %d, replacing:\n  ",
 	       INSN_UID (use_rtl));
-      temporarily_undo_changes (0);
-      print_inline_rtx (dump_file, note, 2);
-      redo_changes (0);
+      {
+	undo_recog_changes undo (0);
+	print_inline_rtx (dump_file, note, 2);
+      }
       fprintf (dump_file, "\n with:\n  ");
       print_inline_rtx (dump_file, note, 2);
       fprintf (dump_file, "\n");
@@ -453,7 +457,7 @@ try_fwprop_subst_pattern (obstack_watermark &attempt, insn_change &use_change,
       && (prop.changed_mem_p ()
 	  || contains_mem_rtx_p (src)
 	  || use_insn->is_asm ()
-	  || !single_set (use_rtl)))
+	  || use_insn->is_debug_insn ()))
     {
       if (dump_file && (dump_flags & TDF_DETAILS))
 	fprintf (dump_file, "cannot propagate from insn %d into"
@@ -466,34 +470,24 @@ try_fwprop_subst_pattern (obstack_watermark &attempt, insn_change &use_change,
     {
       fprintf (dump_file, "\npropagating insn %d into insn %d, replacing:\n",
 	       def_insn->uid (), use_insn->uid ());
-      temporarily_undo_changes (0);
+      undo_recog_changes undo (0);
       print_rtl_single (dump_file, PATTERN (use_rtl));
-      redo_changes (0);
     }
 
-  /* ??? In theory, it should be better to use insn costs rather than
-     set_src_costs here.  That would involve replacing this code with
-     change_is_worthwhile.  */
   bool ok = recog (attempt, use_change);
-  if (ok && !prop.changed_mem_p () && !use_insn->is_asm ())
-    if (rtx use_set = single_set (use_rtl))
-      {
-	bool speed = optimize_bb_for_speed_p (BLOCK_FOR_INSN (use_rtl));
-	temporarily_undo_changes (0);
-	auto old_cost = set_src_cost (SET_SRC (use_set),
-				      GET_MODE (SET_DEST (use_set)), speed);
-	redo_changes (0);
-	auto new_cost = set_src_cost (SET_SRC (use_set),
-				      GET_MODE (SET_DEST (use_set)), speed);
-	if (new_cost > old_cost
-	    || (new_cost == old_cost && !prop.likely_profitable_p ()))
-	  {
-	    if (dump_file)
-	      fprintf (dump_file, "change not profitable"
-		       " (cost %d -> cost %d)\n", old_cost, new_cost);
-	    ok = false;
-	  }
-      }
+  if (ok
+      && !prop.changed_mem_p ()
+      && !use_insn->is_asm ()
+      && !use_insn->is_debug_insn ())
+    {
+      bool strict_p = !prop.likely_profitable_p ();
+      if (!change_is_worthwhile (use_change, strict_p))
+	{
+	  if (dump_file)
+	    fprintf (dump_file, "change not profitable");
+	  ok = false;
+	}
+    }
 
   if (!ok)
     {
@@ -840,6 +834,20 @@ forward_propagate_into (use_info *use, bool reg_prop_only = false)
   /* Only consider uses whose definition comes from a real instruction.  */
   insn_info *def_insn = def->insn ();
   if (def_insn->is_artificial ())
+    return false;
+
+  /* Do not propagate asms.  The only kind of propagation that would
+     succeed is propagation into a register move.  Such a propagation
+     is neutral if the destination of the move is a pseudo and unnecessarily
+     restricts the register allocator if the destination of the move is
+     a hard register.
+
+     Furthermore, unlike for a normal instruction, we cannot take a SET from an
+     asm and try dropping the CLOBBERs.  The recog process does not (and should
+     not try to) second-guess whether what the user wrote can be changed and
+     so it has to assume that any asm given to it is a fair reflection of
+     what the user wrote.  */
+  if (def_insn->is_asm ())
     return false;
 
   rtx_insn *def_rtl = def_insn->rtl ();

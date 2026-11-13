@@ -1,5 +1,5 @@
 /* Tuning model description for AArch64 architecture.
-   Copyright (C) 2023-2024 Free Software Foundation, Inc.
+   Copyright (C) 2023-2026 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -106,6 +106,8 @@ static const sve_vec_cost generic_armv8_a_sve_vector_cost =
   2, /* fadda_f64_cost  */
   4, /* gather_load_x32_cost  */
   2, /* gather_load_x64_cost  */
+  12, /* gather_load_x32_init_cost  */
+  4, /* gather_load_x64_init_cost  */
   1 /* scatter_store_elt_cost  */
 };
 
@@ -121,13 +123,6 @@ static const struct cpu_vector_cost generic_armv8_a_vector_cost =
   &generic_armv8_a_advsimd_vector_cost, /* advsimd  */
   &generic_armv8_a_sve_vector_cost, /* sve */
   nullptr /* issue_info  */
-};
-
-/* Generic costs for branch instructions.  */
-static const struct cpu_branch_cost generic_armv8_a_branch_cost =
-{
-  1,  /* Predictable.  */
-  3   /* Unpredictable.  */
 };
 
 /* Generic approximation modes.  */
@@ -156,7 +151,7 @@ static const struct tune_params generic_armv8_a_tunings =
   &generic_armv8_a_addrcost_table,
   &generic_armv8_a_regmove_cost,
   &generic_armv8_a_vector_cost,
-  &generic_armv8_a_branch_cost,
+  &generic_branch_cost,
   &generic_armv8_a_approx_modes,
   SVE_NOT_IMPLEMENTED, /* sve_width  */
   { 4, /* load_int.  */
@@ -167,7 +162,7 @@ static const struct tune_params generic_armv8_a_tunings =
     4 /* store_pred.  */
   }, /* memmov_cost.  */
   3, /* issue_rate  */
-  (AARCH64_FUSE_AES_AESMC | AARCH64_FUSE_CMP_BRANCH), /* fusible_ops  */
+  AARCH64_FUSE_BASE, /* fusible_ops  */
   "32:16",	/* function_align.  */
   "4",		/* jump_align.  */
   "32:16",	/* loop_align.  */
@@ -179,13 +174,13 @@ static const struct tune_params generic_armv8_a_tunings =
   2,	/* min_div_recip_mul_df.  */
   0,	/* max_case_values.  */
   tune_params::AUTOPREFETCHER_WEAK,	/* autoprefetcher_model.  */
-  (AARCH64_EXTRA_TUNE_CHEAP_SHIFT_EXTEND
+  (AARCH64_EXTRA_TUNE_BASE
    | AARCH64_EXTRA_TUNE_CSE_SVE_VL_CONSTANTS
-   | AARCH64_EXTRA_TUNE_USE_NEW_VECTOR_COSTS
    | AARCH64_EXTRA_TUNE_MATCHED_VECTOR_THROUGHPUT),	/* tune_flags.  */
-  &generic_prefetch_tune,
+  &generic_armv8_a_prefetch_tune,
   AARCH64_LDP_STP_POLICY_ALWAYS,   /* ldp_policy_model.  */
-  AARCH64_LDP_STP_POLICY_ALWAYS    /* stp_policy_model.  */
+  AARCH64_LDP_STP_POLICY_ALWAYS,   /* stp_policy_model.  */
+  nullptr	/* dispatch_constraints.  */
 };
 
 #endif /* GCC_AARCH64_H_GENERIC_ARMV8_A.  */

@@ -1,5 +1,5 @@
 /* IO Code translation/library interface
-   Copyright (C) 2002-2024 Free Software Foundation, Inc.
+   Copyright (C) 2002-2026 Free Software Foundation, Inc.
    Contributed by Paul Brook
 
 This file is part of GCC.
@@ -117,6 +117,8 @@ enum iocall
   IOCALL_WRITE_DONE,
   IOCALL_X_INTEGER,
   IOCALL_X_INTEGER_WRITE,
+  IOCALL_X_UNSIGNED,
+  IOCALL_X_UNSIGNED_WRITE,
   IOCALL_X_LOGICAL,
   IOCALL_X_LOGICAL_WRITE,
   IOCALL_X_CHARACTER,
@@ -335,6 +337,14 @@ gfc_build_io_library_fndecls (void)
 	get_identifier (PREFIX("transfer_integer_write")), ". w R . ",
 	void_type_node, 3, dt_parm_type, pvoid_type_node, gfc_int4_type_node);
 
+  iocall[IOCALL_X_UNSIGNED] = gfc_build_library_function_decl_with_spec (
+	get_identifier (PREFIX("transfer_unsigned")), ". w W . ",
+	void_type_node, 3, dt_parm_type, pvoid_type_node, gfc_int4_type_node);
+
+  iocall[IOCALL_X_UNSIGNED_WRITE] = gfc_build_library_function_decl_with_spec (
+	get_identifier (PREFIX("transfer_unsigned_write")), ". w R . ",
+	void_type_node, 3, dt_parm_type, pvoid_type_node, gfc_int4_type_node);
+
   iocall[IOCALL_X_LOGICAL] = gfc_build_library_function_decl_with_spec (
 	get_identifier (PREFIX("transfer_logical")), ". w W . ",
 	void_type_node, 3, dt_parm_type, pvoid_type_node, gfc_int4_type_node);
@@ -406,7 +416,7 @@ gfc_build_io_library_fndecls (void)
 	integer_type_node, gfc_charlen_type_node);
 
   iocall[IOCALL_X_DERIVED] = gfc_build_library_function_decl_with_spec (
-	get_identifier (PREFIX("transfer_derived")), ". w r ",
+	get_identifier (PREFIX("transfer_derived")), ". w w ",
 	void_type_node, 2, dt_parm_type, pvoid_type_node);
 
   /* Library entry points */
@@ -1040,9 +1050,7 @@ io_result (stmtblock_t * block, tree var, gfc_st_label * err_label,
 static void
 set_error_locus (stmtblock_t * block, tree var, locus * where)
 {
-  gfc_file *f;
   tree str, locus_file;
-  int line;
   gfc_st_parameter_field *p = &st_parameter_field[IOPARM_common_filename];
 
   locus_file = fold_build3_loc (input_location, COMPONENT_REF,
@@ -1051,14 +1059,12 @@ set_error_locus (stmtblock_t * block, tree var, locus * where)
   locus_file = fold_build3_loc (input_location, COMPONENT_REF,
 				TREE_TYPE (p->field), locus_file,
 				p->field, NULL_TREE);
-  f = where->lb->file;
-  str = gfc_build_cstring_const (f->filename);
-
+  location_t loc = gfc_get_location (where);
+  str = gfc_build_cstring_const (LOCATION_FILE (loc));
   str = gfc_build_addr_expr (pchar_type_node, str);
   gfc_add_modify (block, locus_file, str);
 
-  line = LOCATION_LINE (where->lb->location);
-  set_parameter_const (block, var, IOPARM_common_line, line);
+  set_parameter_const (block, var, IOPARM_common_line, LOCATION_LINE (loc));
 }
 
 
@@ -1692,8 +1698,9 @@ transfer_namelist_element (stmtblock_t * block, const char * var_name,
   gcc_assert (sym || c);
 
   /* Build the namelist object name.  */
-  if (sym && !sym->attr.use_only && sym->attr.use_rename
-      && sym->ns->use_stmts->rename)
+  if (sym && sym->attr.use_rename && sym->ns->use_stmts->rename
+      && strlen(sym->ns->use_stmts->rename->local_name) > 0
+      && strcmp(sym->ns->use_stmts->rename->use_name, var_name) == 0)
     string = gfc_build_cstring_const (sym->ns->use_stmts->rename->local_name);
   else
     string = gfc_build_cstring_const (var_name);
@@ -2342,6 +2349,15 @@ transfer_expr (gfc_se * se, gfc_typespec * ts, tree addr_expr,
 
       break;
 
+    case BT_UNSIGNED:
+      arg2 = build_int_cst (unsigned_type_node, kind);
+      if (last_dt == READ)
+	function = iocall[IOCALL_X_UNSIGNED];
+      else
+	function = iocall[IOCALL_X_UNSIGNED_WRITE];
+
+      break;
+
     case BT_REAL:
       arg2 = build_int_cst (integer_type_node, kind);
       if (last_dt == READ)
@@ -2463,8 +2479,8 @@ transfer_expr (gfc_se * se, gfc_typespec * ts, tree addr_expr,
 		  || (ts->type == BT_CLASS
 		      && !GFC_CLASS_TYPE_P (TREE_TYPE (decl))))
 		gfc_conv_derived_to_class (se, code->expr1,
-					   dtio_sub->formal->sym->ts,
-					   vptr, false, false);
+					   dtio_sub->formal->sym, vptr, false,
+					   false, "transfer");
 	      addr_expr = se->expr;
 	      function = iocall[IOCALL_X_DERIVED];
 	      break;
@@ -2484,7 +2500,8 @@ transfer_expr (gfc_se * se, gfc_typespec * ts, tree addr_expr,
 	      for (c = ts->u.derived->components; c; c = c->next)
 		{
 		  /* Ignore hidden string lengths.  */
-		  if (c->name[0] == '_')
+		  if (c->name[0] == '_'
+		      || c->attr.pdt_kind || c->attr.pdt_len)
 		    continue;
 
 		  field = c->backend_decl;
@@ -2496,7 +2513,9 @@ transfer_expr (gfc_se * se, gfc_typespec * ts, tree addr_expr,
 
 		  if (c->attr.dimension)
 		    {
-		      tmp = transfer_array_component (tmp, c, & code->loc);
+		      tmp = transfer_array_component (tmp, c,
+						      code ? &code->loc
+						      : NULL);
 		      gfc_add_expr_to_block (&se->pre, tmp);
 		    }
 		  else
@@ -2630,7 +2649,9 @@ gfc_trans_transfer (gfc_code * code)
 	 && ((expr->symtree->n.sym->ts.type == BT_DERIVED && expr->ts.deferred)
 	     || (expr->symtree->n.sym->assoc
 		 && expr->symtree->n.sym->assoc->variable)
-	     || gfc_expr_attr (expr).pointer))
+	     || gfc_expr_attr (expr).pointer
+	     || (expr->symtree->n.sym->attr.pointer
+		 && gfc_expr_attr (expr).target)))
 	goto scalarize;
 
       /* With array-bounds checking enabled, force scalarization in some

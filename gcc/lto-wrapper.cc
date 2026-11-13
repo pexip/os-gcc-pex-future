@@ -1,5 +1,5 @@
 /* Wrapper to call lto.  Used by collect2 and the linker plugin.
-   Copyright (C) 2009-2024 Free Software Foundation, Inc.
+   Copyright (C) 2009-2026 Free Software Foundation, Inc.
 
    Factored out of collect2 by Rafael Espindola <espindola@google.com>
 
@@ -38,6 +38,9 @@ along with GCC; see the file COPYING3.  If not see
 */
 
 #define INCLUDE_STRING
+#define INCLUDE_ARRAY
+#define INCLUDE_MAP
+#define INCLUDE_VECTOR
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
@@ -52,6 +55,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "opts-diagnostic.h"
 #include "opt-suggestions.h"
 #include "opts-jobserver.h"
+#include "lto-ltrans-cache.h"
 
 /* Environment variable, used for passing the names of offload targets from GCC
    driver to lto-wrapper.  */
@@ -79,7 +83,7 @@ static char *flto_out;
 static unsigned int nr;
 static int *ltrans_priorities;
 static char **input_names;
-static char **output_names;
+static char const**output_names;
 static char **offload_names;
 static char *offload_objects_file_name;
 static char *makefile;
@@ -288,7 +292,7 @@ merge_and_complain (vec<cl_decoded_option> &decoded_options,
 	  cf_protection_option = foption;
 	}
     }
-  
+
   /* The following does what the old LTO option code did,
      union all target and a selected set of common options.  */
   for (i = 0; i < fdecoded_options.length (); ++i)
@@ -310,10 +314,15 @@ merge_and_complain (vec<cl_decoded_option> &decoded_options,
 
 	  /* Fallthru.  */
 	case OPT_fdiagnostics_show_caret:
+	case OPT_fdiagnostics_show_event_links:
+	case OPT_fdiagnostics_show_highlight_colors:
 	case OPT_fdiagnostics_show_labels:
 	case OPT_fdiagnostics_show_line_numbers:
 	case OPT_fdiagnostics_show_option:
 	case OPT_fdiagnostics_show_location_:
+	case OPT_fdiagnostics_show_nesting:
+	case OPT_fdiagnostics_show_nesting_locations:
+	case OPT_fdiagnostics_show_nesting_levels:
 	case OPT_fshow_column:
 	case OPT_fcommon:
 	case OPT_fgnu_tm:
@@ -479,9 +488,10 @@ merge_and_complain (vec<cl_decoded_option> &decoded_options,
 	      decoded_options[existing_opt].value = 1;
 	    }
 	  break;
- 
+
 
 	case OPT_foffload_abi_:
+	case OPT_foffload_abi_host_opts_:
 	  if (existing_opt == -1)
 	    decoded_options.safe_push (*foption);
 	  else if (foption->value != decoded_options[existing_opt].value)
@@ -515,7 +525,7 @@ merge_and_complain (vec<cl_decoded_option> &decoded_options,
 
      It would be good to warn on mismatches, but it is bit hard to do as
      we do not know what nothing translates to.  */
-    
+
   for (unsigned int j = 0; j < decoded_options.length ();)
     if (decoded_options[j].opt_index == OPT_fPIC
 	|| decoded_options[j].opt_index == OPT_fpic)
@@ -726,10 +736,15 @@ append_compiler_options (obstack *argv_obstack, vec<cl_decoded_option> opts)
       switch (option->opt_index)
 	{
 	case OPT_fdiagnostics_show_caret:
+	case OPT_fdiagnostics_show_event_links:
+	case OPT_fdiagnostics_show_highlight_colors:
 	case OPT_fdiagnostics_show_labels:
 	case OPT_fdiagnostics_show_line_numbers:
 	case OPT_fdiagnostics_show_option:
 	case OPT_fdiagnostics_show_location_:
+	case OPT_fdiagnostics_show_nesting:
+	case OPT_fdiagnostics_show_nesting_locations:
+	case OPT_fdiagnostics_show_nesting_levels:
 	case OPT_fshow_column:
 	case OPT_fPIC:
 	case OPT_fpic:
@@ -741,6 +756,7 @@ append_compiler_options (obstack *argv_obstack, vec<cl_decoded_option> opts)
 	case OPT_fopenacc:
 	case OPT_fopenacc_dim_:
 	case OPT_foffload_abi_:
+	case OPT_foffload_abi_host_opts_:
 	case OPT_fcf_protection_:
 	case OPT_fasynchronous_unwind_tables:
 	case OPT_funwind_tables:
@@ -785,10 +801,15 @@ append_diag_options (obstack *argv_obstack, vec<cl_decoded_option> opts)
 	case OPT_fdiagnostics_color_:
 	case OPT_fdiagnostics_format_:
 	case OPT_fdiagnostics_show_caret:
+	case OPT_fdiagnostics_show_event_links:
+	case OPT_fdiagnostics_show_highlight_colors:
 	case OPT_fdiagnostics_show_labels:
 	case OPT_fdiagnostics_show_line_numbers:
 	case OPT_fdiagnostics_show_option:
 	case OPT_fdiagnostics_show_location_:
+	case OPT_fdiagnostics_show_nesting:
+	case OPT_fdiagnostics_show_nesting_locations:
+	case OPT_fdiagnostics_show_nesting_levels:
 	case OPT_fshow_column:
 	  break;
 	default:
@@ -1193,18 +1214,16 @@ debug_objcopy (const char *infile, bool rename)
 
   const char *p;
   const char *orig_infile = infile;
-  off_t inoff = 0;
-  long loffset;
+  int64_t inoff = 0;
   int consumed;
   if ((p = strrchr (infile, '@'))
       && p != infile
-      && sscanf (p, "@%li%n", &loffset, &consumed) >= 1
+      && sscanf (p, "@%" PRIi64 "%n", &inoff, &consumed) >= 1
       && strlen (p) == (unsigned int) consumed)
     {
       char *fname = xstrdup (infile);
       fname[p - infile] = '\0';
       infile = fname;
-      inoff = (off_t) loffset;
     }
   int infd = open (infile, O_RDONLY | O_BINARY);
   if (infd == -1)
@@ -1362,19 +1381,10 @@ init_num_threads (void)
 void
 print_lto_docs_link ()
 {
-  bool print_url = global_dc->printer->url_format != URL_FORMAT_NONE;
-  const char *url = global_dc->make_option_url (OPT_flto);
-
-  pretty_printer pp;
-  pp.url_format = URL_FORMAT_DEFAULT;
-  pp_string (&pp, "see the ");
-  if (print_url)
-    pp_begin_url (&pp, url);
-  pp_string (&pp, "%<-flto%> option documentation");
-  if (print_url)
-    pp_end_url (&pp);
-  pp_string (&pp, " for more information");
-  inform (UNKNOWN_LOCATION, pp_formatted_text (&pp));
+  label_text url = label_text::take (global_dc->make_option_url (OPT_flto));
+  inform (UNKNOWN_LOCATION,
+	  "see the %{%<-flto%> option documentation%} for more information",
+	  url.get ());
 }
 
 /* Test that a make command is present and working, return true if so.  */
@@ -1391,7 +1401,7 @@ make_exists (void)
   int exit_status = 0;
   int err = 0;
   const char *errmsg
-    = pex_one (PEX_SEARCH, make_args[0], CONST_CAST (char **, make_args),
+    = pex_one (PEX_SEARCH, make_args[0], const_cast<char **> (make_args),
 	       "make", NULL, NULL, &exit_status, &err);
   freeargv (make_argv);
   return errmsg == NULL && exit_status == 0 && err == 0;
@@ -1434,6 +1444,8 @@ run_gcc (unsigned argc, char *argv[])
 #endif
   const char *incoming_dumppfx = dumppfx = NULL;
   static char current_dir[] = { '.', DIR_SEPARATOR, '\0' };
+  const char *ltrans_cache_dir = NULL;
+  size_t ltrans_cache_size = 4096;
 
   /* Get the driver and options.  */
   collect_gcc = getenv ("COLLECT_GCC");
@@ -1477,8 +1489,7 @@ run_gcc (unsigned argc, char *argv[])
     {
       char *p;
       int fd;
-      off_t file_offset = 0;
-      long loffset;
+      int64_t file_offset = 0;
       int consumed;
       char *filename = argv[i];
 
@@ -1491,14 +1502,13 @@ run_gcc (unsigned argc, char *argv[])
 	}
 
       if ((p = strrchr (argv[i], '@'))
-	  && p != argv[i] 
-	  && sscanf (p, "@%li%n", &loffset, &consumed) >= 1
+	  && p != argv[i]
+	  && sscanf (p, "@%" PRIi64 "%n", &file_offset, &consumed) >= 1
 	  && strlen (p) == (unsigned int) consumed)
 	{
 	  filename = XNEWVEC (char, p - argv[i] + 1);
 	  memcpy (filename, argv[i], p - argv[i]);
 	  filename[p - argv[i]] = '\0';
-	  file_offset = (off_t) loffset;
 	}
       fd = open (filename, O_RDONLY | O_BINARY);
       /* Linker plugin passes -fresolution and -flinker-output options.
@@ -1561,6 +1571,18 @@ run_gcc (unsigned argc, char *argv[])
 	    no_partition = true;
 	  break;
 
+	case OPT_flto_incremental_:
+	  /* Exists.  */
+	  if (access (option->arg, W_OK) == 0)
+	    ltrans_cache_dir = option->arg;
+	  else
+	    fatal_error (input_location, "missing directory: %s", option->arg);
+	  break;
+
+	case OPT_flto_incremental_cache_size_:
+	  ltrans_cache_size = atoi (option->arg);
+	  break;
+
 	case OPT_flto_:
 	  /* Override IL file settings with a linker -flto= option.  */
 	  merge_flto_options (fdecoded_options, option, true);
@@ -1597,6 +1619,10 @@ run_gcc (unsigned argc, char *argv[])
 
 	case OPT_fdiagnostics_color_:
 	  diagnostic_color_init (global_dc, option->value);
+	  break;
+
+	case OPT_fdiagnostics_show_highlight_colors:
+	  global_dc->set_show_highlight_colors (option->value);
 	  break;
 
 	case OPT_pie:
@@ -1779,20 +1805,18 @@ cont1:
       for (i = 0; i < num_offload_files; i++)
 	{
 	  char *p;
-	  long loffset;
 	  int fd, consumed;
-	  off_t file_offset = 0;
+	  int64_t file_offset = 0;
 	  char *filename = offload_argv[i];
 
 	  if ((p = strrchr (offload_argv[i], '@'))
 	      && p != offload_argv[i]
-	      && sscanf (p, "@%li%n", &loffset, &consumed) >= 1
+	      && sscanf (p, "@%" PRIi64 "%n", &file_offset, &consumed) >= 1
 	      && strlen (p) == (unsigned int) consumed)
 	    {
 	      filename = XNEWVEC (char, p - offload_argv[i] + 1);
 	      memcpy (filename, offload_argv[i], p - offload_argv[i]);
 	      filename[p - offload_argv[i]] = '\0';
-	      file_offset = (off_t) loffset;
 	    }
 	  fd = open (filename, O_RDONLY | O_BINARY);
 	  if (fd == -1)
@@ -1842,7 +1866,7 @@ cont1:
       obstack_ptr_grow (&argv_obstack, "-o");
       obstack_ptr_grow (&argv_obstack, flto_out);
     }
-  else 
+  else
     {
       const char *list_option = "-fltrans-output-list=";
 
@@ -1850,7 +1874,17 @@ cont1:
       char *dumpbase = concat (dumppfx, "wpa", NULL);
       obstack_ptr_grow (&argv_obstack, dumpbase);
 
-      if (save_temps)
+      if (ltrans_cache_dir)
+	{
+	  /* Results of wpa phase must be on the same disk partition as
+	     cache.  */
+	  char* file = concat (ltrans_cache_dir, "/ccXXXXXX.ltrans.out", NULL);
+	  int fd = mkstemps (file, strlen (".ltrans.out"));
+	  gcc_assert (fd != -1 && !close (fd));
+
+	  ltrans_output_file = file;
+	}
+      else if (save_temps)
 	ltrans_output_file = concat (dumppfx, "ltrans.out", NULL);
       else
 	ltrans_output_file = make_temp_file (".ltrans.out");
@@ -1895,7 +1929,7 @@ cont1:
 
   new_argv = XOBFINISH (&argv_obstack, const char **);
   argv_ptr = &new_argv[new_head_argc];
-  fork_execute (new_argv[0], CONST_CAST (char **, new_argv), true,
+  fork_execute (new_argv[0], const_cast<char **> (new_argv), true,
 		"ltrans_args");
 
   /* Copy the early generated debug info from the objects to temporary
@@ -1920,7 +1954,7 @@ cont1:
 	{
 	  for (i = 0; i < ltoobj_argc; ++i)
 	    if (early_debug_object_names[i] != NULL)
-	      printf ("%s\n", early_debug_object_names[i]);	      
+	      printf ("%s\n", early_debug_object_names[i]);
 	}
       /* These now belong to collect2.  */
       free (flto_out);
@@ -1976,7 +2010,8 @@ cont:
 	  ltrans_priorities
 	     = (int *)xrealloc (ltrans_priorities, nr * sizeof (int) * 2);
 	  input_names = (char **)xrealloc (input_names, nr * sizeof (char *));
-	  output_names = (char **)xrealloc (output_names, nr * sizeof (char *));
+	  output_names = (char const**)
+	    xrealloc (output_names, nr * sizeof (char const*));
 	  ltrans_priorities[(nr-1)*2] = priority;
 	  ltrans_priorities[(nr-1)*2+1] = nr-1;
 	  input_names[nr-1] = input_name;
@@ -2003,26 +2038,88 @@ cont:
 
       if (parallel)
 	{
-	  makefile = make_temp_file (".mk");
+	  if (save_temps)
+	    makefile = concat (dumppfx, "ltrans.mk", NULL);
+	  else
+	    makefile = make_temp_file (".mk");
 	  mstream = fopen (makefile, "w");
 	  qsort (ltrans_priorities, nr, sizeof (int) * 2, cmp_priority);
+	}
+
+      ltrans_file_cache ltrans_cache (ltrans_cache_dir, "ltrans", ".o",
+				      ltrans_cache_size);
+
+      if (ltrans_cache)
+	{
+	  if (!lockfile::lockfile_supported ())
+	    {
+	      warning (0, "using ltrans cache without file locking support,"
+		       " do not use in parallel");
+	    }
+	  ltrans_cache.deletion_lock.lock_read ();
+	  ltrans_cache.creation_lock.lock_write ();
+
+	  ltrans_cache.load_cache ();
+
+	  int recompiling = 0;
+
+	  for (i = 0; i < nr; ++i)
+	    {
+	      /* If it's a pass-through file do nothing.  */
+	      if (output_names[i])
+		continue;
+
+	      ltrans_file_cache::item* item;
+	      bool existed = ltrans_cache.add_to_cache (input_names[i], item);
+	      free (input_names[i]);
+	      input_names[i] = xstrdup (item->input.c_str ());
+
+	      if (existed)
+		{
+		  /* Fill the output_name to skip compilation.  */
+		  output_names[i] = item->output.c_str ();
+		}
+	      else
+		{
+		  /* Lock so no other process can access until the file is
+		     compiled.  */
+		  item->lock.lock_write ();
+		  recompiling++;
+		}
+	    }
+	  if (verbose)
+	    fprintf (stderr, "LTRANS: recompiling %d/%d\n", recompiling, nr);
+
+	  ltrans_cache.save_cache ();
+	  ltrans_cache.creation_lock.unlock ();
 	}
 
       /* Execute the LTRANS stage for each input file (or prepare a
 	 makefile to invoke this in parallel).  */
       for (i = 0; i < nr; ++i)
 	{
-	  char *output_name;
+	  char const* output_name;
 	  char *input_name = input_names[i];
-	  /* If it's a pass-through file do nothing.  */
+	  /* If it's a pass-through or cached file do nothing.  */
 	  if (output_names[i])
 	    continue;
 
-	  /* Replace the .o suffix with a .ltrans.o suffix and write
-	     the resulting name to the LTRANS output list.  */
-	  obstack_grow (&env_obstack, input_name, strlen (input_name) - 2);
-	  obstack_grow (&env_obstack, ".ltrans.o", sizeof (".ltrans.o"));
-	  output_name = XOBFINISH (&env_obstack, char *);
+	  if (ltrans_cache)
+	    {
+	      ltrans_file_cache::item* item;
+	      item = ltrans_cache.get_item (input_name);
+	      gcc_assert (item);
+
+	      output_name = item->output.c_str ();
+	    }
+	  else
+	    {
+	      /* Replace the .o suffix with a .ltrans.o suffix and write
+		 the resulting name to the LTRANS output list.  */
+	      obstack_grow (&env_obstack, input_name, strlen (input_name) - 2);
+	      obstack_grow (&env_obstack, ".ltrans.o", sizeof (".ltrans.o"));
+	      output_name = XOBFINISH (&env_obstack, char const*);
+	    }
 
 	  /* Adjust the dumpbase if the linker output file was seen.  */
 	  int dumpbase_len = (strlen (dumppfx)
@@ -2042,14 +2139,12 @@ cont:
 	      fprintf (mstream, "%s:\n\t@%s ", output_name, new_argv[0]);
 	      for (j = 1; new_argv[j] != NULL; ++j)
 		fprintf (mstream, " '%s'", new_argv[j]);
-	      fprintf (mstream, "\n");
 	      /* If we are not preserving the ltrans input files then
 	         truncate them as soon as we have processed it.  This
 		 reduces temporary disk-space usage.  */
-	      if (! save_temps)
-		fprintf (mstream, "\t@-touch -r \"%s\" \"%s.tem\" > /dev/null "
-			 "2>&1 && mv \"%s.tem\" \"%s\"\n",
-			 input_name, input_name, input_name, input_name); 
+	      if (!ltrans_cache && !save_temps)
+		fprintf (mstream, " -truncate '%s'", input_name);
+	      fprintf (mstream, "\n");
 	    }
 	  else
 	    {
@@ -2059,9 +2154,10 @@ cont:
 		snprintf (argsuffix,
 			  sizeof (DUMPBASE_SUFFIX) + sizeof (".ltrans_args"),
 			  "ltrans%u.ltrans_args", i);
-	      fork_execute (new_argv[0], CONST_CAST (char **, new_argv),
+	      fork_execute (new_argv[0], const_cast<char **> (new_argv),
 			    true, save_temps ? argsuffix : NULL);
-	      maybe_unlink (input_name);
+	      if (!ltrans_cache)
+		maybe_unlink (input_names[i]);
 	    }
 
 	  output_names[i] = output_name;
@@ -2083,7 +2179,7 @@ cont:
 	  fclose (mstream);
 	  if (!jobserver)
 	    {
-	      /* Avoid passing --jobserver-fd= and similar flags 
+	      /* Avoid passing --jobserver-fd= and similar flags
 		 unless jobserver mode is explicitly enabled.  */
 	      putenv (xstrdup ("MAKEFLAGS="));
 	      putenv (xstrdup ("MFLAGS="));
@@ -2110,26 +2206,51 @@ cont:
 	  obstack_ptr_grow (&argv_obstack, NULL);
 	  new_argv = XOBFINISH (&argv_obstack, const char **);
 
-	  pex = collect_execute (new_argv[0], CONST_CAST (char **, new_argv),
+	  pex = collect_execute (new_argv[0], const_cast<char **> (new_argv),
 				 NULL, NULL, PEX_SEARCH, false, NULL);
 	  do_wait (new_argv[0], pex);
 	  freeargv (make_argv);
 	  maybe_unlink (makefile);
 	  makefile = NULL;
-	  for (i = 0; i < nr; ++i)
-	    maybe_unlink (input_names[i]);
+
+	  if (!ltrans_cache)
+	    for (i = 0; i < nr; ++i)
+	      maybe_unlink (input_names[i]);
 	}
+
+      if (ltrans_cache)
+	{
+	  for (i = 0; i < nr; ++i)
+	    {
+	      ltrans_file_cache::item* item;
+	      item = ltrans_cache.get_item (input_names[i]);
+
+	      if (item)
+		{
+		  /* Ensure LTRANS for this item finished.  */
+		  item->lock.lock_read ();
+		  item->lock.unlock ();
+		}
+	    }
+
+	  ltrans_cache.deletion_lock.unlock ();
+	}
+
       for (i = 0; i < nr; ++i)
 	{
 	  fputs (output_names[i], stdout);
 	  putc ('\n', stdout);
 	  free (input_names[i]);
 	}
+
+      if (ltrans_cache && !save_temps)
+	ltrans_cache.try_prune ();
+
       if (!skip_debug)
 	{
 	  for (i = 0; i < ltoobj_argc; ++i)
 	    if (early_debug_object_names[i] != NULL)
-	      printf ("%s\n", early_debug_object_names[i]);	      
+	      printf ("%s\n", early_debug_object_names[i]);
 	}
       nr = 0;
       free (ltrans_priorities);
@@ -2147,6 +2268,27 @@ cont:
   obstack_free (&argv_obstack, NULL);
 }
 
+/* Concrete implementation of diagnostics::option_id_manager for LTO.  */
+
+class lto_diagnostic_option_id_manager
+  : public gcc_diagnostic_option_id_manager
+{
+public:
+  lto_diagnostic_option_id_manager ()
+  : gcc_diagnostic_option_id_manager (0 /* lang_mask */)
+  {
+  }
+  int option_enabled_p (diagnostics::option_id) const final override
+  {
+    return true;
+  }
+  char *make_option_name (diagnostics::option_id,
+			  enum diagnostics::kind,
+			  enum diagnostics::kind) const final override
+  {
+    return nullptr;
+  }
+};
 
 /* Entry point.  */
 
@@ -2169,11 +2311,8 @@ main (int argc, char *argv[])
   diagnostic_initialize (global_dc, 0);
   diagnostic_color_init (global_dc);
   diagnostic_urls_init (global_dc);
-  global_dc->set_option_hooks (nullptr,
-			       nullptr,
-			       nullptr,
-			       get_option_url,
-			       0);
+  global_dc->set_option_id_manager
+    (::make_unique<lto_diagnostic_option_id_manager> (), 0);
 
   if (atexit (lto_wrapper_cleanup) != 0)
     fatal_error (input_location, "%<atexit%> failed");

@@ -1,5 +1,5 @@
 /* Subroutines used for code generation on the Synopsys DesignWare ARC cpu.
-   Copyright (C) 1994-2024 Free Software Foundation, Inc.
+   Copyright (C) 1994-2026 Free Software Foundation, Inc.
 
    Sources derived from work done by Sankhya Technologies (www.sankhya.com) on
    behalf of Synopsys Inc.
@@ -720,8 +720,6 @@ static rtx arc_legitimize_address_0 (rtx, rtx, machine_mode mode);
 #define TARGET_NO_SPECULATION_IN_DELAY_SLOTS_P	\
   arc_no_speculation_in_delay_slots_p
 
-#undef TARGET_LRA_P
-#define TARGET_LRA_P arc_lra_p
 #define TARGET_REGISTER_PRIORITY arc_register_priority
 /* Stores with scaled offsets have different displacement ranges.  */
 #define TARGET_DIFFERENT_ADDR_DISPLACEMENT_P hook_bool_void_true
@@ -1438,6 +1436,13 @@ get_arc_condition_code (rtx comparison)
 	case GEU : return ARC_CC_NC;
 	default : gcc_unreachable ();
 	}
+    case E_CC_Vmode:
+      switch (GET_CODE (comparison))
+	{
+	case EQ : return ARC_CC_NV;
+	case NE : return ARC_CC_V;
+	default : gcc_unreachable ();
+	}
     case E_CC_FP_GTmode:
       if (TARGET_ARGONAUT_SET && TARGET_SPFP)
 	switch (GET_CODE (comparison))
@@ -1547,6 +1552,13 @@ arc_select_cc_mode (enum rtx_code op, rtx x, rtx y)
 {
   machine_mode mode = GET_MODE (x);
   rtx x1;
+
+  /* Matches all instructions which can do .f and clobbers only Z flag.  */
+  if (GET_MODE_CLASS (mode) == MODE_INT
+      && y == const0_rtx
+      && GET_CODE (x) == MULT
+      && (op == EQ || op == NE))
+    return CC_Zmode;
 
   /* For an operation that sets the condition codes as a side-effect, the
      C and V flags is not set as for cmp, so we can only use comparisons where
@@ -4228,7 +4240,7 @@ enum arc_shift_alg
 {
   SHIFT_MOVE,		/* Register-to-register move.  */
   SHIFT_LOOP,		/* Zero-overhead loop implementation.  */
-  SHIFT_INLINE,		/* Mmultiple LSHIFTs and LSHIFT-PLUSs.  */ 
+  SHIFT_INLINE,		/* Mmultiple LSHIFTs and LSHIFT-PLUSs.  */
   SHIFT_AND_ROT,        /* Bitwise AND, then ROTATERTs.  */
   SHIFT_SWAP,		/* SWAP then multiple LSHIFTs/LSHIFT-PLUSs.  */
   SHIFT_AND_SWAP_ROT	/* Bitwise AND, then SWAP, then ROTATERTs.  */
@@ -6693,7 +6705,7 @@ arc_cannot_force_const_mem (machine_mode mode, rtx x)
 
 enum arc_builtin_id
   {
-#define DEF_BUILTIN(NAME, N_ARGS, TYPE, ICODE, MASK)	\
+#define DEF_BUILTIN(NAME, N_ARGS, TYPE, ICODE, MASK, ATTRS)	\
     ARC_BUILTIN_ ## NAME,
 #include "builtins.def"
 #undef DEF_BUILTIN
@@ -6711,7 +6723,7 @@ struct GTY(()) arc_builtin_description
 static GTY(()) struct arc_builtin_description
 arc_bdesc[ARC_BUILTIN_COUNT] =
 {
-#define DEF_BUILTIN(NAME, N_ARGS, TYPE, ICODE, MASK)		\
+#define DEF_BUILTIN(NAME, N_ARGS, TYPE, ICODE, MASK, ATTRS)		\
   { (enum insn_code) CODE_FOR_ ## ICODE, N_ARGS, NULL_TREE },
 #include "builtins.def"
 #undef DEF_BUILTIN
@@ -6843,8 +6855,11 @@ arc_init_builtins (void)
     = build_function_type_list (long_long_integer_type_node,
 				V2SI_type_node, V2HI_type_node, NULL_TREE);
 
+  /* Create const attribute for mathematical functions.  */
+  tree attr_const = tree_cons (get_identifier ("const"), NULL, NULL);
+
   /* Add the builtins.  */
-#define DEF_BUILTIN(NAME, N_ARGS, TYPE, ICODE, MASK)			\
+#define DEF_BUILTIN(NAME, N_ARGS, TYPE, ICODE, MASK, ATTRS)		\
   {									\
     int id = ARC_BUILTIN_ ## NAME;					\
     const char *Name = "__builtin_arc_" #NAME;				\
@@ -6854,7 +6869,7 @@ arc_init_builtins (void)
     if (MASK)								\
       arc_bdesc[id].fndecl						\
 	= add_builtin_function (arc_tolower(name, Name), TYPE, id,	\
-				BUILT_IN_MD, NULL, NULL_TREE);		\
+				BUILT_IN_MD, NULL, ATTRS);		\
   }
 #include "builtins.def"
 #undef DEF_BUILTIN
@@ -8220,8 +8235,7 @@ hwloop_optimize (hwloop_info loop)
   insn = emit_insn (gen_arc_lp (loop->start_label,
 				loop->end_label));
 
-  seq = get_insns ();
-  end_sequence ();
+  seq = end_sequence ();
 
   entry_after = BB_END (entry_bb);
   if (!single_succ_p (entry_bb) || vec_safe_length (loop->incoming) > 1
@@ -8264,7 +8278,7 @@ hwloop_optimize (hwloop_info loop)
   /* Insert the loop end label before the last instruction of the
      loop.  */
   emit_label_after (end_label, loop->last_insn);
-  /* Make sure we mark the begining and end label as used.  */
+  /* Make sure we mark the beginning and end label as used.  */
   LABEL_NUSES (loop->end_label)++;
   LABEL_NUSES (loop->start_label)++;
 
@@ -9157,7 +9171,7 @@ arc_expand_cpymem (rtx *operands)
 
       while (piece > size)
 	piece >>= 1;
-      mode = smallest_int_mode_for_size (piece * BITS_PER_UNIT);
+      mode = smallest_int_mode_for_size (piece * BITS_PER_UNIT).require ();
       /* If we don't re-use temporaries, the scheduler gets carried away,
 	 and the register pressure gets unnecessarily high.  */
       if (0 && tmpx[i] && GET_MODE (tmpx[i]) == mode)
@@ -9674,7 +9688,7 @@ arc_delegitimize_address (rtx orig_x)
 rtx
 gen_acc1 (void)
 {
-  return gen_rtx_REG (SImode, TARGET_BIG_ENDIAN ? 56: 57);
+  return gen_rtx_REG (SImode, TARGET_BIG_ENDIAN ? 56 : 57);
 }
 
 /* Return a REG rtx for acc2.  N.B. the gcc-internal representation may
@@ -9684,7 +9698,7 @@ gen_acc1 (void)
 rtx
 gen_acc2 (void)
 {
-  return gen_rtx_REG (SImode, TARGET_BIG_ENDIAN ? 57: 56);
+  return gen_rtx_REG (SImode, TARGET_BIG_ENDIAN ? 57 : 56);
 }
 
 /* When estimating sizes during arc_reorg, when optimizing for speed, there
@@ -10154,14 +10168,6 @@ arc_eh_uses (int regno)
   if (regno == arc_tp_regno)
     return true;
   return false;
-}
-
-/* Return true if we use LRA instead of reload pass.  */
-
-bool
-arc_lra_p (void)
-{
-  return arc_lra_flag;
 }
 
 /* ??? Should we define TARGET_REGISTER_PRIORITY?  We might perfer to
@@ -11554,6 +11560,21 @@ arc_libm_function_max_error (unsigned cfn, machine_mode mode,
   return default_libm_function_max_error (cfn, mode, boundary_p);
 }
 
+void
+arc_gen_unlikely_cbranch (enum rtx_code cmp, machine_mode cc_mode, rtx label)
+{
+  rtx cc_reg, x;
+
+  cc_reg = gen_rtx_REG (cc_mode, CC_REG);
+  label = gen_rtx_LABEL_REF (VOIDmode, label);
+
+  x = gen_rtx_fmt_ee (cmp, VOIDmode, cc_reg, const0_rtx);
+  x = gen_rtx_IF_THEN_ELSE (VOIDmode, x, label, pc_rtx);
+
+  emit_unlikely_jump (gen_rtx_SET (pc_rtx, x));
+}
+
+
 #undef TARGET_USE_ANCHORS_FOR_SYMBOL_P
 #define TARGET_USE_ANCHORS_FOR_SYMBOL_P arc_use_anchors_for_symbol_p
 
@@ -11580,6 +11601,9 @@ arc_libm_function_max_error (unsigned cfn, machine_mode mode,
 
 #undef  TARGET_LIBM_FUNCTION_MAX_ERROR
 #define TARGET_LIBM_FUNCTION_MAX_ERROR arc_libm_function_max_error
+
+#undef TARGET_DOCUMENTATION_NAME
+#define TARGET_DOCUMENTATION_NAME "ARC"
 
 struct gcc_target targetm = TARGET_INITIALIZER;
 

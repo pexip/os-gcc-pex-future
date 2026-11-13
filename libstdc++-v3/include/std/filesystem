@@ -1,6 +1,6 @@
 // <filesystem> -*- C++ -*-
 
-// Copyright (C) 2014-2024 Free Software Foundation, Inc.
+// Copyright (C) 2014-2026 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -30,11 +30,14 @@
 #ifndef _GLIBCXX_FILESYSTEM
 #define _GLIBCXX_FILESYSTEM 1
 
+#ifdef _GLIBCXX_SYSHDR
 #pragma GCC system_header
+#endif
 
 #include <bits/requires_hosted.h>
 
 #define __glibcxx_want_filesystem
+#define __glibcxx_want_format_path
 #include <bits/version.h>
 
 #ifdef __cpp_lib_filesystem // C++ >= 17 && HOSTED

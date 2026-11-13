@@ -1,5 +1,5 @@
 // PR c++/120125
-// { dg-additional-options "-fmodules-ts -fdeclone-ctor-dtor" }
+// { dg-additional-options "-fmodules -fdeclone-ctor-dtor" }
 // { dg-module-cmi M }
 
 export module M;

@@ -1,6 +1,13 @@
 #ifndef TEST_SVE_ACLE_H
 #define TEST_SVE_ACLE_H 1
 
+/* When compiling for e.g. C++98, we won't get the INt*_MIN macros that some
+   tests want without defining this macro.  */
+
+#ifndef __STDC_LIMIT_MACROS
+# define __STDC_LIMIT_MACROS 1
+#endif
+
 #include <arm_neon_sve_bridge.h>
 
 #if defined (TEST_OVERLOADS)
@@ -75,7 +82,7 @@
 #define TEST_DUAL_Z(NAME, TYPE1, TYPE2, CODE1, CODE2)		\
   PROTO (NAME, TYPE1, (TYPE1 z0, TYPE1 z1, TYPE1 z2, TYPE1 z3,	\
 		       TYPE2 z4, TYPE2 z5, TYPE2 z6, TYPE2 z7,	\
-		       svbool_t p0, svbool_t p1))		\
+		       svbool_t p0, svbool_t p1, fpm_t fpm0))	\
   {								\
     INVOKE (CODE1, CODE2);					\
     return z0;							\
@@ -84,7 +91,7 @@
 #define TEST_DUAL_Z_REV(NAME, TYPE1, TYPE2, CODE1, CODE2)	\
   PROTO (NAME, TYPE1, (TYPE2 z0, TYPE2 z1, TYPE2 z2, TYPE2 z3,	\
 		       TYPE1 z4, TYPE1 z5, TYPE1 z6, TYPE1 z7,	\
-		       svbool_t p0, svbool_t p1))		\
+		       svbool_t p0, svbool_t p1, fpm_t fpm0))	\
   {								\
     TYPE1 z0_res;						\
     INVOKE (CODE1, CODE2);					\
@@ -136,7 +143,7 @@
   }
 
 #define TEST_DUAL_LANE_REG(NAME, ZTYPE1, ZTYPE2, REG, CODE1, CODE2) \
-  PROTO (NAME, void, (void))					\
+  PROTO (NAME, void, (fpm_t fpm0))				\
   {								\
     register ZTYPE1 z0 __asm ("z0");				\
     register ZTYPE2 z1 __asm ("z1");				\
@@ -194,7 +201,7 @@
   PROTO (NAME, ZTYPE1, (ZTYPE1 z0, ZTYPE1 z1, ZTYPE1 z2,	\
 			ZTYPE1 z3, ZTYPE2 z4, ZTYPE2 z5,	\
 			ZTYPE2 z6, STYPE d7, svbool_t p0,	\
-			svbool_t p1))				\
+			svbool_t p1, fpm_t fpm0))		\
   {								\
     INVOKE (CODE1, CODE2);					\
     return z0;							\
@@ -543,6 +550,14 @@
     return z0;				\
   }
 
+#define TEST_UNDEF_B(NAME, TYPE, CODE)	\
+  PROTO (NAME, TYPE, (void))		\
+  {					\
+    TYPE p0;				\
+    CODE;				\
+    return p0;				\
+  }
+
 #define TEST_CREATE(NAME, TTYPE, ZTYPE, CODE1, CODE2)		\
   PROTO (NAME, TTYPE, (ZTYPE unused0, ZTYPE unused1,		\
 		       ZTYPE unused2, ZTYPE unused3,		\
@@ -725,6 +740,7 @@
 #define TEST_X2_NARROW(NAME, TTYPE, ZTYPE, CODE1, CODE2)	\
   PROTO (NAME, void, ())					\
   {								\
+    register fpm_t fpm0 __asm ("x0");				\
     register TTYPE z0 __asm ("z0");				\
     register ZTYPE z5 __asm ("z5");				\
     register TTYPE z6 __asm ("z6");				\
@@ -741,6 +757,7 @@
 #define TEST_X4_NARROW(NAME, TTYPE, ZTYPE, CODE1, CODE2)	\
   PROTO (NAME, void, ())					\
   {								\
+    register fpm_t fpm0 __asm ("x0");				\
     register TTYPE z0 __asm ("z0");				\
     register TTYPE z4 __asm ("z4");				\
     register TTYPE z16 __asm ("z16");				\
@@ -754,6 +771,39 @@
     INVOKE (CODE1, CODE2);					\
     __asm volatile ("" :: "w" (z0_res), "w" (z22_res),		\
 		    "w" (z25));					\
+  }
+
+#define TEST_X2_WIDE(NAME, TTYPE, ZTYPE, CODE1, CODE2)		\
+  PROTO (NAME, void, ())					\
+  {								\
+    register fpm_t fpm0 __asm ("x0");				\
+    register ZTYPE z0 __asm ("z0");				\
+    register ZTYPE z5 __asm ("z5");				\
+    register TTYPE z6 __asm ("z6");				\
+    register TTYPE z16 __asm ("z16");				\
+    register ZTYPE z22 __asm ("z22");				\
+    register TTYPE z29 __asm ("z29");				\
+    register TTYPE z0_res __asm ("z0");				\
+    __asm volatile ("" : "=w" (z0), "=w" (z5), "=w" (z22));	\
+    INVOKE (CODE1, CODE2);					\
+    __asm volatile ("" :: "w" (z0_res), "w" (z5), "w" (z6),	\
+		    "w" (z16), "w" (z22), "w" (z29));		\
+  }
+
+#define TEST_1X2_NARROW(NAME, RTYPE, TTYPE, ZTYPE, CODE1, CODE2)	\
+  PROTO(NAME, void, ())							\
+  {									\
+    register RTYPE z0 __asm ("z0");					\
+    register TTYPE z5 __asm ("z5");					\
+    register TTYPE z6 __asm ("z6");					\
+    register TTYPE z16 __asm ("z16");					\
+    register ZTYPE z22 __asm ("z22");					\
+    register TTYPE z29 __asm ("z29");					\
+    register RTYPE z0_res __asm ("z0");					\
+    __asm volatile ("" : "=w" (z0), "=w" (z5), "=w" (z6),		\
+		    "=w" (z16), "=w" (z22), "=w" (z29));		\
+    INVOKE (CODE1, CODE2);						\
+    __asm volatile ("" :: "w" (z0_res), "w" (z5), "w" (z22));		\
   }
 
 #endif

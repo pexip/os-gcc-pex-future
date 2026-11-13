@@ -1,6 +1,6 @@
 /* Gimple walk support.
 
-   Copyright (C) 2007-2024 Free Software Foundation, Inc.
+   Copyright (C) 2007-2026 Free Software Foundation, Inc.
    Contributed by Aldy Hernandez <aldyh@redhat.com>
 
 This file is part of GCC.
@@ -118,7 +118,7 @@ walk_gimple_asm (gasm *stmt, walk_tree_fn callback_op,
       if (wi)
 	{
 	  if (parse_output_constraint (&constraint, i, 0, 0, &allows_mem,
-				       &allows_reg, &is_inout))
+				       &allows_reg, &is_inout, nullptr))
 	    wi->val_only = (allows_reg || !allows_mem);
 	}
       if (wi)
@@ -137,7 +137,8 @@ walk_gimple_asm (gasm *stmt, walk_tree_fn callback_op,
       if (wi)
 	{
 	  if (parse_input_constraint (&constraint, 0, 0, noutputs, 0,
-				      oconstraints, &allows_mem, &allows_reg))
+				      oconstraints, &allows_mem, &allows_reg,
+				      nullptr))
 	    {
 	      wi->val_only = (allows_reg || !allows_mem);
 	      /* Although input "m" is not really a LHS, we need a lvalue.  */
@@ -534,7 +535,7 @@ walk_gimple_op (gimple *stmt, walk_tree_fn callback_op,
       break;
 
     case GIMPLE_PHI:
-      /* PHIs are not GSS_WITH_OPS so we need to handle them explicitely.  */
+      /* PHIs are not GSS_WITH_OPS so we need to handle them explicitly.  */
       {
 	gphi *phi = as_a <gphi *> (stmt);
 	if (wi)
@@ -707,6 +708,7 @@ walk_gimple_stmt (gimple_stmt_iterator *gsi, walk_stmt_fn callback_stmt,
     case GIMPLE_OMP_PARALLEL:
     case GIMPLE_OMP_TASK:
     case GIMPLE_OMP_SCOPE:
+    case GIMPLE_OMP_DISPATCH:
     case GIMPLE_OMP_SECTIONS:
     case GIMPLE_OMP_SINGLE:
     case GIMPLE_OMP_TARGET:
@@ -835,17 +837,6 @@ walk_stmt_load_store_addr_ops (gimple *stmt, void *data,
 	    ;
 	  else if (TREE_CODE (op) == ADDR_EXPR)
 	    ret |= visit_addr (stmt, TREE_OPERAND (op, 0), op, data);
-	  /* COND_EXPR and VCOND_EXPR rhs1 argument is a comparison
-	     tree with two operands.  */
-	  else if (i == 1 && COMPARISON_CLASS_P (op))
-	    {
-	      if (TREE_CODE (TREE_OPERAND (op, 0)) == ADDR_EXPR)
-		ret |= visit_addr (stmt, TREE_OPERAND (TREE_OPERAND (op, 0),
-						       0), op, data);
-	      if (TREE_CODE (TREE_OPERAND (op, 1)) == ADDR_EXPR)
-		ret |= visit_addr (stmt, TREE_OPERAND (TREE_OPERAND (op, 1),
-						       0), op, data);
-	    }
 	}
     }
   else if (gcall *call_stmt = dyn_cast <gcall *> (stmt))
@@ -907,7 +898,7 @@ walk_stmt_load_store_addr_ops (gimple *stmt, void *data,
 		    (TREE_VALUE (TREE_PURPOSE (link)));
 		oconstraints[i] = constraint;
 		parse_output_constraint (&constraint, i, 0, 0, &allows_mem,
-					 &allows_reg, &is_inout);
+					 &allows_reg, &is_inout, nullptr);
 		if (op && !allows_reg && allows_mem)
 		  ret |= visit_addr (stmt, op, TREE_VALUE (link), data);
 	      }
@@ -932,8 +923,8 @@ walk_stmt_load_store_addr_ops (gimple *stmt, void *data,
 			constraint = TREE_STRING_POINTER
 			    (TREE_VALUE (TREE_PURPOSE (link)));
 			parse_input_constraint (&constraint, 0, 0, noutputs,
-						0, oconstraints,
-						&allows_mem, &allows_reg);
+						0, oconstraints, &allows_mem,
+						&allows_reg, nullptr);
 			if (!allows_reg && allows_mem)
 			  ret |= visit_addr (stmt, op, TREE_VALUE (link),
 					     data);

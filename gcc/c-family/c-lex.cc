@@ -1,5 +1,5 @@
 /* Mainly the interface between cpplib and the C front ends.
-   Copyright (C) 1987-2024 Free Software Foundation, Inc.
+   Copyright (C) 1987-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -54,10 +54,10 @@ static tree lex_charconst (const cpp_token *);
 static void update_header_times (const char *);
 static int dump_one_header (splay_tree_node, void *);
 static void cb_line_change (cpp_reader *, const cpp_token *, int);
-static void cb_ident (cpp_reader *, unsigned int, const cpp_string *);
-static void cb_def_pragma (cpp_reader *, unsigned int);
-static void cb_define (cpp_reader *, unsigned int, cpp_hashnode *);
-static void cb_undef (cpp_reader *, unsigned int, cpp_hashnode *);
+static void cb_ident (cpp_reader *, location_t, const cpp_string *);
+static void cb_def_pragma (cpp_reader *, location_t);
+static void cb_define (cpp_reader *, location_t, cpp_hashnode *);
+static void cb_undef (cpp_reader *, location_t, cpp_hashnode *);
 
 void
 init_c_lex (void)
@@ -164,7 +164,7 @@ dump_time_statistics (void)
 
 static void
 cb_ident (cpp_reader * ARG_UNUSED (pfile),
-	  unsigned int ARG_UNUSED (line),
+	  location_t ARG_UNUSED (line),
 	  const cpp_string * ARG_UNUSED (str))
 {
   if (!flag_no_ident)
@@ -174,7 +174,7 @@ cb_ident (cpp_reader * ARG_UNUSED (pfile),
       if (cpp_interpret_string (pfile, str, 1, &cstr, CPP_STRING))
 	{
 	  targetm.asm_out.output_ident ((const char *) cstr.text);
-	  free (CONST_CAST (unsigned char *, cstr.text));
+	  free (const_cast<unsigned char *> (cstr.text));
 	}
     }
 }
@@ -248,7 +248,12 @@ cb_def_pragma (cpp_reader *pfile, location_t loc)
     {
       const unsigned char *space, *name;
       const cpp_token *s;
-      location_t fe_loc = loc;
+
+      /* If we are processing a _Pragma, LOC is not a valid location, but libcpp
+	 will provide a good location via this function instead.  */
+      location_t fe_loc = cpp_get_diagnostic_override_loc (pfile);
+      if (fe_loc == UNKNOWN_LOCATION)
+	fe_loc = loc;
 
       space = name = (const unsigned char *) "";
 
@@ -342,7 +347,7 @@ c_common_has_attribute (cpp_reader *pfile, bool std_syntax)
   if (token->type != CPP_OPEN_PAREN)
     {
       cpp_error (pfile, CPP_DL_ERROR,
-		 "missing '(' after \"__has_attribute\"");
+		 "missing %<(%> after %<__has_attribute%>");
       return 0;
     }
   token = get_token_no_padding (pfile);
@@ -428,6 +433,8 @@ c_common_has_attribute (cpp_reader *pfile, bool std_syntax)
 		result = 201907;
 	      else if (is_attribute_p ("assume", attr_name))
 		result = 202207;
+	      else if (is_attribute_p ("indeterminate", attr_name))
+		result = 202403;
 	      else if (is_attribute_p ("init_priority", attr_name))
 		{
 		  /* The (non-standard) init_priority attribute is always
@@ -445,7 +452,9 @@ c_common_has_attribute (cpp_reader *pfile, bool std_syntax)
 		  || is_attribute_p ("maybe_unused", attr_name)
 		  || is_attribute_p ("nodiscard", attr_name)
 		  || is_attribute_p ("noreturn", attr_name)
-		  || is_attribute_p ("_Noreturn", attr_name))
+		  || is_attribute_p ("_Noreturn", attr_name)
+		  || is_attribute_p ("reproducible", attr_name)
+		  || is_attribute_p ("unsequenced", attr_name))
 		result = 202311;
 	    }
 	  if (result)
@@ -462,13 +471,13 @@ c_common_has_attribute (cpp_reader *pfile, bool std_syntax)
   else
     {
       cpp_error (pfile, CPP_DL_ERROR,
-		 "macro \"__has_attribute\" requires an identifier");
+		 "macro %<__has_attribute%> requires an identifier");
       return 0;
     }
 
   if (get_token_no_padding (pfile)->type != CPP_CLOSE_PAREN)
     cpp_error (pfile, CPP_DL_ERROR,
-	       "missing ')' after \"__has_attribute\"");
+	       "missing %<)%> after %<__has_attribute%>");
 
   return result;
 }
@@ -482,7 +491,7 @@ c_common_lex_availability_macro (cpp_reader *pfile, const char *builtin)
   if (token->type != CPP_OPEN_PAREN)
     {
       cpp_error (pfile, CPP_DL_ERROR,
-		 "missing '(' after \"__has_%s\"", builtin);
+		 "missing %<(%> after %<__has_%s%>", builtin);
       return 0;
     }
 
@@ -495,14 +504,14 @@ c_common_lex_availability_macro (cpp_reader *pfile, const char *builtin)
       if (token->type != CPP_CLOSE_PAREN)
 	{
 	  cpp_error (pfile, CPP_DL_ERROR,
-		     "expected ')' after \"%s\"", name);
+		     "expected %<)%> after %qs", name);
 	  name = "";
 	}
     }
   else
     {
       cpp_error (pfile, CPP_DL_ERROR,
-		 "macro \"__has_%s\" requires an identifier", builtin);
+		 "macro %<__has_%s%> requires an identifier", builtin);
       if (token->type == CPP_CLOSE_PAREN)
 	return 0;
     }
@@ -626,7 +635,7 @@ c_lex_with_flags (tree *value, location_t *loc, unsigned char *cpp_flags,
 					    (const char *) tok->val.str.text);
 	    TREE_TYPE (num_string) = char_array_type_node;
 	    num_string = fix_string_type (num_string);
-	    str = CONST_CAST (char *, TREE_STRING_POINTER (num_string));
+	    str = const_cast<char *> (TREE_STRING_POINTER (num_string));
 	    str[len] = '\0';
 	    literal = build_userdef_literal (suffix_id, *value, overflow,
 					     num_string);
@@ -781,6 +790,48 @@ c_lex_with_flags (tree *value, location_t *loc, unsigned char *cpp_flags,
       *value = build_string (tok->val.str.len, (const char *)tok->val.str.text);
       break;
 
+    case CPP_EMBED:
+      *value = make_node (RAW_DATA_CST);
+      TREE_TYPE (*value) = integer_type_node;
+      RAW_DATA_LENGTH (*value) = tok->val.str.len;
+      if (pch_file)
+	{
+	  /* When writing PCH headers, copy the data over, such that
+	     the owner is a STRING_CST.  */
+	  int off = 0;
+	  if (tok->val.str.len <= INT_MAX - 2)
+	    /* See below.  */
+	    off = 1;
+	  tree owner = build_string (tok->val.str.len + 2 * off,
+				     (const char *) tok->val.str.text - off);
+	  TREE_TYPE (owner) = build_array_type_nelts (unsigned_char_type_node,
+						      tok->val.str.len);
+	  RAW_DATA_OWNER (*value) = owner;
+	  RAW_DATA_POINTER (*value) = TREE_STRING_POINTER (owner) + off;
+	}
+      else
+	{
+	  /* Otherwise add another dummy RAW_DATA_CST as owner which
+	     indicates the data is owned by libcpp.  */
+	  RAW_DATA_POINTER (*value) = (const char *) tok->val.str.text;
+	  tree owner = make_node (RAW_DATA_CST);
+	  TREE_TYPE (owner) = integer_type_node;
+	  RAW_DATA_LENGTH (owner) = tok->val.str.len;
+	  RAW_DATA_POINTER (owner) = (const char *) tok->val.str.text;
+	  if (tok->val.str.len <= INT_MAX - 2)
+	    {
+	      /* The preprocessor surrounds at least smaller CPP_EMBEDs
+		 in between CPP_NUMBER CPP_COMMA before and
+		 CPP_COMMA CPP_NUMBER after, so the actual libcpp buffer
+		 holds those 2 extra bytes around it.  Don't do that if
+		 CPP_EMBED is at the maximum ~ 2GB size.  */
+	      RAW_DATA_LENGTH (owner) += 2;
+	      RAW_DATA_POINTER (owner)--;
+	    }
+	  RAW_DATA_OWNER (*value) = owner;
+	}
+      break;
+
       /* This token should not be visible outside cpplib.  */
     case CPP_MACRO_ARG:
       gcc_unreachable ();
@@ -800,7 +851,7 @@ c_lex_with_flags (tree *value, location_t *loc, unsigned char *cpp_flags,
 	  add_flags |= PREV_FALLTHROUGH;
 	  goto retry_after_at;
 	}
-       goto retry;
+      goto retry;
 
     default:
       *value = NULL_TREE;
@@ -897,6 +948,10 @@ interpret_integer (const cpp_token *token, unsigned int flags,
 	{
 	  max_bits_per_digit = 3;
 	  prefix_len = 1;
+	  if (token->val.str.len > 2
+	      && (token->val.str.text[1] == 'o'
+		  || token->val.str.text[1] == 'O'))
+	    prefix_len = 2;
 	}
       else if ((flags & CPP_N_RADIX) == CPP_N_HEX)
 	{
@@ -1123,7 +1178,7 @@ interpret_integer (const cpp_token *token, unsigned int flags,
 	  && (flags & CPP_N_WIDTH) != CPP_N_LARGE)
 	emit_diagnostic
 	  ((c_dialect_cxx () ? cxx_dialect == cxx98 : !flag_isoc99)
-	   ? DK_PEDWARN : DK_WARNING,
+	   ? diagnostics::kind::pedwarn : diagnostics::kind::warning,
 	   input_location, OPT_Wlong_long,
 	   (flags & CPP_N_UNSIGNED)
 	   ? "integer constant is too large for %<unsigned long%> type"
@@ -1187,6 +1242,8 @@ interpret_float (const cpp_token *token, unsigned int flags,
       type = dfloat128_type_node;
     else if ((flags & CPP_N_WIDTH) == CPP_N_SMALL)
       type = dfloat32_type_node;
+    else if ((flags & CPP_N_FLOATNX) != 0)
+      type = dfloat64x_type_node;
     else
       type = dfloat64_type_node;
   else
@@ -1254,10 +1311,10 @@ interpret_float (const cpp_token *token, unsigned int flags,
 	  }
 	else if (!extended)
 	  {
-	    if (cxx_dialect < cxx23)
-	      pedwarn (input_location, OPT_Wpedantic,
+	    if (cxx_dialect < cxx23 && pedantic)
+	      pedwarn (input_location, OPT_Wc__23_extensions,
 		       "%<f%d%> or %<F%d%> suffix on floating constant only "
-		       "available with %<-std=c++2b%> or %<-std=gnu++2b%>",
+		       "available with %<-std=c++23%> or %<-std=gnu++23%>",
 		       n, n);
 	  }
 	else
@@ -1275,10 +1332,10 @@ interpret_float (const cpp_token *token, unsigned int flags,
 	if (!c_dialect_cxx ())
 	  pedwarn (input_location, OPT_Wpedantic,
 		   "non-standard suffix on floating constant");
-	else if (cxx_dialect < cxx23)
-	  pedwarn (input_location, OPT_Wpedantic,
+	else if (cxx_dialect < cxx23 && pedantic)
+	  pedwarn (input_location, OPT_Wc__23_extensions,
 		   "%<bf16%> or %<BF16%> suffix on floating constant only "
-		   "available with %<-std=c++2b%> or %<-std=gnu++2b%>");
+		   "available with %<-std=c++23%> or %<-std=gnu++23%>");
       }
     else if ((flags & CPP_N_WIDTH) == CPP_N_LARGE)
       type = long_double_type_node;
@@ -1299,7 +1356,14 @@ interpret_float (const cpp_token *token, unsigned int flags,
   if (flags & CPP_N_USERDEF)
     copylen -= strlen (suffix);
   else if (flags & CPP_N_DFLOAT)
-    copylen -= 2;
+    {
+      if (ISDIGIT (token->val.str.text[copylen - 1]))
+	copylen -= (flags & CPP_N_LARGE) ? 4 : 3;
+      else if ((flags & CPP_N_FLOATNX) != 0)
+	copylen -= 4;
+      else
+	copylen -= 2;
+    }
   else
     {
       if ((flags & CPP_N_WIDTH) != CPP_N_MEDIUM)
@@ -1638,7 +1702,7 @@ lex_string (const cpp_token *tok, tree *valp, bool objc_string, bool translate)
       (parse_in, strs, concats + 1, &istr, type))
     {
       value = build_string (istr.len, (const char *) istr.text);
-      free (CONST_CAST (unsigned char *, istr.text));
+      free (const_cast<unsigned char *> (istr.text));
       if (concats)
 	{
 	  gcc_assert (locs);

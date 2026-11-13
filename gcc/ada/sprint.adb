@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2026, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -28,7 +28,6 @@ with Atree;          use Atree;
 with Casing;         use Casing;
 with Csets;          use Csets;
 with Debug;          use Debug;
-with Einfo;          use Einfo;
 with Einfo.Entities; use Einfo.Entities;
 with Einfo.Utils;    use Einfo.Utils;
 with Lib;            use Lib;
@@ -39,7 +38,6 @@ with Output;         use Output;
 with Rtsfind;        use Rtsfind;
 with Sem_Eval;       use Sem_Eval;
 with Sem_Util;       use Sem_Util;
-with Sinfo;          use Sinfo;
 with Sinfo.Nodes;    use Sinfo.Nodes;
 with Sinfo.Utils;    use Sinfo.Utils;
 with Sinput;         use Sinput;
@@ -73,7 +71,7 @@ package body Sprint is
    --  Set True if the -gnatdo (dump original tree) flag is set
 
    Dump_Generated_Only : Boolean;
-   --  Set True if the -gnatdG (dump generated tree) debug flag is set
+   --  Set True if the -gnatdg (dump generated tree) debug flag is set
    --  or for Print_Generated_Code (-gnatG) or Dump_Generated_Code (-gnatD).
 
    Dump_Freeze_Null : Boolean;
@@ -1772,8 +1770,8 @@ package body Sprint is
             Sprint_Node (Name (Node));
             Write_Char (';');
 
-         when N_Exit_Statement =>
-            Write_Indent_Str_Sloc ("exit");
+         when N_Loop_Flow_Statement =>
+            Write_Indent_Str_Sloc (Loop_Flow_Keyword (Node));
             Sprint_Opt_Node (Name (Node));
 
             if Present (Condition (Node)) then
@@ -1839,6 +1837,9 @@ package body Sprint is
             end if;
 
             Write_Char (';');
+
+         when N_External_Initializer =>
+            null;
 
          when N_Delta_Aggregate =>
             Write_Str_With_Col_Check_Sloc ("(");
@@ -1960,9 +1961,9 @@ package body Sprint is
                   Sprint_Node (Access_Definition (Node));
                end if;
 
-               if Present (Default_Expression (Node)) then
+               if Present (Expression (Node)) then
                   Write_Str (" := ");
-                  Sprint_Node (Default_Expression (Node));
+                  Sprint_Node (Expression (Node));
                end if;
 
                Write_Char (';');
@@ -2184,6 +2185,13 @@ package body Sprint is
                Write_Indent_Str ("exception");
                Indent_Begin;
                Sprint_Node_List (Exception_Handlers (Node));
+               Indent_End;
+            end if;
+
+            if Present (Finally_Statements (Node)) then
+               Write_Indent_Str ("finally");
+               Indent_Begin;
+               Sprint_Node_List (Finally_Statements (Node));
                Indent_End;
             end if;
 
@@ -3116,8 +3124,12 @@ package body Sprint is
             Write_Condition_And_Reason (Node);
 
          when N_Raise_Statement =>
-            Write_Indent_Str_Sloc ("raise ");
-            Sprint_Node (Name (Node));
+            if Present (Name (Node)) then
+               Write_Indent_Str_Sloc ("raise ");
+               Sprint_Node (Name (Node));
+            else
+               Write_Indent_Str_Sloc ("raise");
+            end if;
 
             if Present (Expression (Node)) then
                Write_Str_With_Col_Check_Sloc (" with ");
@@ -3127,8 +3139,12 @@ package body Sprint is
             Write_Char (';');
 
          when N_Raise_When_Statement =>
-            Write_Indent_Str_Sloc ("raise ");
-            Sprint_Node (Name (Node));
+            if Present (Name (Node)) then
+               Write_Indent_Str_Sloc ("raise ");
+               Sprint_Node (Name (Node));
+            else
+               Write_Indent_Str_Sloc ("raise");
+            end if;
             Write_Str (" when ");
             Sprint_Node (Condition (Node));
 
@@ -3539,12 +3555,6 @@ package body Sprint is
             Sprint_Node (Expression (Node));
             Write_Char (')');
 
-         when N_Unchecked_Expression =>
-            Col_Check (10);
-            Write_Str ("`(");
-            Sprint_Node_Sloc (Expression (Node));
-            Write_Char (')');
-
          when N_Unchecked_Type_Conversion =>
             Sprint_Node (Subtype_Mark (Node));
             Write_Char ('!');
@@ -3772,7 +3782,6 @@ package body Sprint is
       Node_Exists : Boolean := False;
 
    begin
-
       if Is_Non_Empty_List (List) then
 
          if Dump_Original_Only then
@@ -4415,9 +4424,9 @@ package body Sprint is
                      Sprint_Node (X);
                      Set_Sloc (X, Old_Sloc);
 
-                     --  Array subtypes
+                  --  Array subtypes
 
-                     --  Preserve Sloc of index subtypes, as above
+                  --  Preserve Sloc of index subtypes, as above
 
                   when E_Array_Subtype =>
                      Write_Header (False);
@@ -4630,7 +4639,7 @@ package body Sprint is
                            Param : Entity_Id;
 
                         begin
-                           Param := First_Entity (Typ);
+                           Param := First_Formal (Typ);
                            loop
                               Write_Id (Param);
                               Write_Str (" : ");
@@ -4642,7 +4651,7 @@ package body Sprint is
                               end if;
 
                               Write_Id (Etype (Param));
-                              Next_Entity (Param);
+                              Next_Formal (Param);
                               exit when No (Param);
                               Write_Str (", ");
                            end loop;
@@ -4707,6 +4716,10 @@ package body Sprint is
                         Write_Int (UI_To_Int (L + Len) - 1);
                         Write_Str (");");
                      end;
+
+                  when E_Private_Subtype =>
+                     Write_Header (False);
+                     Write_Name_With_Col_Check (Chars (Full_View (Typ)));
 
                   --  For all other Itypes, print a triple ? (fill in later
                   --  if needed).

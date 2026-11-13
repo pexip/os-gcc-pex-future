@@ -10,9 +10,87 @@
 
 module core.internal.atomic;
 
-import core.atomic : MemoryOrder, has128BitCAS;
+import core.atomic : has128BitCAS, MemoryOrder;
 
 version (DigitalMars)
+version (AArch64)
+{
+    /* These functions are all stubbed out. They await someone who knows what
+       they are doing with AArch64 atomics.
+       TODO AArch64
+     */
+    enum IsAtomicLockFree(T) = T.sizeof <= size_t.sizeof * 2;
+
+    inout(T) atomicLoad(MemoryOrder order = MemoryOrder.seq, T)(inout(T)* src) pure nothrow @nogc @trusted
+        if (CanCAS!T)
+    {
+        return *src;
+    }
+
+    void atomicStore(MemoryOrder order = MemoryOrder.seq, T)(T* dest, T value) pure nothrow @nogc @trusted
+        if (CanCAS!T)
+    {
+        *dest = value;
+    }
+
+    T atomicFetchAdd(MemoryOrder order = MemoryOrder.seq, bool result = true, T)(T* dest, T value) pure nothrow @nogc @trusted
+        if (is(T : ulong))
+    {
+	return *dest + value;
+    }
+
+    T atomicFetchSub(MemoryOrder order = MemoryOrder.seq, bool result = true, T)(T* dest, T value) pure nothrow @nogc @trusted
+        if (is(T : ulong))
+    {
+        return atomicFetchAdd(dest, cast(T)-cast(IntOrLong!T)value);
+    }
+
+    T atomicExchange(MemoryOrder order = MemoryOrder.seq, bool result = true, T)(T* dest, T value) pure nothrow @nogc @trusted
+    if (CanCAS!T)
+    {
+        size_t storage = void;
+        return *cast(T*)&storage;
+    }
+
+    alias atomicCompareExchangeWeak = atomicCompareExchangeStrong;
+
+    bool atomicCompareExchangeStrong(MemoryOrder succ = MemoryOrder.seq, MemoryOrder fail = MemoryOrder.seq, T)(T* dest, T* compare, T value) pure nothrow @nogc @trusted
+        if (CanCAS!T)
+    {
+        if (*dest != *compare)
+        {
+            *compare = *dest;
+            return false;
+        }
+        *dest = value;
+        return true;
+    }
+
+    alias atomicCompareExchangeWeakNoResult = atomicCompareExchangeStrongNoResult;
+
+    bool atomicCompareExchangeStrongNoResult(MemoryOrder succ = MemoryOrder.seq, MemoryOrder fail = MemoryOrder.seq, T)(T* dest, const T compare, T value) pure nothrow @nogc @trusted
+        if (CanCAS!T)
+    {
+        if (*dest != compare)
+            return false;
+        *dest = value;
+        return true;
+    }
+
+    void atomicFence(MemoryOrder order = MemoryOrder.seq)() pure nothrow @nogc @trusted
+    {
+    }
+
+    void atomicSignalFence(MemoryOrder order = MemoryOrder.seq)() pure nothrow @nogc @trusted
+    {
+        // no-op, dmd doesn't reorder instructions
+    }
+
+    void pause() pure nothrow @nogc @trusted
+    {
+    }
+}
+else // X86 and X86_64
 {
     private
     {
@@ -912,7 +990,7 @@ else version (GNU)
         {
             static if (GNU_Thread_Model == ThreadModel.Posix)
             {
-                import core.sys.posix.pthread;
+                import core.sys.posix.sys.types : pthread_mutex_t, pthread_mutexattr_t;
                 alias atomicMutexHandle = pthread_mutex_t;
 
                 pragma(mangle, "pthread_mutex_init") int fakePureMutexInit(pthread_mutex_t*, pthread_mutexattr_t*);
@@ -921,7 +999,7 @@ else version (GNU)
             }
             else static if (GNU_Thread_Model == ThreadModel.Win32)
             {
-                import core.sys.windows.winbase;
+                import core.sys.windows.winbase : CRITICAL_SECTION;
                 alias atomicMutexHandle = CRITICAL_SECTION;
 
                 pragma(mangle, "InitializeCriticalSection") int fakePureMutexInit(CRITICAL_SECTION*);
@@ -983,7 +1061,7 @@ else version (GNU)
         // Internal static mutex reference.
         private AtomicMutex* _getAtomicMutex() @trusted @nogc nothrow
         {
-            __gshared static AtomicMutex mutex;
+            __gshared AtomicMutex mutex;
             return &mutex;
         }
 

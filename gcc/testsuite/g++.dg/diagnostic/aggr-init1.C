@@ -33,5 +33,5 @@ auto Any_of(const char (&...c1)[N1]) -> Any<static_cast<int>(sizeof...(N1))> {
 }
 
 int main() {
-  constexpr static const auto aa1 = Any_of("abcd", "def");
+  constexpr static const auto aa1 = Any_of("abcd", "def"); // { dg-message {"abcd", "def"} }
 }

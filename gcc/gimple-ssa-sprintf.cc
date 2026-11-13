@@ -1,4 +1,4 @@
-/* Copyright (C) 2016-2024 Free Software Foundation, Inc.
+/* Copyright (C) 2016-2026 Free Software Foundation, Inc.
    Contributed by Martin Sebor <msebor@redhat.com>.
 
 This file is part of GCC.
@@ -1079,7 +1079,7 @@ get_int_range (tree arg, gimple *stmt,
 	  && TYPE_PRECISION (argtype) <= TYPE_PRECISION (type))
 	{
 	  /* Try to determine the range of values of the integer argument.  */
-	  value_range vr;
+	  int_range_max vr;
 	  query->range_of_expr (vr, arg, stmt);
 
 	  if (!vr.undefined_p () && !vr.varying_p ())
@@ -1372,7 +1372,7 @@ format_integer (const directive &dir, tree arg, pointer_query &ptr_qry)
       return res;
     }
   else if (INTEGRAL_TYPE_P (TREE_TYPE (arg))
-	   || TREE_CODE (TREE_TYPE (arg)) == POINTER_TYPE)
+	   || POINTER_TYPE_P (TREE_TYPE (arg)))
     /* Determine the type of the provided non-constant argument.  */
     argtype = TREE_TYPE (arg);
   else
@@ -1395,7 +1395,7 @@ format_integer (const directive &dir, tree arg, pointer_query &ptr_qry)
     {
       /* Try to determine the range of values of the integer argument
 	 (range information is not available for pointers).  */
-      value_range vr;
+      int_range_max vr;
       ptr_qry.rvals->range_of_expr (vr, arg, dir.info->callstmt);
 
       if (!vr.varying_p () && !vr.undefined_p ())
@@ -1434,7 +1434,7 @@ format_integer (const directive &dir, tree arg, pointer_query &ptr_qry)
 		{
 		  tree type = TREE_TYPE (gimple_assign_rhs1 (def));
 		  if (INTEGRAL_TYPE_P (type)
-		      || TREE_CODE (type) == POINTER_TYPE)
+		      || POINTER_TYPE_P (type))
 		    argtype = type;
 		}
 	    }
@@ -1443,7 +1443,7 @@ format_integer (const directive &dir, tree arg, pointer_query &ptr_qry)
 
   if (!argmin)
     {
-      if (TREE_CODE (argtype) == POINTER_TYPE)
+      if (POINTER_TYPE_P (argtype))
 	{
 	  argmin = build_int_cst (pointer_sized_int_node, 0);
 	  argmax = build_all_ones_cst (pointer_sized_int_node);
@@ -2623,7 +2623,7 @@ format_string (const directive &dir, tree arg, pointer_query &ptr_qry)
 	  if (slen.range.likely < target_int_max ())
 	    slen.range.likely *= 2;
 
-	  if (slen.range.likely < target_int_max ())
+	  if (slen.range.unlikely < target_int_max ())
 	    slen.range.unlikely *= target_mb_len_max ();
 
 	  /* A non-empty wide character conversion may fail.  */
@@ -4260,7 +4260,7 @@ try_substitute_return_value (gimple_stmt_iterator *gsi,
 
 	  wide_int min = wi::shwi (retval[0], prec);
 	  wide_int max = wi::shwi (retval[1], prec);
-	  value_range r (TREE_TYPE (lhs), min, max);
+	  int_range_max r (TREE_TYPE (lhs), min, max);
 	  set_range_info (lhs, r);
 
 	  setrange = true;
@@ -4629,7 +4629,7 @@ handle_printf_call (gimple_stmt_iterator *gsi, pointer_query &ptr_qry)
 	  /* Try to determine the range of values of the argument
 	     and use the greater of the two at level 1 and the smaller
 	     of them at level 2.  */
-	  value_range vr;
+	  int_range_max vr;
 	  ptr_qry.rvals->range_of_expr (vr, size, info.callstmt);
 
 	  if (!vr.undefined_p ())

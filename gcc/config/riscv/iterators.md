@@ -1,5 +1,5 @@
 ;; Iterators for the machine description for RISC-V
-;; Copyright (C) 2011-2024 Free Software Foundation, Inc.
+;; Copyright (C) 2011-2026 Free Software Foundation, Inc.
 
 ;; This file is part of GCC.
 ;;
@@ -37,6 +37,9 @@
 ;; Likewise, but for XLEN-sized quantities.
 (define_mode_iterator X [(SI "!TARGET_64BIT") (DI "TARGET_64BIT")])
 
+;; Likewise, but for XLEN/2 -sized quantities.
+(define_mode_iterator HX [(HI "!TARGET_64BIT") (SI "TARGET_64BIT")])
+
 ;; Branches operate on XLEN-sized quantities, but for RV64 we accept
 ;; QImode values so we can force zero-extension.
 (define_mode_iterator BR [(QI "TARGET_64BIT") SI (DI "TARGET_64BIT")])
@@ -59,8 +62,47 @@
 ;; Iterator for hardware integer modes narrower than XLEN.
 (define_mode_iterator SUBX [QI HI (SI "TARGET_64BIT")])
 
+;; Iterator for hardware integer modes narrower than XLEN, same as SUBX.
+(define_mode_iterator SUBX1 [QI HI (SI "TARGET_64BIT")])
+
 ;; Iterator for hardware-supported integer modes.
 (define_mode_iterator ANYI [QI HI SI (DI "TARGET_64BIT")])
+
+;; Iterator for hardware integer modes narrower than XLEN, same as ANYI.
+(define_mode_iterator ANYI1 [QI HI SI (DI "TARGET_64BIT")])
+
+;; Iterator for integer modes less than or equal to 32bit.
+(define_mode_iterator ANYLE32 [QI HI SI])
+
+(define_mode_iterator ANYI_DOUBLE_TRUNC [HI SI (DI "TARGET_64BIT")])
+
+(define_mode_iterator ANYI_QUAD_TRUNC [SI (DI "TARGET_64BIT")])
+
+(define_mode_iterator ANYI_OCT_TRUNC [(DI "TARGET_64BIT")])
+
+(define_mode_attr ANYI_DOUBLE_TRUNCATED [
+  (HI "QI") (SI "HI") (DI "SI")
+])
+
+(define_mode_attr ANYI_QUAD_TRUNCATED [
+  (SI "QI") (DI "HI")
+])
+
+(define_mode_attr ANYI_OCT_TRUNCATED [
+  (DI "QI")
+])
+
+(define_mode_attr anyi_double_truncated [
+  (HI "qi") (SI "hi") (DI "si")
+])
+
+(define_mode_attr anyi_quad_truncated [
+  (SI "qi") (DI "hi")
+])
+
+(define_mode_attr anyi_oct_truncated [
+  (DI "qi")
+])
 
 ;; Iterator for hardware-supported floating-point modes.
 (define_mode_iterator ANYF [(SF "TARGET_HARD_FLOAT || TARGET_ZFINX")
@@ -75,6 +117,12 @@
 ;; Iterator for floating-point modes that can be loaded into X registers.
 (define_mode_iterator SOFTF [SF (DF "TARGET_64BIT") (HF "TARGET_ZFHMIN")])
 
+;; Iterator for floating-point modes of BF16.
+(define_mode_iterator HFBF [HF BF])
+
+;; Conversion between floating-point modes and BF16.
+;; SF to BF16 have hardware instructions.
+(define_mode_iterator FBF [HF DF TF])
 
 ;; -------------------------------------------------------------------
 ;; Mode attributes
@@ -113,6 +161,9 @@
 ;; This attribute gives the format suffix for atomic memory operations.
 (define_mode_attr amo [(SI "w") (DI "d")])
 
+;; This attribute gives the format suffix for byte and halfword atomic memory operations.
+(define_mode_attr amobh [(QI "b") (HI "h")])
+
 ;; This attribute gives the upper-case mode name for one unit of a
 ;; floating-point mode.
 (define_mode_attr UNITMODE [(HF "HF") (SF "SF") (DF "DF")])
@@ -121,9 +172,18 @@
 ;; the controlling mode.
 (define_mode_attr HALFMODE [(DF "SI") (DI "SI") (TF "DI")])
 
+;; Give the number of bits in the mode
+(define_mode_attr sizen [(QI "8") (HI "16") (SI "32") (DI "64")])
+
 ; bitmanip mode attribute
 (define_mode_attr shiftm1 [(SI "const_si_mask_operand") (DI "const_di_mask_operand")])
 (define_mode_attr shiftm1p [(SI "DsS") (DI "DsD")])
+
+; mode shift limit attribute
+(define_mode_attr sh_limit [(QI "7") (HI "15")])
+
+; mode shift bit limit attribute
+(define_mode_attr sh_bit [(SI "5") (DI "6")])
 
 ; zcmp mode attribute
 (define_mode_attr slot0_offset  [(SI "-4")  (DI "-8")])
@@ -147,6 +207,24 @@
 ;; This code iterator allows signed and unsigned widening multiplications
 ;; to use the same template.
 (define_code_iterator any_extend [sign_extend zero_extend])
+(define_code_attr extend_name [
+  (sign_extend "extend") (zero_extend "zero_extend")
+])
+
+;; This code iterator captures cases where a zero value for an operand
+;; neutralizes the operation.  ie, a + 0 -> a.  That basic idea forms
+;; conditional operations.
+(define_code_iterator zero_is_neutral_op [plus minus ior xor ashift lshiftrt
+					  ashiftrt rotatert rotate])
+(define_code_iterator zero_is_neutral_op_c [plus ior xor])
+
+;; These code iterators allow unsigned and signed extraction to be generated
+;; from the same template.
+(define_code_iterator any_extract [sign_extract zero_extract])
+(define_code_attr extract_sidi_shift [(sign_extract "sraiw")
+				      (zero_extract "srliw")])
+(define_code_attr extract_shift [(sign_extract "ashiftrt")
+				 (zero_extract "lshiftrt")])
 
 ;; This code iterator allows the two right shift instructions to be
 ;; generated from the same template.
@@ -155,6 +233,8 @@
 ;; This code iterator allows the three shift instructions to be generated
 ;; from the same template.
 (define_code_iterator any_shift [ashift ashiftrt lshiftrt])
+
+(define_code_iterator any_shift_rotate [ashift ashiftrt lshiftrt rotate rotatert])
 
 ;; This code iterator allows the three bitwise instructions to be generated
 ;; from the same template.
@@ -183,6 +263,10 @@
 (define_code_iterator any_ge [ge geu])
 (define_code_iterator any_lt [lt ltu])
 (define_code_iterator any_le [le leu])
+(define_code_iterator any_eq [eq ne])
+
+;; Iterators for conditions we can emit a sCC against 0 or a reg directly
+(define_code_iterator scc_0  [eq ne gt gtu])
 
 ; atomics code iterator
 (define_code_iterator any_atomic [plus ior xor and])
@@ -192,9 +276,27 @@
 
 (define_code_iterator bitmanip_minmax [smin umin smax umax])
 
+(define_code_iterator bitmanip_minmax_cmp_op [lt ltu le leu ge geu gt gtu])
+
+; Map a comparison operator to a min or max.
+(define_code_attr bitmanip_minmax_cmp_insn [(lt "min") (ltu "minu")
+					    (le "min") (leu "minu")
+					    (ge "max") (geu "maxu")
+					    (gt "max") (gtu "maxu")])
+
 (define_code_iterator clz_ctz_pcnt [clz ctz popcount])
 
 (define_code_iterator bitmanip_rotate [rotate rotatert])
+
+;; These code iterators allow the signed and unsigned fix operations to use
+;; the same template.
+(define_code_iterator fix_ops [fix unsigned_fix])
+
+(define_code_attr fix_uns [(fix "fix") (unsigned_fix "fixuns")])
+
+(define_code_attr OPTAB [(ior "IOR")
+                         (xor "XOR")])
+
 
 ;; -------------------------------------------------------------------
 ;; Code Attributes
@@ -214,6 +316,9 @@
 ;; <su> is like <u>, but the signed form expands to "s" rather than "".
 (define_code_attr su [(sign_extend "s") (zero_extend "u")])
 
+;; eq expand to "c" and ne expand to "s".
+(define_code_attr cs [(eq "c") (ne "s")])
+
 ;; <optab> expands to the name of the optab for a particular code.
 (define_code_attr optab [(ashift "ashl")
 			 (ashiftrt "ashr")
@@ -226,6 +331,8 @@
 			 (le "le")
 			 (gt "gt")
 			 (lt "lt")
+			 (eq "eq")
+			 (ne "ne")
 			 (ior "ior")
 			 (xor "xor")
 			 (and "and")
@@ -246,8 +353,13 @@
 			 (us_minus "ussub")
 			 (sign_extend "extend")
 			 (zero_extend "zero_extend")
+			 (sign_extract "extract")
+			 (zero_extract "zero_extract")
 			 (fix "fix_trunc")
 			 (unsigned_fix "fixuns_trunc")])
+
+(define_code_attr bit_optab [(ior "bset")
+			     (xor "binv")])
 
 ;; <or_optab> code attributes
 (define_code_attr or_optab [(ior "ior")
@@ -285,10 +397,11 @@
   [(plus "add") (ior "or") (xor "xor") (and "and")])
 
 ; bitmanip code attributes
-(define_code_attr minmax_optab [(smin "smin")
-				(smax "smax")
-				(umin "umin")
-				(umax "umax")])
+;; Unsigned variant of a min/max optab.
+(define_code_attr uminmax_optab [(smin "umin")
+				 (smax "umax")
+				 (umin "umin")
+				 (umax "umax")])
 (define_code_attr bitmanip_optab [(smin "smin")
 				  (smax "smax")
 				  (umin "umin")
@@ -311,11 +424,6 @@
 ;; -------------------------------------------------------------------
 ;; Int Iterators.
 ;; -------------------------------------------------------------------
-
-;; Iterator and attributes for floating-point rounding instructions.
-(define_int_iterator RINT [UNSPEC_LRINT UNSPEC_LROUND])
-(define_int_attr rint_pattern [(UNSPEC_LRINT "rint") (UNSPEC_LROUND "round")])
-(define_int_attr rint_rm [(UNSPEC_LRINT "dyn") (UNSPEC_LROUND "rmm")])
 
 ;; Iterator and attributes for quiet comparisons.
 (define_int_iterator QUIET_COMPARISON [UNSPEC_FLT_QUIET UNSPEC_FLE_QUIET])

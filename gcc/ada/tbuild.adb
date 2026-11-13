@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2026, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -26,7 +26,6 @@
 with Atree;          use Atree;
 with Aspects;        use Aspects;
 with Csets;          use Csets;
-with Einfo;          use Einfo;
 with Einfo.Entities; use Einfo.Entities;
 with Einfo.Utils;    use Einfo.Utils;
 with Lib;            use Lib;
@@ -100,17 +99,6 @@ package body Tbuild is
    end Add_Unique_Serial_Number;
 
    ----------------
-   -- Checks_Off --
-   ----------------
-
-   function Checks_Off (N : Node_Id) return Node_Id is
-   begin
-      return
-        Make_Unchecked_Expression (Sloc (N),
-          Expression => N);
-   end Checks_Off;
-
-   ----------------
    -- Convert_To --
    ----------------
 
@@ -161,6 +149,21 @@ package body Tbuild is
    begin
       null;
    end Discard_Node;
+
+   --------------------------
+   -- Make_Assertion_Level --
+   --------------------------
+
+   function Make_Assertion_Level
+     (Loc : Source_Ptr; Nam : Name_Id) return Entity_Id
+   is
+      Level : constant Entity_Id := Make_Defining_Identifier (Loc, Nam);
+   begin
+      Mutate_Ekind (Level, E_Assertion_Level);
+      Set_Etype (Level, Standard_Void_Type);
+      Set_Scope (Level, Standard_Standard);
+      return Level;
+   end Make_Assertion_Level;
 
    -------------------------------------------
    -- Make_Byte_Aligned_Attribute_Reference --
@@ -503,7 +506,7 @@ package body Tbuild is
    -- Make_SC --
    -------------
 
-   function  Make_SC (Pre, Sel : Node_Id) return Node_Id is
+   function Make_SC (Pre, Sel : Node_Id) return Node_Id is
    begin
       return
         Make_Selected_Component (System_Location,
@@ -918,11 +921,17 @@ package body Tbuild is
       Result : Node_Id;
 
    begin
-      --  If the expression is already of the correct type, then nothing
-      --  to do, except for relocating the node
+      --  If the expression is already of the correct type, then nothing to do,
+      --  except for relocating the node. If Typ is an array type with fixed
+      --  lower bound, the expression might be of a subtype that does not
+      --  have this lower bound (on a slice), hence the conversion needs to
+      --  be preserved for sliding.
 
       if Present (Etype (Expr))
-        and then (Base_Type (Etype (Expr)) = Typ or else Etype (Expr) = Typ)
+        and then
+          ((Base_Type (Etype (Expr)) = Typ
+             and then not Is_Fixed_Lower_Bound_Array_Subtype (Typ))
+           or else Etype (Expr) = Typ)
       then
          return Relocate_Node (Expr);
 

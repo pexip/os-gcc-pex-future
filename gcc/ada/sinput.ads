@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 S p e c                                  --
 --                                                                          --
---          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2026, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -46,13 +46,13 @@
 --    significance, but they are significant for error reporting purposes,
 --    since errors are identified by line and column location.
 
---  In GNAT, a physical line is ended by any of the sequences LF, CR/LF, or
---  CR. LF is used in typical Unix systems, CR/LF in DOS systems, and CR
---  alone in System 7. In addition, we recognize any of these sequences in
+--  In GNAT, a physical line is ended by any of the sequences CR, LF, or CR/LF.
+--  CR is used in some MAC systems, LF is used in Unix systems, and CR/LF in
+--  DOS/Windows systems. In addition, we recognize any of these sequences in
 --  any of the operating systems, for better behavior in treating foreign
 --  files (e.g. a Unix file with LF terminators transferred to a DOS system).
 --  Finally, wide character codes in categories Separator, Line and Separator,
---  Paragraph are considered to be physical line terminators.
+--  Paragraph are considered to be logical line terminators.
 
 with Alloc;
 with Casing; use Casing;
@@ -706,6 +706,15 @@ package Sinput is
    --  reloaded. It is intended for tools that parse several times sources,
    --  to avoid memory leaks.
 
+   type C_Array is record
+      Pointer : aliased access constant Character;
+      Length  : aliased Integer;
+   end record;
+   --  WARNING: There is a matching C declaration of this type in fe.h
+
+   function C_Source_Buffer (S : SFI) return C_Array;
+   --  WARNING: There is a matching C declaration of this subprogram in fe.h
+
 private
    pragma Inline (File_Name);
    pragma Inline (Full_File_Name);
@@ -784,8 +793,9 @@ private
       Full_Ref_Name     : File_Name_Type;
       Instance          : Instance_Id;
       Num_SRef_Pragmas  : Nat;
-      First_Mapped_Line : Logical_Line_Number;
       Source_Text       : Source_Buffer_Ptr;
+      Inlined_Call      : Source_Ptr;
+      First_Mapped_Line : Logical_Line_Number;
       Source_First      : Source_Ptr;
       Source_Last       : Source_Ptr;
       Source_Checksum   : Word;
@@ -794,7 +804,6 @@ private
       Unit              : Unit_Number_Type;
       Time_Stamp        : Time_Stamp_Type;
       File_Type         : Type_Of_File;
-      Inlined_Call      : Source_Ptr;
       Inlined_Body      : Boolean;
       Inherited_Pragma  : Boolean;
       License           : License_Type;
@@ -804,7 +813,7 @@ private
       --  The following fields are for internal use only (i.e. only in the
       --  body of Sinput or its children, with no direct access by clients).
 
-      Sloc_Adjust : Source_Ptr;
+      Sloc_Adjust : Source_Ptr'Base; -- can be (very) negative
       --  A value to be added to Sloc values for this file to reference the
       --  corresponding lines table. This is zero for the non-instantiation
       --  case, and set so that the addition references the ultimate template
@@ -829,52 +838,6 @@ private
 
       Index : Source_File_Index := 123456789; -- for debugging
    end record;
-
-   --  The following representation clause ensures that the above record
-   --  has no holes. We do this so that when instances of this record are
-   --  written by Tree_Gen, we do not write uninitialized values to the file.
-
-   AS : constant Pos := Standard'Address_Size;
-
-   for Source_File_Record use record
-      File_Name           at  0 range 0 .. 31;
-      Reference_Name      at  4 range 0 .. 31;
-      Debug_Source_Name   at  8 range 0 .. 31;
-      Full_Debug_Name     at 12 range 0 .. 31;
-      Full_File_Name      at 16 range 0 .. 31;
-      Full_Ref_Name       at 20 range 0 .. 31;
-      Instance            at 48 range 0 .. 31;
-      Num_SRef_Pragmas    at 24 range 0 .. 31;
-      First_Mapped_Line   at 28 range 0 .. 31;
-      Source_First        at 32 range 0 .. 31;
-      Source_Last         at 36 range 0 .. 31;
-      Source_Checksum     at 40 range 0 .. 31;
-      Last_Source_Line    at 44 range 0 .. 31;
-      Template            at 52 range 0 .. 31;
-      Unit                at 56 range 0 .. 31;
-      Time_Stamp          at 60 range 0 .. 8 * Time_Stamp_Length - 1;
-      File_Type           at 74 range 0 .. 7;
-      Inlined_Call        at 88 range 0 .. 31;
-      Inlined_Body        at 75 range 0 .. 0;
-      Inherited_Pragma    at 75 range 1 .. 1;
-      License             at 76 range 0 .. 7;
-      Keyword_Casing      at 77 range 0 .. 7;
-      Identifier_Casing   at 78 range 0 .. 15;
-      Sloc_Adjust         at 80 range 0 .. 31;
-      Lines_Table_Max     at 84 range 0 .. 31;
-      Index               at 92 range 0 .. 31;
-
-      --  The following fields are pointers, so we have to specialize their
-      --  lengths using pointer size, obtained above as Standard'Address_Size.
-      --  Note that Source_Text is a fat pointer, so it has size = AS*2.
-
-      Source_Text         at 96 range 0      .. AS * 2 - 1;
-      Lines_Table         at 96 range AS * 2 .. AS * 3 - 1;
-      Logical_Lines_Table at 96 range AS * 3 .. AS * 4 - 1;
-   end record; -- Source_File_Record
-
-   for Source_File_Record'Size use 96 * 8 + AS * 4;
-   --  This ensures that we did not leave out any fields
 
    package Source_File is new Table.Table
      (Table_Component_Type => Source_File_Record,

@@ -1,6 +1,6 @@
 /* Register liveness information from epilgoue enables peephole optimization. */
 /* { dg-do compile } */
-/* { dg-options "-mthumb -Os" } */
+/* { dg-options "-mthumb -Os -mno-long-calls" } */
 /* { dg-require-effective-target arm_thumb2_ok } */
 /* { dg-final { check-function-bodies "**" "" } } */
 
@@ -20,10 +20,8 @@ Below block is for non-armv8.1-m.main
 ** |
 
 Below block is for armv8.1-m.main
-**	adds	(r[0-9]+), r2, #1
 **	tst	r[0-9]+, #4
-**	it	ne
-**	movne	r2, \1
+**	csinc	r2, r2, r2, eq
 
 ** )
 **	bl	bar

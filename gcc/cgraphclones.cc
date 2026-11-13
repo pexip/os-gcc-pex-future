@@ -1,5 +1,5 @@
 /* Callgraph clones
-   Copyright (C) 2003-2024 Free Software Foundation, Inc.
+   Copyright (C) 2003-2026 Free Software Foundation, Inc.
    Contributed by Jan Hubicka
 
 This file is part of GCC.
@@ -108,7 +108,7 @@ cgraph_edge::clone (cgraph_node *n, gcall *call_stmt, unsigned stmt_uid,
       tree decl;
 
       if (call_stmt && (decl = gimple_call_fndecl (call_stmt))
-	  /* When the call is speculative, we need to resolve it 
+	  /* When the call is speculative, we need to resolve it
 	     via cgraph_resolve_speculation and not here.  */
 	  && !speculative)
 	{
@@ -121,7 +121,22 @@ cgraph_edge::clone (cgraph_node *n, gcall *call_stmt, unsigned stmt_uid,
 	  new_edge = n->create_indirect_edge (call_stmt,
 					      indirect_info->ecf_flags,
 					      prof_count, true);
-	  *new_edge->indirect_info = *indirect_info;
+
+	  if (indirect_info->kind == CIIK_POLYMORPHIC)
+	    new_edge->indirect_info
+	      = (new (ggc_alloc<cgraph_polymorphic_indirect_info> ())
+		 cgraph_polymorphic_indirect_info (
+		     *(const cgraph_polymorphic_indirect_info *) indirect_info));
+	  else if (indirect_info->kind == CIIK_SIMPLE)
+	    new_edge->indirect_info
+	      = (new (ggc_alloc<cgraph_simple_indirect_info> ())
+		 cgraph_simple_indirect_info (
+		     *(const cgraph_simple_indirect_info *) indirect_info));
+	  else
+	    new_edge->indirect_info
+	      = (new (ggc_alloc<cgraph_indirect_call_info> ())
+		 cgraph_indirect_call_info(
+		     *(const cgraph_indirect_call_info *) indirect_info));
 	}
     }
   else
@@ -144,11 +159,14 @@ cgraph_edge::clone (cgraph_node *n, gcall *call_stmt, unsigned stmt_uid,
   new_edge->can_throw_external = can_throw_external;
   new_edge->call_stmt_cannot_inline_p = call_stmt_cannot_inline_p;
   new_edge->speculative = speculative;
+  new_edge->callback = callback;
+  new_edge->has_callback = has_callback;
+  new_edge->callback_id = callback_id;
   new_edge->in_polymorphic_cdtor = in_polymorphic_cdtor;
 
   /* Update IPA profile.  Local profiles need no updating in original.  */
   if (update_original)
-    count = count.combine_with_ipa_count_within (count.ipa () 
+    count = count.combine_with_ipa_count_within (count.ipa ()
 						 - new_edge->count.ipa (),
 						 caller->count);
   symtab->call_edge_duplication_hooks (this, new_edge);
@@ -158,7 +176,7 @@ cgraph_edge::clone (cgraph_node *n, gcall *call_stmt, unsigned stmt_uid,
 /* Set flags of NEW_NODE and its decl.  NEW_NODE is a newly created private
    clone or its thunk.  */
 
-static void
+void
 set_new_clone_decl_and_node_flags (cgraph_node *new_node)
 {
   DECL_EXTERNAL (new_node->decl) = 0;
@@ -173,7 +191,9 @@ set_new_clone_decl_and_node_flags (cgraph_node *new_node)
   DECL_IS_REPLACEABLE_OPERATOR (new_node->decl) = 0;
 
   new_node->externally_visible = 0;
-  new_node->local = 1;
+  /* Clones of callbacks might have their address taken, and thus cannot be
+     local.  */
+  new_node->local = !new_node->address_taken;
   new_node->lowered = true;
   new_node->semantic_interposition = 0;
 }
@@ -324,11 +344,11 @@ dump_callgraph_transformation (const cgraph_node *original,
     {
       fprintf (symtab->ipa_clones_dump_file,
 	       "Callgraph clone;%s;%d;%s;%d;%d;%s;%d;%s;%d;%d;%s\n",
-	       original->asm_name (), original->order,
+	       original->asm_name (), original->get_uid (),
 	       DECL_SOURCE_FILE (original->decl),
 	       DECL_SOURCE_LINE (original->decl),
 	       DECL_SOURCE_COLUMN (original->decl), clone->asm_name (),
-	       clone->order, DECL_SOURCE_FILE (clone->decl),
+	       clone->get_uid (), DECL_SOURCE_FILE (clone->decl),
 	       DECL_SOURCE_LINE (clone->decl), DECL_SOURCE_COLUMN (clone->decl),
 	       suffix);
 
@@ -360,14 +380,19 @@ localize_profile (cgraph_node *n)
 
    When UPDATE_ORIGINAL is true, the counts are subtracted from the original
    function's profile to reflect the fact that part of execution is handled
-   by node.  
+   by node.
    When CALL_DUPLICATION_HOOK is true, the ipa passes are acknowledged about
    the new clone. Otherwise the caller is responsible for doing so later.
 
    If the new node is being inlined into another one, NEW_INLINED_TO should be
    the outline function the new one is (even indirectly) inlined to.  All hooks
-   will see this in node's inlined_to, when invoked.  Can be NULL if the
+   will see this in node's inlined_to, when invoked.  Should be NULL if the
    node is not inlined.
+
+   SUFFIX is string that is appended to the original name, it should only be
+   NULL if NEW_INLINED_TO is not NULL or if the clone being created is
+   temporary and a record about it should not be added into the ipa-clones dump
+   file.
 
    If PARAM_ADJUSTMENTS is non-NULL, the parameter manipulation information
    will be overwritten by the new structure.  Otherwise the new node will
@@ -396,7 +421,7 @@ cgraph_node::create_clone (tree new_decl, profile_count prof_count,
   if (!new_inlined_to)
     prof_count = count.combine_with_ipa_count (prof_count);
   new_node->count = prof_count;
-  new_node->calls_declare_variant_alt = this->calls_declare_variant_alt;
+  new_node->has_omp_variant_constructs = this->has_omp_variant_constructs;
 
   /* Update IPA profile.  Local profiles need no updating in original.  */
   if (update_original)
@@ -409,6 +434,7 @@ cgraph_node::create_clone (tree new_decl, profile_count prof_count,
         count = count.combine_with_ipa_count (count.ipa () - prof_count.ipa ());
     }
   new_node->decl = new_decl;
+  new_node->order = order;
   new_node->register_symbol ();
   new_node->lto_file_data = lto_file_data;
   new_node->analyzed = analyzed;
@@ -431,6 +457,7 @@ cgraph_node::create_clone (tree new_decl, profile_count prof_count,
   new_node->unit_id = unit_id;
   new_node->merged_comdat = merged_comdat;
   new_node->merged_extern_inline = merged_extern_inline;
+  new_node->must_remain_in_tu_body = must_remain_in_tu_body;
   clone_info *info = clone_info::get (this);
 
   if (param_adjustments)
@@ -564,6 +591,32 @@ clone_function_name (tree decl, const char *suffix)
   /* For consistency this needs to behave the same way as
      ASM_FORMAT_PRIVATE_NAME does, but without the final number
      suffix.  */
+  return clone_identifier (identifier, suffix);
+}
+
+/*  Return true if symbol is valid in assembler name.  */
+
+static bool
+is_valid_asm_symbol (char c)
+{
+  if ('a' <= c && c <= 'z')
+    return true;
+  if ('A' <= c && c <= 'Z')
+    return true;
+  if ('0' <= c && c <= '9')
+    return true;
+  if (c == '_')
+    return true;
+  return false;
+}
+
+/* Return a new clone of ID ending with the string SUFFIX.
+   If FILTER_SUFFIX is true, any illegal asm characters in the SUFFIX are
+   replaced with _.  */
+
+tree
+clone_identifier (tree id, const char *suffix, bool filter_suffix)
+{
   char *separator = XALLOCAVEC (char, 2);
   separator[0] = symbol_table::symbol_suffix_separator ();
   separator[1] = 0;
@@ -572,14 +625,32 @@ clone_function_name (tree decl, const char *suffix)
 #else
   const char *prefix = "";
 #endif
-  char *result = ACONCAT ((prefix,
-			   IDENTIFIER_POINTER (identifier),
-			   separator,
-			   suffix,
-			   (char*)0));
-  return get_identifier (result);
-}
+  if (!suffix)
+    suffix = "";
 
+  if (!filter_suffix)
+    {
+      char *result = ACONCAT (
+	(prefix, IDENTIFIER_POINTER (id), separator, suffix, (char *) 0));
+      return get_identifier (result);
+    }
+  else
+    {
+      /* Replace any illegal chars with _.  */
+      int suffix_len = strlen (suffix);
+      char *converted_suffix = XALLOCAVEC (char, suffix_len + 1);
+      for (int i = 0; i < suffix_len; i++)
+	if (!is_valid_asm_symbol (suffix[i]))
+	  converted_suffix[i] = '_';
+	else
+	  converted_suffix[i] = suffix[i];
+      converted_suffix[suffix_len] = '\0';
+
+      char *result = ACONCAT ((prefix, IDENTIFIER_POINTER (id), separator,
+			       converted_suffix, (char *) 0));
+      return get_identifier (result);
+    }
+}
 
 /* Create callgraph node clone with new declaration.  The actual body will be
    copied later at compilation stage.  The name of the new clone will be
@@ -619,7 +690,7 @@ cgraph_node::create_virtual_clone (const vec<cgraph_edge *> &redirect_callers,
   DECL_STRUCT_FUNCTION (new_decl) = NULL;
   DECL_ARGUMENTS (new_decl) = NULL;
   DECL_INITIAL (new_decl) = NULL;
-  DECL_RESULT (new_decl) = NULL; 
+  DECL_RESULT (new_decl) = NULL;
   /* We cannot do DECL_RESULT (new_decl) = NULL; here because of LTO partitioning
      sometimes storing only clone decl instead of original.  */
 
@@ -678,7 +749,7 @@ cgraph_node::create_virtual_clone (const vec<cgraph_edge *> &redirect_callers,
 }
 
 /* callgraph node being removed from symbol table; see if its entry can be
-   replaced by other inline clone. 
+   replaced by other inline clone.
    INFO is clone info to attach to the new root.  */
 cgraph_node *
 cgraph_node::find_replacement (clone_info *info)
@@ -770,7 +841,7 @@ cgraph_node::find_replacement (clone_info *info)
 }
 
 /* Like cgraph_set_call_stmt but walk the clone tree and update all
-   clones sharing the same function body.  
+   clones sharing the same function body.
    When WHOLE_SPECULATIVE_EDGES is true, all three components of
    speculative edge gets updated.  Otherwise we update only direct
    call.  */
@@ -935,9 +1006,9 @@ update_call_expr (cgraph_node *new_version)
    edges which should be redirected to point to
    NEW_VERSION.  ALL the callees edges of the node
    are cloned to the new version node.  Return the new
-   version node. 
+   version node.
 
-   If non-NULL BLOCK_TO_COPY determine what basic blocks 
+   If non-NULL BLOCK_TO_COPY determine what basic blocks
    was copied to prevent duplications of calls that are dead
    in the clone.  */
 
@@ -984,6 +1055,7 @@ cgraph_node::create_version_clone (tree new_decl,
 	  version.  */
        e->redirect_callee (new_version);
      }
+   new_version->calls_comdat_local = new_version->check_calls_comdat_local_p ();
 
    dump_callgraph_transformation (this, new_version, suffix);
 
@@ -1001,11 +1073,12 @@ cgraph_node::create_version_clone (tree new_decl,
    TREE_MAP is a mapping of tree nodes we want to replace with
    new ones (according to results of prior analysis).
 
-   If non-NULL ARGS_TO_SKIP determine function parameters to remove
-   from new version.
-   If SKIP_RETURN is true, the new version will return void.
+   If non-NULL PARAM_ADJUSTMENTS determine how function formal parameters
+   should be modified in the new version and if it should return void.
    If non-NULL BLOCK_TO_COPY determine what basic blocks to copy.
    If non_NULL NEW_ENTRY determine new entry BB of the clone.
+   SUFFIX is a string that will be used to create a new name for the new
+   function.
 
    If TARGET_ATTRIBUTES is non-null, when creating a new declaration,
    add the attributes to DECL_ATTRIBUTES.  And call valid_attribute_p

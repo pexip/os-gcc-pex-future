@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2026, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -226,13 +226,11 @@ package body Lib.Load is
          Fatal_Error            => Error_Detected,
          Generate_Code          => False,
          Has_RACW               => False,
-         Filler                 => False,
          Ident_String           => Empty,
 
          Is_Predefined_Renaming => Ren_Name,
          Is_Predefined_Unit     => Pre_Name or Ren_Name,
          Is_Internal_Unit       => Pre_Name or Ren_Name or GNAT_Name,
-         Filler2                => False,
 
          Loading                => False,
          Main_Priority          => Default_Main_Priority,
@@ -313,6 +311,7 @@ package body Lib.Load is
         Is_Predefined_Renaming_File_Name (Fname);
       GNAT_Name : constant Boolean :=
         Is_GNAT_File_Name (Fname);
+      Saved_Error_Count : constant Nat := Total_Errors_Detected;
       Version : Word := 0;
 
    begin
@@ -336,7 +335,14 @@ package body Lib.Load is
          if Main_Source_File > No_Source_File then
             Version := Source_Checksum (Main_Source_File);
 
-         else
+         --  If we get here and Saved_Error_Count /= Total_Errors_Detected,
+         --  then an error occurred during preprocessing. In this case
+         --  we have already generated an error message during preprocessing
+         --  and we do not want to emit an incorrect "file foo.adb not found"
+         --  message here.
+
+         elsif Saved_Error_Count = Total_Errors_Detected then
+
             --  To avoid emitting a source location (since there is no file),
             --  we write a custom error message instead of using the machinery
             --  in errout.adb.
@@ -366,13 +372,11 @@ package body Lib.Load is
             Fatal_Error            => None,
             Generate_Code          => True,
             Has_RACW               => False,
-            Filler                 => False,
             Ident_String           => Empty,
 
             Is_Predefined_Renaming => Ren_Name,
             Is_Predefined_Unit     => Pre_Name or Ren_Name,
             Is_Internal_Unit       => Pre_Name or Ren_Name or GNAT_Name,
-            Filler2                => False,
 
             Loading                => True,
             Main_Priority          => Default_Main_Priority,
@@ -684,7 +688,7 @@ package body Lib.Load is
          --  of being loaded. We do *not* care about a circular chain that
          --  leads back to a body, because this kind of circular dependence
          --  legitimately occurs (e.g. two package bodies that contain
-         --  inlined subprogram referenced by the other).
+         --  inlined subprograms referenced by each other).
 
          --  Ada 2005 (AI-50217): We also ignore limited_with clauses, because
          --  their purpose is precisely to create legal circular structures.
@@ -752,13 +756,11 @@ package body Lib.Load is
                Fatal_Error            => None,
                Generate_Code          => False,
                Has_RACW               => False,
-               Filler                 => False,
                Ident_String           => Empty,
 
                Is_Predefined_Renaming => Ren_Name,
                Is_Predefined_Unit     => Pre_Name or Ren_Name,
                Is_Internal_Unit       => Pre_Name or Ren_Name or GNAT_Name,
-               Filler2                => False,
 
                Loading                => True,
                Main_Priority          => Default_Main_Priority,
@@ -940,7 +942,7 @@ package body Lib.Load is
    --------------------------
 
    procedure Make_Child_Decl_Unit (N : Node_Id) is
-      Unit_Decl : constant Node_Id          := Library_Unit (N);
+      Unit_Decl : constant Node_Id          := Spec_Lib_Unit (N);
       Unit_Num  : constant Unit_Number_Type := Get_Cunit_Unit_Number (N);
 
    begin
@@ -980,14 +982,14 @@ package body Lib.Load is
 
       if In_Main then
          Units.Table (Units.Last)        := Units.Table (Main_Unit);
-         Units.Table (Units.Last).Cunit  := Library_Unit (N);
+         Units.Table (Units.Last).Cunit  := Spec_Lib_Unit (N);
          Init_Unit_Name (Units.Last, Unit_Name (Main_Unit));
 
          Units.Table (Main_Unit).Cunit   := N;
          Units.Table (Main_Unit).Version := Source_Checksum (Sind);
          Init_Unit_Name (Main_Unit,
            Get_Body_Name
-             (Unit_Name (Get_Cunit_Unit_Number (Library_Unit (N)))));
+             (Unit_Name (Get_Cunit_Unit_Number (Spec_Lib_Unit (N)))));
 
       else
          --  Duplicate information from instance unit, for the body. The unit
@@ -995,7 +997,7 @@ package body Lib.Load is
          --  units table when first loaded as a declaration.
 
          Units.Table (Units.Last) := Units.Table (Get_Cunit_Unit_Number (N));
-         Units.Table (Units.Last).Cunit := Library_Unit (N);
+         Units.Table (Units.Last).Cunit := Spec_Lib_Unit (N);
       end if;
    end Make_Instance_Unit;
 

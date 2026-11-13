@@ -1,5 +1,5 @@
 ! { dg-additional-options "-fcoarray=single -fcray-pointer" }
-
+! { dg-additional-options "-Wno-deprecated-openmp" }
 module m
 use iso_c_binding
 integer, parameter :: omp_allocator_handle_kind = c_intptr_t
@@ -32,13 +32,13 @@ subroutine coarrays(x)
 
   !$omp allocate(x)  ! { dg-error "Unexpected dummy argument 'x' as argument at .1. to declarative !.OMP ALLOCATE" }
 
-  !$omp allocators allocate(y) ! { dg-error "28:Unexpected coarray 'y' in 'allocate' at .1." }
+  !$omp allocators allocate(y) ! { dg-error "29:Unexpected coarray 'y' in 'allocate' at .1." }
     allocate(y[*])
 
-  !$omp allocate(z) ! { dg-error "17:Unexpected coarray 'z' in 'allocate' at .1." }
+  !$omp allocate(z) ! { dg-error "18:Unexpected coarray 'z' in 'allocate' at .1." }
     allocate(z(5)[*])
   x = 5
-end 
+end
 
 
 integer function f() result(res)
@@ -114,7 +114,7 @@ subroutine coarray_3
   integer :: x
   integer, allocatable :: a, b, c[:], d
   x = 5 ! executable stmt
-  !$omp allocators allocate(align(16): a,b) allocate(align(32) : d) 
+  !$omp allocators allocate(align(16): a,b) allocate(align(32) : d)
   allocate(a,b,c[*],d)  ! OK - Fortran allocator used for 'C'
 end
 

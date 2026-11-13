@@ -1,18 +1,19 @@
 /**
  * Encapsulate path and file names.
  *
- * Copyright: Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
+ * Copyright: Copyright (C) 1999-2026 by The D Language Foundation, All Rights Reserved
  * Authors:   Walter Bright, https://www.digitalmars.com
  * License:   $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
- * Source:    $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/root/filename.d, root/_filename.d)
+ * Source:    $(LINK2 https://github.com/dlang/dmd/blob/master/compiler/src/dmd/root/filename.d, root/_filename.d)
  * Documentation:  https://dlang.org/phobos/dmd_root_filename.html
- * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/src/dmd/root/filename.d
+ * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/compiler/src/dmd/root/filename.d
  */
 
 module dmd.root.filename;
 
 import core.stdc.ctype;
 import core.stdc.errno;
+import core.stdc.stdio;
 import core.stdc.string;
 
 import dmd.common.file;
@@ -41,7 +42,8 @@ version (Windows)
 
     extern (Windows) DWORD GetFullPathNameW(LPCWSTR, DWORD, LPWSTR, LPWSTR*) nothrow @nogc;
     extern (Windows) void SetLastError(DWORD) nothrow @nogc;
-    extern (C) char* getcwd(char* buffer, size_t maxlen) nothrow;
+    extern (C) char* _getcwd(char* buffer, size_t maxlen) nothrow;
+    alias getcwd = _getcwd;
 }
 
 version (CRuntime_Glibc)
@@ -49,8 +51,9 @@ version (CRuntime_Glibc)
     extern (C) char* canonicalize_file_name(const char*) nothrow;
 }
 
-alias Strings = Array!(const(char)*);
+nothrow:
 
+alias Strings = Array!(const(char)*);
 
 // Check whether character is a directory separator
 bool isDirSeparator(char c) pure nothrow @nogc @safe
@@ -270,6 +273,20 @@ nothrow:
     }
 
     /********************************
+     * Slice of file name without extension.
+     * Params:
+     *  filename = file name
+     * Returns:
+     *  the slice
+     */
+    extern (D) static const(char)[] sansExt(const char[] filename) @safe
+    {
+        auto e = ext(filename);
+        size_t length = e.length;
+        return filename[0 .. filename.length - (length ? length + 1 : 0)]; // +1 for .
+    }
+
+    /********************************
      * Return filename name excluding path (read-only).
      */
     extern (C++) static const(char)* name(const(char)* str) pure @nogc
@@ -452,17 +469,28 @@ nothrow:
             assert(buildPath("a/", "bb", "ccc") == "a/bb/ccc");
     }
 
-    // Split a path into an Array of paths
-    extern (C++) static Strings* splitPath(const(char)* path)
+    /****
+     * Splits a delimiter-separated path string (e.g., from an environment variable like `PATH`)
+     * into individual path fragments and appends them to the given array.
+     *
+     * This is a convenience wrapper around `splitPath` that collects all fragments
+     * into an `Array!(const(char)*)`.
+     *
+     * Params:
+     *   path  = A null-terminated string containing path fragments separated by platform-specific delimiters.
+     *   array = The array to which each extracted fragment will be appended.
+     *
+     * See_Also:
+     *   `splitPath`
+     */
+    extern (C++) static void appendSplitPath(const(char)* path, ref Strings array)
     {
-        auto array = new Strings();
         int sink(const(char)* p) nothrow
         {
             array.push(p);
             return 0;
         }
         splitPath(&sink, path);
-        return array;
     }
 
     /****
@@ -473,7 +501,7 @@ nothrow:
      *  sink = send the path pieces here, end when sink() returns !=0
      *  path = the path to split up.
      */
-    static void splitPath(int delegate(const(char)*) nothrow sink, const(char)* path)
+    static void splitPath(scope int delegate(const(char)*) nothrow sink, const(char)* path)
     {
         if (!path)
             return;
@@ -578,13 +606,13 @@ nothrow:
     /***************************
      * Free returned value with FileName::free()
      */
-    extern (C++) static const(char)* defaultExt(const(char)* name, const(char)* ext)
+    extern (C++) static const(char)* defaultExt(const(char)* name, const(char)* ext) pure
     {
         return defaultExt(name.toDString, ext.toDString).ptr;
     }
 
     /// Ditto
-    extern (D) static const(char)[] defaultExt(const char[] name, const char[] ext)
+    extern (D) static const(char)[] defaultExt(const char[] name, const char[] ext) pure
     {
         auto e = FileName.ext(name);
         if (e.length) // it already has an extension
@@ -602,13 +630,13 @@ nothrow:
     /***************************
      * Free returned value with FileName::free()
      */
-    extern (C++) static const(char)* forceExt(const(char)* name, const(char)* ext)
+    extern (C++) static const(char)* forceExt(const(char)* name, const(char)* ext) pure
     {
         return forceExt(name.toDString, ext.toDString).ptr;
     }
 
     /// Ditto
-    extern (D) static const(char)[] forceExt(const char[] name, const char[] ext)
+    extern (D) static const(char)[] forceExt(const char[] name, const char[] ext) pure
     {
         if (auto e = FileName.ext(name))
             return addExt(name[0 .. $ - e.length - 1], ext);
@@ -846,6 +874,7 @@ nothrow:
     {
         if (!name.length)
             return 0;
+        //static int count; printf("count: %d %.*s\n", ++count, cast(int)name.length, name.ptr);
         version (Posix)
         {
             stat_t st;
@@ -862,10 +891,9 @@ nothrow:
                 const dw = GetFileAttributesW(&wname[0]);
                 if (dw == -1)
                     return 0;
-                else if (dw & FILE_ATTRIBUTE_DIRECTORY)
+                if (dw & FILE_ATTRIBUTE_DIRECTORY)
                     return 2;
-                else
-                    return 1;
+                return 1;
             });
         }
         else
@@ -1087,7 +1115,7 @@ nothrow:
         return str.ptr;
     }
 
-    const(char)[] toString() const pure nothrow @nogc @trusted
+    const(char)[] toString() const pure nothrow @nogc @safe
     {
         return str;
     }

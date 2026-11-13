@@ -1,5 +1,4 @@
 /* PR ipa/117432 */
-/* { dg-additional-options "-std=gnu2x" } */
 
 #include <stdarg.h>
 

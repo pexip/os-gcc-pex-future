@@ -9,9 +9,9 @@
 #define __memx  /* empty */
 #endif
 
-#define NC __attribute__((noipa))
-
 __extension__ typedef __int24 int24_t;
+
+#define NC __attribute__((noipa))
 
 void NC vfun (char n, ...)
 {
