@@ -7,15 +7,13 @@ confflags += --program-prefix=pexip-future-
 # We have no interest in multilib
 confflags += --disable-multilib
 # We have no interest in all the other languages
-confflags += --enable-languages=c,c++,lto --disable-rust
+confflags += --enable-languages=c,c++,lto
 # We like security!
 confflags += --enable-default-pie
 # Allow us to build using an older compiler, argh
 confflags += --disable-build-format-warnings
 # gcov fails to link in this config, yay. Just disable it for now.
 confflags += --disable-gcov
-# NLS isn't needed for a test compiler
-confflags += --disable-nls
 
 # Reset all of these - the default package-build environment sets
 # -Wformat-security etc. which breaks some of the build :-/
