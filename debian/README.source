@@ -1,0 +1,43 @@
+Grabbed the upstream 16.2.0 tarball from
+
+https://mirrorservice.org/sites/sourceware.org/pub/gcc/releases/gcc-16.2.0/gcc-16.2.0.tar.gz
+
+Extracted the tarball then removed the following from the tree:
+
+gcc-16.2.0/gcc/ada
+gcc-16.2.0/gcc/algol68
+gcc-16.2.0/gcc/cobol
+gcc-16.2.0/gcc/d
+gcc-16.2.0/gcc/fortran
+gcc-16.2.0/gcc/go
+gcc-16.2.0/gcc/m2
+gcc-16.2.0/gcc/testsuite/ada
+gcc-16.2.0/gcc/testsuite/algol68
+gcc-16.2.0/gcc/testsuite/cobol.dg
+gcc-16.2.0/gcc/testsuite/gdc.dg
+gcc-16.2.0/gcc/testsuite/gdc.test
+gcc-16.2.0/gcc/testsuite/gfortran.dg
+gcc-16.2.0/gcc/testsuite/gfortran.fortran-torture
+gcc-16.2.0/gcc/testsuite/gfortran.target
+gcc-16.2.0/gcc/testsuite/gm2
+gcc-16.2.0/gcc/testsuite/gm2.dg
+gcc-16.2.0/gcc/testsuite/gnat.dg
+gcc-16.2.0/gcc/testsuite/go.dg
+gcc-16.2.0/gcc/testsuite/go.go-torture
+gcc-16.2.0/gcc/testsuite/go.test
+gcc-16.2.0/gnattools
+gcc-16.2.0/gotools
+gcc-16.2.0/libada
+gcc-16.2.0/libga68
+gcc-16.2.0/libgcobol
+gcc-16.2.0/libgfortran
+gcc-16.2.0/libgm2
+gcc-16.2.0/libgo
+gcc-16.2.0/libgrust
+
+then repacked the tarball with a -stripped suffix.
+
+We don't need any of the other languages, so we can make things much
+smaller and this makes the pristine-tar diff fit in github again (for
+now!)
+
