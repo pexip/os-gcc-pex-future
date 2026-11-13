@@ -1,5 +1,5 @@
 /* Gimple range edge functionality.
-   Copyright (C) 2020-2024 Free Software Foundation, Inc.
+   Copyright (C) 2020-2026 Free Software Foundation, Inc.
    Contributed by Andrew MacLeod <amacleod@redhat.com>
    and Aldy Hernandez <aldyh@redhat.com>.
 
@@ -32,6 +32,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-cfg.h"
 #include "gimple-range.h"
 #include "value-range-storage.h"
+#include "rtl.h"
 
 // If there is a range control statement at the end of block BB, return it.
 // Otherwise return NULL.
@@ -39,6 +40,8 @@ along with GCC; see the file COPYING3.  If not see
 gimple *
 gimple_outgoing_range_stmt_p (basic_block bb)
 {
+  if (bb->flags & BB_RTL)
+    return NULL;
   gimple_stmt_iterator gsi = gsi_last_nondebug_bb (bb);
   if (!gsi_end_p (gsi))
     {
@@ -50,7 +53,6 @@ gimple_outgoing_range_stmt_p (basic_block bb)
     }
   return NULL;
 }
-
 
 // Return a TRUE or FALSE range representing the edge value of a GCOND.
 
@@ -64,22 +66,32 @@ gcond_edge_range (irange &r, edge e)
     r = range_false ();
 }
 
+// Construct a gimple_outgoing_range object.  No memory is allocated.
 
 gimple_outgoing_range::gimple_outgoing_range (int max_sw_edges)
 {
   m_edge_table = NULL;
+  m_range_allocator = NULL;
   m_max_edges = max_sw_edges;
-  m_range_allocator = new vrange_allocator;
 }
 
+// Destruct an edge object, disposing of any memory allocated.
 
 gimple_outgoing_range::~gimple_outgoing_range ()
 {
   if (m_edge_table)
     delete m_edge_table;
-  delete m_range_allocator;
+  if (m_range_allocator)
+    delete m_range_allocator;
 }
 
+// Set a new switch limit.
+
+void
+gimple_outgoing_range::set_switch_limit (int max_sw_edges)
+{
+  m_max_edges = max_sw_edges;
+}
 
 // Get a range for a switch edge E from statement S and return it in R.
 // Use a cached value if it exists, or calculate it if not.
@@ -91,13 +103,15 @@ gimple_outgoing_range::switch_edge_range (irange &r, gswitch *sw, edge e)
   // arguments are 32 bit, causing a trap when we create a case_range.
   // Until this is resolved (https://gcc.gnu.org/bugzilla/show_bug.cgi?id=87798)
   // punt on switches where the labels don't match the argument.
-  if (gimple_switch_num_labels (sw) > 1 && 
+  if (gimple_switch_num_labels (sw) > 1 &&
       TYPE_PRECISION (TREE_TYPE (CASE_LOW (gimple_switch_label (sw, 1)))) !=
       TYPE_PRECISION (TREE_TYPE (gimple_switch_index (sw))))
     return false;
 
-   if (!m_edge_table)
-     m_edge_table = new hash_map<edge, vrange_storage *> (n_edges_for_fn (cfun));
+  if (!m_edge_table)
+    m_edge_table = new hash_map<edge, vrange_storage *> (n_edges_for_fn (cfun));
+  if (!m_range_allocator)
+    m_range_allocator = new vrange_allocator;
 
    vrange_storage **val = m_edge_table->get (e);
    if (!val)
@@ -179,6 +193,14 @@ gimple_outgoing_range::calc_switch_ranges (gswitch *sw)
       slot = m_range_allocator->clone (case_range);
     }
 
+  if (default_edge == NULL)
+    {
+      /* During expansion the default edge could have been removed
+	 if the default is unreachable.  */
+      gcc_assert (currently_expanding_to_rtl);
+      return;
+    }
+
   vrange_storage *&slot = m_edge_table->get_or_insert (default_edge, &existed);
   // This should be the first call into this switch.
   gcc_checking_assert (!existed);
@@ -208,7 +230,7 @@ gimple_outgoing_range::edge_range_p (irange &r, edge e)
     }
 
   // Only process switches if it within the size limit.
-  if (EDGE_COUNT (e->src->succs) > (unsigned)m_max_edges)
+  if (m_max_edges == 0 || (EDGE_COUNT (e->src->succs) > (unsigned)m_max_edges))
     return NULL;
 
   gcc_checking_assert (is_a<gswitch *> (s));

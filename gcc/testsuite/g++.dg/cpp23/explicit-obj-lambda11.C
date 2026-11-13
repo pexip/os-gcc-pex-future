@@ -26,8 +26,9 @@ void test1()
 
   auto s1 = S1{[x = 0](this auto&& self) { return self; }}; // { dg-line t1_s1 }
   s1.operator()<int>(); // { dg-error {no matching function for call to} }
+  // { dg-note {there is 1 candidate} {} { target *-*-* } .-1 }
 }
-// { dg-note {candidate:} {} { target *-*-* } t1_s1 }
+// { dg-note {candidate 1:} {} { target *-*-* } t1_s1 }
 // { dg-note {template argument deduction/substitution failed} {} { target *-*-* } t1_s1 }
 // { dg-error {a lambda with captures may not have an explicit object parameter of an unrelated type} {} { target *-*-* } t1_s1 }
 
@@ -39,8 +40,8 @@ void test2()
 
   int (*fp0)(decltype(f)&) = &decltype(f)::operator();
   int (*fp1)(int&) = &decltype(f)::operator(); // { dg-error {no matches converting function} }
+  // { dg-note "there is 1 candidate" "" { target *-*-* } .-1 }
 }
 
 // { dg-error "a lambda with captures may not have an explicit object parameter of an unrelated type" {depends on PR112874} { xfail *-*-* } t2_f }
 // { dg-note "candidate is" "" { target *-*-* } t2_f }
-

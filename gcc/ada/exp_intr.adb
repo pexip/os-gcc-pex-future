@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2026, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -25,7 +25,6 @@
 
 with Atree;          use Atree;
 with Checks;         use Checks;
-with Einfo;          use Einfo;
 with Einfo.Entities; use Einfo.Entities;
 with Einfo.Utils;    use Einfo.Utils;
 with Elists;         use Elists;
@@ -50,7 +49,6 @@ with Sem_Eval;       use Sem_Eval;
 with Sem_Res;        use Sem_Res;
 with Sem_Type;       use Sem_Type;
 with Sem_Util;       use Sem_Util;
-with Sinfo;          use Sinfo;
 with Sinfo.Nodes;    use Sinfo.Nodes;
 with Sinfo.Utils;    use Sinfo.Utils;
 with Sinput;         use Sinput;
@@ -108,12 +106,6 @@ package body Exp_Intr is
    procedure Expand_To_Pointer (N : Node_Id);
    --  Expand a call to corresponding function, declared in an instance of
    --  System.Address_To_Access_Conversions.
-
-   procedure Expand_Source_Info (N : Node_Id; Nam : Name_Id);
-   --  Rewrite the node as the appropriate string literal or positive
-   --  constant. Nam is the name of one of the intrinsics declared in
-   --  GNAT.Source_Info; see g-souinf.ads for documentation of these
-   --  intrinsics.
 
    ---------------------
    -- Add_Source_Info --
@@ -420,6 +412,10 @@ package body Exp_Intr is
       --  corresponding dispatch table.
 
       Rewrite (N, Convert_To (Result_Typ, Cnstr_Call));
+
+      if Is_Interface (Result_Typ) then
+         Flag_Interface_Pointer_Displacement (N);
+      end if;
 
       --  Do not generate a run-time check on the built object if tag
       --  checks are suppressed for the result type or tagged type expansion
@@ -754,14 +750,9 @@ package body Exp_Intr is
          Rewrite (N, Snode);
          Set_Analyzed (N);
 
-         --  However, we do call the expander, so that the expansion for
-         --  rotates and shift_right_arithmetic happens if Modify_Tree_For_C
-         --  is set.
-
          if Expander_Active then
             Expand (N);
          end if;
-
       else
          --  If the context type is not the type of the operator, it is an
          --  inherited operator for a derived type. Wrap the node in a

@@ -3,6 +3,9 @@
 mbig-endian
 UrlSuffix(gcc/AArch64-Options.html#index-mbig-endian)
 
+menable-sysreg-checking
+UrlSuffix(gcc/AArch64-Options.html#index-menable-sysreg-checking)
+
 mgeneral-regs-only
 UrlSuffix(gcc/AArch64-Options.html#index-mgeneral-regs-only)
 
@@ -15,10 +18,14 @@ UrlSuffix(gcc/AArch64-Options.html#index-mfix-cortex-a53-835769)
 mfix-cortex-a53-843419
 UrlSuffix(gcc/AArch64-Options.html#index-mfix-cortex-a53-843419)
 
+mnarrow-gp-writes
+UrlSuffix(gcc/AArch64-Options.html#index-mnarrow-gp-writes)
+
 mlittle-endian
 UrlSuffix(gcc/AArch64-Options.html#index-mlittle-endian)
 
-; skipping UrlSuffix for 'mcmodel=' due to finding no URLs
+mcmodel=
+UrlSuffix(gcc/AArch64-Options.html#index-mcmodel_003d)
 
 mtp=
 UrlSuffix(gcc/AArch64-Options.html#index-mtp)
@@ -73,8 +80,14 @@ UrlSuffix(gcc/AArch64-Options.html#index-mearly-ra)
 msve-vector-bits=
 UrlSuffix(gcc/AArch64-Options.html#index-msve-vector-bits)
 
-mverbose-cost-dump
-UrlSuffix(gcc/AArch64-Options.html#index-mverbose-cost-dump)
+mautovec-preference=
+UrlSuffix(gcc/AArch64-Options.html#index-mautovec-preference)
+
+mmax-vectorization
+UrlSuffix(gcc/AArch64-Options.html#index-mmax-vectorization)
+
+mtrack-speculation
+UrlSuffix(gcc/AArch64-Options.html#index-mtrack-speculation)
 
 mearly-ldp-fusion
 UrlSuffix(gcc/AArch64-Options.html#index-mearly-ldp-fusion)
@@ -90,4 +103,7 @@ UrlSuffix(gcc/AArch64-Options.html#index-mstack-protector-guard-reg)
 
 mstack-protector-guard-offset=
 UrlSuffix(gcc/AArch64-Options.html#index-mstack-protector-guard-offset)
+
+moutline-atomics
+UrlSuffix(gcc/AArch64-Options.html#index-moutline-atomics)
 

@@ -1,5 +1,5 @@
 /* Utilities for ipa analysis.
-   Copyright (C) 2004-2024 Free Software Foundation, Inc.
+   Copyright (C) 2004-2026 Free Software Foundation, Inc.
    Contributed by Kenneth Zadeck <zadeck@naturalbridge.com>
 
 This file is part of GCC.
@@ -117,7 +117,7 @@ void warn_function_returns_nonnull (tree);
 void register_odr_enum (tree type);
 
 /* Return vector containing possible targets of polymorphic call E.
-   If COMPLETEP is non-NULL, store true if the list is complete. 
+   If COMPLETEP is non-NULL, store true if the list is complete.
    CACHE_TOKEN (if non-NULL) will get stored to an unique ID of entry
    in the target cache.  If user needs to visit every target list
    just once, it can memoize them.
@@ -134,8 +134,11 @@ possible_polymorphic_call_targets (struct cgraph_edge *e,
 {
   ipa_polymorphic_call_context context(e);
 
-  return possible_polymorphic_call_targets (e->indirect_info->otr_type,
-					    e->indirect_info->otr_token,
+  cgraph_polymorphic_indirect_info *pii
+    = as_a <cgraph_polymorphic_indirect_info *> (e->indirect_info);
+  gcc_checking_assert (pii->usable_p ());
+  return possible_polymorphic_call_targets (pii->otr_type,
+					    pii->otr_token,
 					    context,
 					    completep, cache_token,
 					    speculative);
@@ -166,8 +169,12 @@ dump_possible_polymorphic_call_targets (FILE *f, struct cgraph_edge *e,
 {
   ipa_polymorphic_call_context context(e);
 
-  dump_possible_polymorphic_call_targets (f, e->indirect_info->otr_type,
-					  e->indirect_info->otr_token,
+  cgraph_polymorphic_indirect_info *pii
+    = as_a <cgraph_polymorphic_indirect_info *> (e->indirect_info);
+  if (!pii->usable_p ())
+    return;
+  dump_possible_polymorphic_call_targets (f, pii->otr_type,
+					  pii->otr_token,
 					  context, verbose);
 }
 
@@ -180,12 +187,16 @@ possible_polymorphic_call_target_p (struct cgraph_edge *e,
 {
   ipa_polymorphic_call_context context(e);
 
-  return possible_polymorphic_call_target_p (e->indirect_info->otr_type,
-					     e->indirect_info->otr_token,
+  cgraph_polymorphic_indirect_info *pii
+    = as_a <cgraph_polymorphic_indirect_info *> (e->indirect_info);
+  if (!pii->usable_p ())
+    return true;
+  return possible_polymorphic_call_target_p (pii->otr_type,
+					     pii->otr_token,
 					     context, n);
 }
 
-/* Return true if BINFO corresponds to a type with virtual methods. 
+/* Return true if BINFO corresponds to a type with virtual methods.
 
    Every type has several BINFOs.  One is the BINFO associated by the type
    while other represents bases of derived types.  The BINFOs representing
@@ -250,7 +261,7 @@ type_in_anonymous_namespace_p (const_tree t)
     return !TREE_PUBLIC (TYPE_STUB_DECL (t));
 }
 
-/* Return true of T is type with One Definition Rule info attached. 
+/* Return true of T is type with One Definition Rule info attached.
    It means that either it is anonymous type or it has assembler name
    set.  */
 

@@ -358,7 +358,7 @@ Gogo::set_package_name(const std::string& package_name,
   if (this->package_ != NULL)
     {
       if (this->package_->package_name() != package_name)
-	go_error_at(location, "expected package %<%s%>",
+	go_error_at(location, "expected package %qs",
 		    Gogo::message_name(this->package_->package_name()).c_str());
       return;
     }
@@ -3592,26 +3592,6 @@ Finalize_methods::type(Type* t)
 	      }
 	  }
 
-	// Finalize the types of all methods that are declared but not
-	// defined, since we won't see the declarations otherwise.
-	if (nt->named_object()->package() == NULL
-	    && nt->local_methods() != NULL)
-	  {
-	    const Bindings* methods = nt->local_methods();
-	    for (Bindings::const_declarations_iterator p =
-		   methods->begin_declarations();
-		 p != methods->end_declarations();
-		 p++)
-	      {
-		if (p->second->is_function_declaration())
-		  {
-		    Type* mt = p->second->func_declaration_value()->type();
-		    if (Type::traverse(mt, this) == TRAVERSE_EXIT)
-		      return TRAVERSE_EXIT;
-		  }
-	      }
-	  }
-
 	return TRAVERSE_SKIP_COMPONENTS;
       }
 
@@ -6007,12 +5987,11 @@ Function::export_func_with_type(Export* exp, const Named_object* no,
   const Typed_identifier_list* parameters = fntype->parameters();
   if (parameters != NULL)
     {
-      size_t i = 0;
       bool is_varargs = fntype->is_varargs();
       bool first = true;
       for (Typed_identifier_list::const_iterator p = parameters->begin();
 	   p != parameters->end();
-	   ++p, ++i)
+	   ++p)
 	{
 	  if (first)
 	    first = false;
@@ -8790,7 +8769,35 @@ Named_object::traverse(Traverse* traverse, bool is_global)
 
     case Named_object::NAMED_OBJECT_TYPE:
       if ((traverse_mask & e_or_t) != 0)
-	t = Type::traverse(this->type_value(), traverse);
+	{
+	  t = Type::traverse(this->type_value(), traverse);
+	  if (t == TRAVERSE_EXIT)
+	    return TRAVERSE_EXIT;
+
+	  // Traverse the types of any local methods that are declared
+	  // but not defined.  We will see defined methods as
+	  // NAMED_OBJECT_FUNC, but we won't see methods that are only
+	  // declared.
+	  if (this->package_ == NULL
+	      && this->type_value()->named_type()->local_methods() != NULL)
+	    {
+	      const Bindings* methods =
+		this->type_value()->named_type()->local_methods();
+	      for (Bindings::const_declarations_iterator p =
+		     methods->begin_declarations();
+		   p != methods->end_declarations();
+		   ++p)
+		{
+		  if (p->second->is_function_declaration())
+		    {
+		      Type* mt = p->second->func_declaration_value()->type();
+		      if (Type::traverse(mt, traverse) == TRAVERSE_EXIT)
+			return TRAVERSE_EXIT;
+		    }
+		}
+	    }
+	}
+
       break;
 
     case Named_object::NAMED_OBJECT_PACKAGE:
@@ -8835,7 +8842,7 @@ Named_object::export_named_object(Export* exp) const
 
     case NAMED_OBJECT_TYPE_DECLARATION:
       go_error_at(this->type_declaration_value()->location(),
-		  "attempt to export %<%s%> which was declared but not defined",
+		  "attempt to export %qs which was declared but not defined",
 		  this->message_name().c_str());
       break;
 

@@ -1063,7 +1063,7 @@ private auto _basicHTTP(T)(const(char)[] url, const(void)[] sendData, HTTP clien
         {
             size_t minLen = min(buf.length, remainingData.length);
             if (minLen == 0) return 0;
-            buf[0 .. minLen] = remainingData[0 .. minLen];
+            buf[0 .. minLen] = cast(void[]) remainingData[0 .. minLen];
             remainingData = remainingData[minLen..$];
             return minLen;
         };
@@ -1202,7 +1202,7 @@ private auto _basicFTP(T)(const(char)[] url, const(void)[] sendData, FTP client)
         {
             size_t minLen = min(buf.length, sendData.length);
             if (minLen == 0) return 0;
-            buf[0 .. minLen] = sendData[0 .. minLen];
+            buf[0 .. minLen] = cast(void[]) sendData[0 .. minLen];
             sendData = sendData[minLen..$];
             return minLen;
         };
@@ -1226,9 +1226,10 @@ private auto _decodeContent(T)(ubyte[] content, string encoding)
     {
         import std.exception : enforce;
         import std.format : format;
+        import std.uni : icmp;
 
         // Optimally just return the utf8 encoded content
-        if (encoding == "UTF-8")
+        if (icmp(encoding, "UTF-8") == 0)
             return cast(char[])(content);
 
         // The content has to be re-encoded to utf8

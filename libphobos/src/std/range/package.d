@@ -86,7 +86,7 @@ $(BOOKTABLE ,
         $(TD Creates the range that results from discarding
         the first element from the given range.
     ))
-    $(TR $(TD $(D $(LREF dropBackOne)))
+    $(TR $(TD $(LREF dropBackOne))
         $(TD Creates the range that results from discarding
         the last element from the given range.
     ))
@@ -162,7 +162,7 @@ $(BOOKTABLE ,
         $(TD Similar to `recurrence`, except that a random-access range is
         created.
     ))
-    $(TR $(TD $(D $(LREF slide)))
+    $(TR $(TD $(LREF slide))
         $(TD Creates a range that returns a fixed-size sliding window
         over the original range. Unlike chunks,
         it advances a configurable number of items at a time,
@@ -1042,7 +1042,7 @@ if (Ranges.length > 0 &&
                 // We do this separately to avoid invoking `empty` needlessly.
                 // While not recommended, a range may depend on side effects of
                 // `empty` call.
-                foreach (i, ref v; input) if (!v.empty)
+                foreach (i, ref v; source) if (!v.empty)
                 {
                     frontIndex = i;
                     static if (bidirectional) backIndex = i+1;
@@ -1056,7 +1056,7 @@ if (Ranges.length > 0 &&
                     static foreach_reverse (i; 1 .. R.length + 1)
                 {
                     if (i <= frontIndex + 1) return;
-                    if (!input[i-1].empty)
+                    if (!source[i-1].empty)
                     {
                         backIndex = i;
                         return;
@@ -1734,7 +1734,7 @@ pure @safe unittest
     assert(range.array == [S(5), S(6)]);
 }
 
-/// https://issues.dlang.org/show_bug.cgi?id=24064
+// https://issues.dlang.org/show_bug.cgi?id=24064
 pure @safe nothrow unittest
 {
     import std.algorithm.comparison : equal;
@@ -1767,7 +1767,7 @@ pure @safe nothrow @nogc unittest
     }
 }
 
-/// https://issues.dlang.org/show_bug.cgi?id=24243
+// https://issues.dlang.org/show_bug.cgi?id=24243
 pure @safe nothrow unittest
 {
     import std.algorithm.iteration : filter;
@@ -1807,7 +1807,7 @@ pure @safe nothrow unittest
 /**
 Choose one of two ranges at runtime depending on a Boolean condition.
 
-The ranges may be different, but they must have compatible element types (i.e.
+The ranges may have different capabilities, but they must have compatible element types (i.e.
 `CommonType` must exist for the two element types). The result is a range
 that offers the weakest capabilities of the two (e.g. `ForwardRange` if $(D
 R1) is a random-access range and `R2` is a forward range).
@@ -1914,7 +1914,7 @@ private struct ChooseResult(Ranges...)
                 break sw;
             }
 
-            default: assert(false);
+            default: assert(false, "index exceeds `Ranges.length`");
         }
     }
 
@@ -1959,7 +1959,7 @@ private struct ChooseResult(Ranges...)
     this(this)
     {
         actOnChosen!((ref r) {
-                static if (hasElaborateCopyConstructor!(typeof(r))) r.__postblit();
+                static if (hasElaborateCopyConstructor!(typeof(r))) r.__xpostblit();
             })(this);
     }
 
@@ -2254,10 +2254,33 @@ pure @safe nothrow unittest
     assert(chosen2.front.v == 4);
 }
 
+// https://issues.dlang.org/show_bug.cgi?id=15708
+@safe unittest
+{
+    static struct HasPostblit
+    {
+        this(this) {}
+    }
+
+    static struct Range
+    {
+        bool empty;
+        int front;
+        void popFront() {}
+        HasPostblit member;
+    }
+
+    Range range;
+    int[] arr;
+
+    auto chosen = choose(true, range, arr);
+    auto copy = chosen;
+}
+
 /**
 Choose one of multiple ranges at runtime.
 
-The ranges may be different, but they must have compatible element types. The
+The ranges may have different capabilities, but they must have compatible element types. The
 result is a range that offers the weakest capabilities of all `Ranges`.
 
 Params:
@@ -2265,9 +2288,8 @@ Params:
     rs = two or more ranges
 
 Returns:
-    The indexed range. If rs consists of only one range, the return type is an
-    alias of that range's type.
- */
+    A range type dependent on `Ranges`.
+*/
 auto chooseAmong(Ranges...)(size_t index, return scope Ranges rs)
 if (Ranges.length >= 2
         && allSatisfy!(isInputRange, staticMap!(Unqual, Ranges))
@@ -2283,12 +2305,9 @@ if (Ranges.length >= 2
     {
         import std.algorithm.comparison : equal;
 
-        int[4] sarr1 = [1, 2, 3, 4];
-        int[2] sarr2 = [5, 6];
-        int[1] sarr3 = [7];
-        auto arr1 = sarr1[];
-        auto arr2 = sarr2[];
-        auto arr3 = sarr3[];
+        scope arr1 = [1, 2, 3, 4];
+        scope arr2 = [5, 6];
+        scope arr3 = [7];
 
         {
             auto s = chooseAmong(0, arr1, arr2, arr3);
@@ -2298,23 +2317,43 @@ if (Ranges.length >= 2
             s.popFront();
             assert(equal(t, only(1, 2, 3, 4)));
         }
+        // result elements can be modified
         {
             auto s = chooseAmong(1, arr1, arr2, arr3);
             assert(s.length == 2);
             s.front = 8;
             assert(equal(s, only(8, 6)));
-        }
-        {
-            auto s = chooseAmong(1, arr1, arr2, arr3);
-            assert(s.length == 2);
             s[1] = 9;
             assert(equal(s, only(8, 9)));
+            // original range was mutated
+            assert(equal(s, arr2));
         }
+        return 0;
+    }
+    // works at runtime
+    auto a = test();
+    // and at compile time
+    static b = test();
+}
+
+/// Result has minimum capabilities of all given ranges
+@safe nothrow pure @nogc unittest
+{
+    auto test()
+    {
+        import std.algorithm.comparison : equal;
+
+        scope arr1 = [1, 2, 3, 4];
+        scope arr2 = [8, 9];
+        scope arr3 = [10];
+
+        // slicing
         {
             auto s = chooseAmong(1, arr2, arr1, arr3)[1 .. 3];
             assert(s.length == 2);
             assert(equal(s, only(2, 3)));
         }
+        // bidirectional
         {
             auto s = chooseAmong(0, arr1, arr2, arr3);
             assert(s.length == 4);
@@ -2325,6 +2364,7 @@ if (Ranges.length >= 2
             s.back = 3;
             assert(equal(s, only(1, 2, 3)));
         }
+        // range primitives
         {
             uint[5] foo = [1, 2, 3, 4, 5];
             uint[5] bar = [6, 7, 8, 9, 10];
@@ -2336,6 +2376,7 @@ if (Ranges.length >= 2
             assert(c.moveBack() == 10);
             assert(c.moveAt(4) == 10);
         }
+        // composability
         {
             import std.range : cycle;
             auto s = chooseAmong(0, cycle(arr2), cycle(arr3));
@@ -3858,9 +3899,11 @@ pure @safe nothrow @nogc unittest
 }
 
 /++
-    Convenience function which calls
+    `drop` is a convenience function which calls
     $(REF popFrontN, std, range, primitives)`(range, n)` and returns `range`.
-    `drop` makes it easier to pop elements from a range
+    Unlike `popFrontN`, the range argument is passed by copy, not by `ref`.
+
+    `drop` makes it easier to pop elements from a range rvalue
     and then pass it to another function within a single expression,
     whereas `popFrontN` would require multiple statements.
 
@@ -3893,7 +3936,10 @@ if (isInputRange!R)
 {
     import std.algorithm.comparison : equal;
 
-    assert([0, 2, 1, 5, 0, 3].drop(3) == [5, 0, 3]);
+    auto a = [0, 2, 1, 5, 0, 3];
+    assert(a.drop(3) == [5, 0, 3]);
+    assert(a.length == 6); // original unchanged
+
     assert("hello world".drop(6) == "world");
     assert("hello world".drop(50).empty);
     assert("hello world".take(6).drop(3).equal("lo "));
@@ -3970,8 +4016,8 @@ if (isBidirectionalRange!R)
         `range` with `n` elements dropped
 
     See_Also:
-        $(REF popFrontExcatly, std, range, primitives),
-        $(REF popBackExcatly, std, range, primitives)
+        $(REF popFrontExactly, std, range, primitives),
+        $(REF popBackExactly, std, range, primitives)
 +/
 R dropExactly(R)(R range, size_t n)
 if (isInputRange!R)
@@ -4007,9 +4053,11 @@ if (isBidirectionalRange!R)
 }
 
 /++
-    Convenience function which calls
-    `range.popFront()` and returns `range`. `dropOne`
-    makes it easier to pop an element from a range
+    `dropOne` is a convenience function which calls
+    `range.popFront()` and returns `range`.
+    Unlike `popFront`, the range argument is passed by copy, not by `ref`.
+
+    `dropOne` makes it easier to pop an element from a range rvalue
     and then pass it to another function within a single expression,
     whereas `popFront` would require multiple statements.
 
@@ -4416,7 +4464,7 @@ if (isForwardRange!R && !isInfinite!R)
             return _original[_index];
         }
 
-        static if (is(typeof((cast(const R)_original)[_index])))
+        static if (__traits(compiles, (const R r) => r[0]))
         {
             /// ditto
             @property auto ref front() const
@@ -4454,8 +4502,8 @@ if (isForwardRange!R && !isInfinite!R)
             return _original[(n + _index) % _original.length];
         }
 
-        static if (is(typeof((cast(const R)_original)[_index])) &&
-                   is(typeof((cast(const R)_original).length)))
+        static if (__traits(compiles, (const R r) => r[0]) &&
+            __traits(compiles, (const R r) => r.length))
         {
             /// ditto
             auto ref opIndex(size_t n) const
@@ -4529,7 +4577,7 @@ if (isForwardRange!R && !isInfinite!R)
             return _current.front;
         }
 
-        static if (is(typeof((cast(const R)_current).front)))
+        static if (__traits(compiles, (const R r) => r.front))
         {
             /// ditto
             @property auto ref front() const
@@ -4916,6 +4964,23 @@ pure @safe unittest
         range.front = Handle(42);
         assert(called);
     }
+}
+
+// https://github.com/dlang/phobos/issues/10852
+@safe unittest
+{
+    // forward range
+    struct R
+    {
+        int i;
+        int front() => i;
+        bool empty() => i == 0;
+        void popFront() {--i;}
+        R save() => this;
+    }
+
+    auto r = R(10).cycle.take(20);
+    assert(r.array == [10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
 }
 
 private alias lengthType(R) = typeof(R.init.length.init);
@@ -6047,10 +6112,13 @@ nothrow pure @system unittest
     Generate lockstep's opApply function as a mixin string.
     If withIndex is true prepend a size_t index to the delegate.
 */
-private string lockstepMixin(Ranges...)(bool withIndex, bool reverse)
+private struct LockstepMixin(Ranges...)
 {
+    import std.conv : text;
     import std.format : format;
 
+    string name;
+    string implName;
     string[] params;
     string[] emptyChecks;
     string[] dgArgs;
@@ -6058,76 +6126,103 @@ private string lockstepMixin(Ranges...)(bool withIndex, bool reverse)
     string indexDef;
     string indexInc;
 
-    if (withIndex)
+@safe pure:
+    this(bool withIndex, bool reverse)
     {
-        params ~= "size_t";
-        dgArgs ~= "index";
+        if (withIndex)
+        {
+            params ~= "size_t";
+            dgArgs ~= "index";
+            if (reverse)
+            {
+                indexDef = q{
+                    size_t index = ranges[0].length - 1;
+                    enforce(
+                        this.stoppingPolicy == StoppingPolicy.requireSameLength,
+                        "Indexed lockstep can only be used with foreach_reverse when " ~
+                        "stoppingPolicy == requireSameLength");
+
+                    foreach (range; ranges[1 .. $])
+                        enforce(range.length == ranges[0].length);
+                    };
+                indexInc = "--index;";
+            }
+            else
+            {
+                indexDef = "size_t index = 0;";
+                indexInc = "++index;";
+            }
+        }
+
+        foreach (idx, Range; Ranges)
+        {
+            params ~= format("%sElementType!(Ranges[%s])", hasLvalueElements!Range ? "ref " : "", idx);
+            emptyChecks ~= format("!ranges[%s].empty", idx);
+            if (reverse)
+            {
+                dgArgs ~= format("ranges[%s].back", idx);
+                popFronts ~= format("ranges[%s].popBack();", idx);
+            }
+            else
+            {
+                dgArgs ~= format("ranges[%s].front", idx);
+                popFronts ~= format("ranges[%s].popFront();", idx);
+            }
+        }
+
         if (reverse)
         {
-            indexDef = q{
-                size_t index = ranges[0].length-1;
-                enforce(_stoppingPolicy == StoppingPolicy.requireSameLength,
-                        "lockstep can only be used with foreach_reverse when stoppingPolicy == requireSameLength");
-
-                foreach (range; ranges[1..$])
-                    enforce(range.length == ranges[0].length);
-                };
-            indexInc = "--index;";
+            name = "opApplyReverse";
+            if (withIndex) implName = "opApplyReverseIdxImpl";
+            else           implName = "opApplyReverseImpl";
         }
         else
         {
-            indexDef = "size_t index = 0;";
-            indexInc = "++index;";
+            name = "opApply";
+            if (withIndex) implName = "opApplyIdxImpl";
+            else           implName = "opApplyImpl";
         }
     }
 
-    foreach (idx, Range; Ranges)
+const:
+    string getAlias()
     {
-        params ~= format("%sElementType!(Ranges[%s])", hasLvalueElements!Range ? "ref " : "", idx);
-        emptyChecks ~= format("!ranges[%s].empty", idx);
-        if (reverse)
-        {
-            dgArgs ~= format("ranges[%s].back", idx);
-            popFronts ~= format("ranges[%s].popBack();", idx);
-        }
-        else
-        {
-            dgArgs ~= format("ranges[%s].front", idx);
-            popFronts ~= format("ranges[%s].popFront();", idx);
-        }
+        return format(q{
+            alias %s = %s!(int delegate(%-(%s%|, %)));
+        },
+            name, implName, params
+        );
     }
 
-    string name = reverse ? "opApplyReverse" : "opApply";
-
-    return format(
-    q{
-        int %s(scope int delegate(%s) dg)
-        {
-            import std.exception : enforce;
-
-            auto ranges = _ranges;
-            int res;
-            %s
-
-            while (%s)
+    string getImpl()
+    {
+        return format(q{
+            int %s(DG)(scope DG dg) scope
             {
-                res = dg(%s);
-                if (res) break;
-                %s
-                %s
-            }
+                import std.exception : enforce;
 
-            if (_stoppingPolicy == StoppingPolicy.requireSameLength)
-            {
-                foreach (range; ranges)
-                    enforce(range.empty);
+                auto ranges = this.ranges;
+                %s
+
+                while (%-(%s%| && %))
+                {
+                    if (int result = dg(%-(%s%|, %))) return result;
+                    %-(%s%|
+                    %)
+                    %s
+                }
+
+                if (this.stoppingPolicy == StoppingPolicy.requireSameLength)
+                {
+                    foreach (range; ranges)
+                        enforce(range.empty);
+                }
+                return 0;
             }
-            return res;
-        }
-    }, name, params.join(", "), indexDef,
-       emptyChecks.join(" && "), dgArgs.join(", "),
-       popFronts.join("\n                "),
-       indexInc);
+        },
+            implName, indexDef, emptyChecks, dgArgs, popFronts, indexInc
+        );
+    }
 }
 
 /**
@@ -6147,10 +6242,6 @@ private string lockstepMixin(Ranges...)(bool withIndex, bool reverse)
 
    By default `StoppingPolicy` is set to `StoppingPolicy.shortest`.
 
-   Limitations: The `pure`, `@safe`, `@nogc`, or `nothrow` attributes cannot be
-   inferred for `lockstep` iteration. $(LREF zip) can infer the first two due to
-   a different implementation.
-
    See_Also: $(LREF zip)
 
        `lockstep` is similar to $(LREF zip), but `zip` bundles its
@@ -6161,41 +6252,53 @@ private string lockstepMixin(Ranges...)(bool withIndex, bool reverse)
 struct Lockstep(Ranges...)
 if (Ranges.length > 1 && allSatisfy!(isInputRange, Ranges))
 {
+    private Ranges ranges;
+    private StoppingPolicy stoppingPolicy;
+
     ///
-    this(R ranges, StoppingPolicy sp = StoppingPolicy.shortest)
+    this(Ranges ranges, StoppingPolicy sp = StoppingPolicy.shortest)
     {
         import std.exception : enforce;
 
-        _ranges = ranges;
+        this.ranges = ranges;
         enforce(sp != StoppingPolicy.longest,
-                "Can't use StoppingPolicy.Longest on Lockstep.");
-        _stoppingPolicy = sp;
+            "Can't use StoppingPolicy.Longest on Lockstep.");
+        this.stoppingPolicy = sp;
     }
 
-    mixin(lockstepMixin!Ranges(false, false));
-    mixin(lockstepMixin!Ranges(true, false));
+    private enum lockstepMixinFF = LockstepMixin!Ranges(withIndex: false, reverse: false);
+    mixin(lockstepMixinFF.getImpl);
+
+    private enum lockstepMixinTF = LockstepMixin!Ranges(withIndex: true, reverse: false);
+    mixin(lockstepMixinTF.getImpl);
+
+    mixin(lockstepMixinFF.getAlias);
+    mixin(lockstepMixinTF.getAlias);
+
     static if (allSatisfy!(isBidirectionalRange, Ranges))
     {
-        mixin(lockstepMixin!Ranges(false, true));
+        private enum lockstepMixinFT = LockstepMixin!Ranges(withIndex: false, reverse: true);
+        mixin(lockstepMixinFT.getImpl);
         static if (allSatisfy!(hasLength, Ranges))
         {
-            mixin(lockstepMixin!Ranges(true, true));
+            private enum lockstepMixinTT = LockstepMixin!Ranges(withIndex: true, reverse: true);
+            mixin(lockstepMixinTT.getImpl);
+            mixin(lockstepMixinTT.getAlias);
         }
         else
         {
-            mixin(lockstepReverseFailMixin!Ranges(true));
+            mixin(lockstepReverseFailMixin!Ranges(withIndex: true));
+            alias opApplyReverse = opApplyReverseIdxFail;
         }
+        mixin(lockstepMixinFT.getAlias);
     }
     else
     {
-        mixin(lockstepReverseFailMixin!Ranges(false));
-        mixin(lockstepReverseFailMixin!Ranges(true));
+        mixin(lockstepReverseFailMixin!Ranges(withIndex: false));
+        mixin(lockstepReverseFailMixin!Ranges(withIndex: true));
+        alias opApplyReverse = opApplyReverseFail;
+        alias opApplyReverse = opApplyReverseIdxFail;
     }
-
-private:
-    alias R = Ranges;
-    R _ranges;
-    StoppingPolicy _stoppingPolicy;
 }
 
 /// Ditto
@@ -6215,33 +6318,39 @@ if (allSatisfy!(isInputRange, Ranges))
 }
 
 ///
-@system unittest
+pure @safe unittest
 {
-   auto arr1 = [1,2,3,4,5,100];
-   auto arr2 = [6,7,8,9,10];
+    int[6] arr1 = [1,2,3,4,5,100];
+    int[5] arr2 = [6,7,8,9,10];
 
-   foreach (ref a, b; lockstep(arr1, arr2))
-   {
-       a += b;
-   }
+    foreach (ref a, b; lockstep(arr1[], arr2[]))
+    {
+        a += b;
+    }
 
-   assert(arr1 == [7,9,11,13,15,100]);
+    assert(arr1 == [7,9,11,13,15,100]);
+}
 
-   /// Lockstep also supports iterating with an index variable:
-   foreach (index, a, b; lockstep(arr1, arr2))
-   {
-       assert(arr1[index] == a);
-       assert(arr2[index] == b);
-   }
+/// Lockstep also supports iterating with an index variable:
+pure @safe unittest
+{
+    int[3] arr1 = [1,2,3];
+    int[3] arr2 = [4,5,6];
+
+    foreach (index, a, b; lockstep(arr1[], arr2[]))
+    {
+        assert(arr1[index] == a);
+        assert(arr2[index] == b);
+    }
 }
 
 // https://issues.dlang.org/show_bug.cgi?id=15860: foreach_reverse on lockstep
-@system unittest
+pure @safe unittest
 {
     auto arr1 = [0, 1, 2, 3];
     auto arr2 = [4, 5, 6, 7];
 
-    size_t n = arr1.length -1;
+    size_t n = arr1.length - 1;
     foreach_reverse (index, a, b; lockstep(arr1, arr2, StoppingPolicy.requireSameLength))
     {
         assert(n == index);
@@ -6260,7 +6369,7 @@ if (allSatisfy!(isInputRange, Ranges))
     }
 }
 
-@system unittest
+pure @safe unittest
 {
     import std.algorithm.iteration : filter;
     import std.conv : to;
@@ -6357,7 +6466,7 @@ if (allSatisfy!(isInputRange, Ranges))
     foreach (x, y; lockstep(iota(0, 10), iota(0, 10))) { }
 }
 
-@system unittest
+pure @safe unittest
 {
     struct RvalueRange
     {
@@ -6413,11 +6522,11 @@ private string lockstepReverseFailMixin(Ranges...)(bool withIndex)
 
     return format(
     q{
-        int opApplyReverse()(scope int delegate(%s) dg)
+        int opApplyReverse%sFail()(scope int delegate(%s) dg)
         {
             static assert(false, "%s");
         }
-    }, params.join(", "), message);
+    }, withIndex ? "Idx" : "" , params.join(", "), message);
 }
 
 // For generic programming, make sure Lockstep!(Range) is well defined for a
@@ -6756,12 +6865,15 @@ pure @safe nothrow unittest
    user-defined types that support `++`, the range is an input
    range.
 
-   An integral iota also supports `in` operator from the right. It takes
-   the stepping into account, the integral won't be considered
-   contained if it falls between two consecutive values of the range.
-   `contains` does the same as in, but from lefthand side.
+   $(DDOC_SECTION_H `in` operator and `contains`:)
+   `iota` over an integral/pointer type defines the `in` operator from the right.
+   `val in iota(...)` is true when `val` occurs in the range. When present, it takes
+   `step` into account - `val` won't be considered
+   contained if it falls between two consecutive elements of the range.
+   The `contains` method does the same as `in`, but from the left-hand side.
 
     Example:
+    $(RUNNABLE_EXAMPLE
     ---
     void main()
     {
@@ -6788,6 +6900,7 @@ pure @safe nothrow unittest
         writeln();
     }
     ---
+    )
 */
 auto iota(B, E, S)(B begin, E end, S step)
 if ((isIntegral!(CommonType!(B, E)) || isPointer!(CommonType!(B, E)))
@@ -7425,7 +7538,8 @@ if (!isIntegral!(CommonType!(B, E)) &&
 
         bool opEquals(Cyclic c) const { return current == c.current; }
         bool opEquals(int i) const { return current == i; }
-        void opUnary(string op)() if (op == "++")
+        void opUnary(string op)()
+        if (op == "++")
         {
             current = (current + 1) % wrapAround;
         }
@@ -10951,6 +11065,23 @@ auto only()()
     static assert(!__traits(compiles, () { r3[0] = 789; }));
 }
 
+// https://github.com/dlang/phobos/issues/10561
+@safe unittest
+{
+    static struct Range
+    {
+        private int i;
+
+        enum bool empty = false;
+        int front() => i;
+        void popFront() { ++i; }
+    }
+    import std.algorithm;
+
+    assert(Range().take(10).filter!"a>8".chain(only(100)).equal([9,100]));
+    assert((new Range()).take(10).filter!"a>8".chain(only(100)).equal([9,100]));
+}
+
 /**
 Iterate over `range` with an attached index variable.
 
@@ -12379,7 +12510,7 @@ public:
             return (*_range).front;
         }
 
-        static if (is(typeof((*(cast(const R*)_range)).front))) @property auto front() const
+        static if (is(typeof(((const R* r) => (*r).front)(null)))) @property auto front() const
         {
             return (*_range).front;
         }
@@ -12405,7 +12536,7 @@ public:
             return (*_range).empty;
         }
 
-        static if (is(typeof((*cast(const R*)_range).empty))) @property bool empty() const
+        static if (is(typeof(((const R* r) => (*r).empty)(null)))) @property bool empty() const
         {
             return (*_range).empty;
         }
@@ -12435,10 +12566,11 @@ public:
     else static if (isForwardRange!R)
     {
         import std.traits : isSafe;
-        private alias S = typeof((*_range).save);
+        private alias S = typeof((() => (*_range).save)());
 
-        static if (is(typeof((*cast(const R*)_range).save)))
-            private alias CS = typeof((*cast(const R*)_range).save);
+        static if (is(typeof(((const R* r) => (*r).save)(null))))
+            private alias CS = typeof(((const R* r) => (*r).save)(null));
+
 
         static if (isSafe!((R* r) => (*r).save))
         {
@@ -12447,7 +12579,7 @@ public:
                 mixin(_genSave());
             }
 
-            static if (is(typeof((*cast(const R*)_range).save))) @property RefRange!CS save() @trusted const
+            static if (is(typeof(((const R* r) => (*r).save)(null)))) @property RefRange!CS save() @trusted const
             {
                 mixin(_genSave());
             }
@@ -12459,7 +12591,7 @@ public:
                 mixin(_genSave());
             }
 
-            static if (is(typeof((*cast(const R*)_range).save))) @property RefRange!CS save() const
+            static if (is(typeof(((const R* r) => (*r).save)(null)))) @property RefRange!CS save() const
             {
                 mixin(_genSave());
             }
@@ -12478,7 +12610,7 @@ public:
         private static string _genSave() @safe pure nothrow
         {
             return `import core.lifetime : emplace;` ~
-                   `alias S = typeof((*_range).save);` ~
+                   `alias S = typeof((() => (*_range).save)());` ~
                    `static assert(isForwardRange!S, S.stringof ~ " is not a forward range.");` ~
                    `auto mem = new void[S.sizeof];` ~
                    `emplace!S(mem, cast(S)(*_range).save);` ~
@@ -12507,7 +12639,7 @@ public:
             return (*_range).back;
         }
 
-        static if (is(typeof((*(cast(const R*)_range)).back))) @property auto back() const
+        static if (is(typeof(((const R* r) => (*r).back)(null)))) @property auto back() const
         {
             return (*_range).back;
         }
@@ -12539,13 +12671,13 @@ public:
     else static if (isRandomAccessRange!R)
     {
         auto ref opIndex(IndexType)(IndexType index)
-            if (is(typeof((*_range)[index])))
+        if (is(typeof((*_range)[index])))
         {
             return (*_range)[index];
         }
 
         auto ref opIndex(IndexType)(IndexType index) const
-            if (is(typeof((*cast(const R*)_range)[index])))
+        if (is(typeof((*cast(const R*)_range)[index])))
         {
             return (*_range)[index];
         }
@@ -12597,7 +12729,7 @@ public:
         {
             return (*_range).length;
         }
-        static if (is(typeof((*cast(const R*)_range).length))) @property auto length() const
+        static if (is(typeof(((const R* r) => (*r).length)(null)))) @property auto length() const
         {
             return (*_range).length;
         }
@@ -12627,14 +12759,14 @@ public:
 
         RefRange!T opSlice(IndexType1, IndexType2)
                     (IndexType1 begin, IndexType2 end)
-            if (is(typeof((*_range)[begin .. end])))
+        if (is(typeof((*_range)[begin .. end])))
         {
             mixin(_genOpSlice());
         }
 
         RefRange!CT opSlice(IndexType1, IndexType2)
                     (IndexType1 begin, IndexType2 end) const
-            if (is(typeof((*cast(const R*)_range)[begin .. end])))
+        if (is(typeof((*cast(const R*)_range)[begin .. end])))
         {
             mixin(_genOpSlice());
         }
@@ -13038,6 +13170,44 @@ private:
     static assert(isBidirectionalRange!R2);
     R2 r2;
     auto rr2 = refRange(&r2);
+}
+
+// https://issues.dlang.org/show_bug.cgi?id=24801
+@safe unittest
+{
+
+    {
+        static struct R
+        {
+            int front() => 0;
+            void popFront() {}
+            bool empty() => false;
+        }
+        R range;
+        auto r = RefRange!R(&range);
+    }
+
+    {
+        static struct R
+        {
+            size_t start, end;
+            size_t length() => end - start;
+            int opIndex(size_t i) => 0;
+
+
+            int front() => this[0];
+            int back() => this[length-1];
+            void popFront() { start++; }
+            void popBack() { end--; }
+            bool empty() => length == 0;
+            R save() const => R();
+        }
+
+        R range;
+        auto r = RefRange!R(&range);
+    }
+
+
 }
 
 /// ditto
@@ -13516,10 +13686,10 @@ if (isInputRange!R && isIntegral!(ElementType!R))
     {
         size_t bitsNum = IntegralType.sizeof * 8;
 
-        auto first = cast(IntegralType)(1);
+        auto first = IntegralType(1);
 
         // 2 ^ (bitsNum - 1)
-        auto second = cast(IntegralType)(cast(IntegralType)(1) << (bitsNum - 2));
+        auto second = cast(IntegralType)(IntegralType(1) << (bitsNum - 2));
 
         IntegralType[] a = [first, second];
         auto bw = Bitwise!(IntegralType[])(a);
@@ -13548,7 +13718,7 @@ if (isInputRange!R && isIntegral!(ElementType!R))
 
         auto bw2 = bw[0 .. $ - 5];
         auto bw3 = bw2[];
-        assert(bw2.length == (bw.length - 5));
+        assert(bw2.length == bw.length - 5);
         assert(bw2.length == bw3.length);
         bw2.popFront();
         assert(bw2.length != bw3.length);

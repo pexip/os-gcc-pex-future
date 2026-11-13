@@ -1,5 +1,5 @@
 // RTL SSA routines for changing instructions                       -*- C++ -*-
-// Copyright (C) 2020-2024 Free Software Foundation, Inc.
+// Copyright (C) 2020-2026 Free Software Foundation, Inc.
 //
 // This file is part of GCC.
 //
@@ -19,6 +19,7 @@
 
 #define INCLUDE_ALGORITHM
 #define INCLUDE_FUNCTIONAL
+#define INCLUDE_ARRAY
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
@@ -109,9 +110,10 @@ function_info::verify_insn_changes (array_slice<insn_change *const> changes)
 	// Make sure that the changes can be kept in their current order
 	// while honoring all of the move ranges.
 	min_insn = later_insn (min_insn, change->move_range.first);
-	while (min_insn != change->insn () && !can_insert_after (min_insn))
+	while (min_insn && min_insn != change->insn () && !can_insert_after (min_insn))
 	  min_insn = min_insn->next_nondebug_insn ();
-	if (*min_insn > *change->move_range.last)
+
+	if (!min_insn || *min_insn > *change->move_range.last)
 	  {
 	    if (dump_file && (dump_flags & TDF_DETAILS))
 	      fprintf (dump_file, "no viable insn position assignment\n");
@@ -171,21 +173,41 @@ rtl_ssa::changes_are_worthwhile (array_slice<insn_change *const> changes,
 				 bool strict_p)
 {
   unsigned int old_cost = 0;
-  unsigned int new_cost = 0;
   sreal weighted_old_cost = 0;
-  sreal weighted_new_cost = 0;
   auto entry_count = ENTRY_BLOCK_PTR_FOR_FN (cfun)->count;
+  {
+    undo_recog_changes undo (0);
+    for (insn_change *change : changes)
+      {
+	// Count zero for the old cost if the old instruction was a no-op
+	// move or had an unknown cost.  This should reduce the chances of
+	// making an unprofitable change.
+	old_cost += change->old_cost ();
+	basic_block cfg_bb = change->bb ()->cfg_bb ();
+	if (optimize_bb_for_speed_p (cfg_bb))
+	  weighted_old_cost += (cfg_bb->count.to_sreal_scale (entry_count)
+				* change->old_cost ());
+
+      }
+  }
+  unsigned int new_cost = 0;
+  sreal weighted_new_cost = 0;
   for (insn_change *change : changes)
     {
-      old_cost += change->old_cost ();
       basic_block cfg_bb = change->bb ()->cfg_bb ();
       bool for_speed = optimize_bb_for_speed_p (cfg_bb);
-      if (for_speed)
-	weighted_old_cost += (cfg_bb->count.to_sreal_scale (entry_count)
-			      * change->old_cost ());
-      if (!change->is_deletion ())
+      if (!change->is_deletion ()
+	  && INSN_CODE (change->rtl ()) != NOOP_MOVE_INSN_CODE)
 	{
 	  change->new_cost = insn_cost (change->rtl (), for_speed);
+	  /* If the cost is unknown, replacement is not worthwhile.  */
+	  if (!change->new_cost)
+	    {
+	      if (dump_file && (dump_flags & TDF_DETAILS))
+		fprintf (dump_file,
+			 "Reject replacement due to unknown insn cost.\n");
+	      return false;
+	    }
 	  new_cost += change->new_cost;
 	  if (for_speed)
 	    weighted_new_cost += (cfg_bb->count.to_sreal_scale (entry_count)
@@ -215,7 +237,10 @@ rtl_ssa::changes_are_worthwhile (array_slice<insn_change *const> changes,
       for (const insn_change *change : changes)
 	if (!change->is_deletion ())
 	  {
-	    fprintf (dump_file, " %c %d", sep, change->new_cost);
+	    if (INSN_CODE (change->rtl ()) == NOOP_MOVE_INSN_CODE)
+	      fprintf (dump_file, " %c nop", sep);
+	    else
+	      fprintf (dump_file, " %c %d", sep, change->new_cost);
 	    sep = '+';
 	  }
       if (weighted_new_cost != 0)
@@ -234,28 +259,40 @@ rtl_ssa::changes_are_worthwhile (array_slice<insn_change *const> changes,
 void
 function_info::process_uses_of_deleted_def (set_info *set)
 {
-  if (!set->has_any_uses ())
-    return;
-
-  auto *use = *set->all_uses ().begin ();
-  do
+  // Each member of the worklist is either SET or a dead phi.
+  auto_vec<set_info *, 16> worklist;
+  worklist.quick_push (set);
+  while (!worklist.is_empty ())
     {
-      auto *next_use = use->next_use ();
+      auto *this_set = worklist.pop ();
+      auto *use = this_set->first_use ();
+      if (!use)
+	{
+	  if (this_set != set)
+	    delete_phi (as_a<phi_info *> (this_set));
+	  continue;
+	}
       if (use->is_in_phi ())
 	{
-	  // This call will not recurse.
-	  process_uses_of_deleted_def (use->phi ());
-	  delete_phi (use->phi ());
+	  // Removing all uses from the phi ensures that we'll only add
+	  // the phi to the worklist once.
+	  auto *phi = use->phi ();
+	  for (auto *input : phi->inputs ())
+	    {
+	      remove_use (input);
+	      input->set_def (nullptr);
+	    }
+	  worklist.safe_push (phi);
 	}
       else
 	{
 	  gcc_assert (use->is_live_out_use ());
 	  remove_use (use);
 	}
-      use = next_use;
+      // The phi handling above might have removed multiple uses of THIS_SET.
+      if (this_set->has_any_uses ())
+	worklist.safe_push (this_set);
     }
-  while (use);
-  gcc_assert (!set->has_any_uses ());
 }
 
 // Update the REG_NOTES of INSN, whose pattern has just been changed.
@@ -677,7 +714,11 @@ function_info::apply_changes_to_insn (insn_change &change,
 
   // Add all uses, now that their position is final.
   for (use_info *use : change.new_uses)
-    add_use (use);
+    {
+      if (use->def ())
+	commit_make_use_available (use);
+      add_use (use);
+    }
 
   // Copy the uses and definitions.
   unsigned int num_defs = change.new_defs.size ();
@@ -862,14 +903,11 @@ function_info::change_insns (array_slice<insn_change *> changes)
 	    }
 	  else
 	    {
-	      // Remove the placeholder first so that we have a wider range of
-	      // program points when inserting INSN.
 	      insn_info *after = placeholder->prev_any_insn ();
 	      if (!insn->is_temporary ())
 		remove_insn (insn);
-	      remove_insn (placeholder);
+	      replace_nondebug_insn (placeholder, insn);
 	      insn->set_bb (after->bb ());
-	      add_insn_after (insn, after);
 	    }
 	}
     }
@@ -933,6 +971,25 @@ add_clobber (insn_change &change, add_regno_clobber_fn add_regno_clobber,
 	return false;
       }
   return true;
+}
+
+// See if PARALLEL pattern PAT clobbers any of the registers in ACCESSES.
+// Return one such access if so, otherwise return null.
+static access_info *
+find_clobbered_access (access_array accesses, rtx pat)
+{
+  rtx subpat;
+  for (int i = 0; i < XVECLEN (pat, 0); ++i)
+    if (GET_CODE (subpat = XVECEXP (pat, 0, i)) == CLOBBER)
+      {
+	rtx x = XEXP (subpat, 0);
+	if (REG_P (x))
+	  for (auto *access : accesses)
+	    if (access->regno () >= REGNO (x)
+		&& access->regno () < END_REGNO (x))
+	      return access;
+      }
+  return nullptr;
 }
 
 // Try to recognize the new form of the insn associated with CHANGE,
@@ -1026,9 +1083,66 @@ recog_level2 (insn_change &change, add_regno_clobber_fn add_regno_clobber)
       pat = newpat;
     }
 
+  INSN_CODE (rtl) = icode;
+  if (recog_data.insn == rtl)
+    recog_data.insn = nullptr;
+
+  // See if the pattern contains any hard-coded clobbers of registers
+  // that are also inputs to the instruction.  The standard rtl semantics
+  // treat such clobbers as earlyclobbers, since there is no way of proving
+  // which clobbers conflict with the inputs and which don't.
+  //
+  // (Non-hard-coded clobbers are handled by constraint satisfaction instead.)
+  rtx subpat;
+  if (GET_CODE (pat) == PARALLEL)
+    for (int i = 0; i < XVECLEN (pat, 0); ++i)
+      if (GET_CODE (subpat = XVECEXP (pat, 0, i)) == CLOBBER
+	  && REG_P (XEXP (subpat, 0)))
+	{
+	  // Stub out all operands, so that we can tell which registers
+	  // are hard-coded.
+	  extract_insn (rtl);
+	  for (int j = 0; j < recog_data.n_operands; ++j)
+	    *recog_data.operand_loc[j] = pc_rtx;
+
+	  auto *use = find_clobbered_access (change.new_uses, pat);
+
+	  // Restore the operands.
+	  for (int j = 0; j < recog_data.n_operands; ++j)
+	    *recog_data.operand_loc[j] = recog_data.operand[j];
+
+	  if (use)
+	    {
+	      if (dump_file && (dump_flags & TDF_DETAILS))
+		{
+		  fprintf (dump_file, "register %d is both clobbered"
+			   " and used as an input:\n", use->regno ());
+		  print_rtl_single (dump_file, pat);
+		}
+	      return false;
+	    }
+	}
+
+  // Per rtl.texi, registers that are modified using RTX_AUTOINC operations
+  // cannot also appear outside an address.
+  vec_rtx_properties properties;
+  properties.add_pattern (pat);
+  for (rtx_obj_reference def : properties.refs ())
+    if (def.is_pre_post_modify ())
+      for (rtx_obj_reference use : properties.refs ())
+	if (def.regno == use.regno && !use.in_address ())
+	  {
+	    if (dump_file && (dump_flags & TDF_DETAILS))
+	      {
+		fprintf (dump_file, "register %d is both auto-modified"
+			 " and used outside an address:\n", def.regno);
+		print_rtl_single (dump_file, pat);
+	      }
+	    return false;
+	  }
+
   // check_asm_operands checks the constraints after RA, so we don't
   // need to do it again.
-  INSN_CODE (rtl) = icode;
   if (reload_completed && !asm_p)
     {
       extract_insn (rtl);

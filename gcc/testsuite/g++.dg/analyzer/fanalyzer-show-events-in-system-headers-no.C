@@ -1,6 +1,9 @@
 /* { dg-additional-options "-fno-analyzer-show-events-in-system-headers" } */
+/* { dg-additional-options "-Wno-analyzer-too-complex" } */
 /* { dg-skip-if "no shared_ptr in C++98" { c++98_only }  } */
+/* { dg-skip-if "requires hosted libstdc++ for memory shared_ptr" { ! hostedlib } } */
 
+#define _GLIBCXX_SYSHDR
 #include <memory>
 
 struct A {int x; int y;};
@@ -15,5 +18,3 @@ int main () {
 
 /* { dg-note "\\(1\\) 'a\\.std::.+::_M_ptr' is NULL" "" { target c++14_down } declare_a } */
 /* { dg-note "dereference of NULL 'a\\.std::.+::operator->\\(\\)'" "" { target *-*-* } deref_a } */
-/* { dg-note "calling 'std::.+::operator->' from 'main'" "" { target *-*-* } deref_a } */
-/* { dg-note "returning to 'main' from 'std::.+::operator->'" "" { target *-*-* } deref_a } */

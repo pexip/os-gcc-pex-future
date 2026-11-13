@@ -29,4 +29,5 @@
 TEST_ALL (DEF_LOOP)
 
 /* { dg-final { scan-assembler-times {vfmax\.vv\s+v[0-9]+,v[0-9]+,v[0-9]+,v0.t} 3 } } */
+/* { dg-final { scan-assembler-not {vfmax\.vf\s+v[0-9]+,v[0-9]+,fa[0-9],v0.t} } } */
 /* { dg-final { scan-assembler-not {\tvf?merge\.v[vxi]m\t} } } */

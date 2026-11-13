@@ -1,5 +1,5 @@
 /* Interprocedural constant propagation
-   Copyright (C) 2024 Free Software Foundation, Inc.
+   Copyright (C) 2024-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -201,6 +201,8 @@ public:
   bool set_to_bottom ();
   bool set_to_constant (widest_int, widest_int);
   bool known_nonzero_p () const;
+  bool set_recipient_only ();
+  bool recipient_only_p () const {return m_recipient_only; }
 
   widest_int get_value () const { return m_value; }
   widest_int get_mask () const { return m_mask; }
@@ -216,6 +218,11 @@ private:
   enum { IPA_BITS_UNDEFINED, IPA_BITS_CONSTANT, IPA_BITS_VARYING }
     m_lattice_val = IPA_BITS_UNDEFINED;
 
+  /* Set to true if the lattice is valid only as a recipient of propagatad
+     values but cannot be used as source of propagation because there may be
+     unknown callers.  */
+  bool m_recipient_only;
+
   /* Similar to ccp_lattice_t, mask represents which bits of value are constant.
      If a bit in mask is set to 0, then the corresponding bit in
      value is known to be constant.  */
@@ -230,11 +237,17 @@ private:
 class ipcp_vr_lattice
 {
 public:
-  Value_Range m_vr;
+  value_range m_vr;
+  /* Set to true if the lattice is valid only as a recipient of propagatad
+     values but cannot be used as source of propagation because there may be
+     unknown callers.  */
+  bool m_recipient_only;
 
   inline bool bottom_p () const;
   inline bool top_p () const;
   inline bool set_to_bottom ();
+  bool set_recipient_only ();
+  bool recipient_only_p () const {return m_recipient_only; }
   bool meet_with (const vrange &p_vr);
   bool meet_with (const ipcp_vr_lattice &other);
   void init (tree type);
@@ -251,6 +264,7 @@ ipcp_vr_lattice::init (tree type)
     m_vr.set_type (type);
 
   // Otherwise m_vr will default to unsupported_range.
+  m_recipient_only = false;
 }
 
 /* Structure containing lattices for a parameter itself and for pieces of
@@ -290,5 +304,27 @@ public:
 };
 
 bool values_equal_for_ipcp_p (tree x, tree y);
+
+/* Return TRUE if IPA supports ranges of TYPE.  */
+
+static inline bool
+ipa_vr_supported_type_p (tree type)
+{
+  return irange::supports_p (type) || prange::supports_p (type);
+}
+
+class ipa_vr;
+
+bool ipa_vr_operation_and_type_effects (vrange &dst_vr,
+					const vrange &src_vr,
+					enum tree_code operation,
+					tree dst_type, tree src_type);
+bool ipa_vr_operation_and_type_effects (vrange &dst_vr,
+					const ipa_vr &src_vr,
+					enum tree_code operation,
+					tree dst_type, tree src_type);
+tree ipacp_value_safe_for_type (tree param_type, tree value);
+
+
 
 #endif /* IPA_CP_H */

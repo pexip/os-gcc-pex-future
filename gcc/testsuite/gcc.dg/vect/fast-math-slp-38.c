@@ -1,4 +1,5 @@
 /* { dg-do compile } */
+/* { dg-additional-options "-ffast-math --param vect-epilogues-nomask=0" } */
 /* { dg-require-effective-target vect_double } */
 
 double self[1024];

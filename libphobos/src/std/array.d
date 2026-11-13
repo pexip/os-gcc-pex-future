@@ -16,7 +16,7 @@ $(TR $(TH Function Name) $(TH Description)
         $(TD Returns a new $(LREF Appender) or $(LREF RefAppender) initialized with a given array.
     ))
     $(TR $(TD $(LREF assocArray))
-        $(TD Returns a newly allocated associative array from a range of key/value tuples.
+        $(TD Returns a newly allocated associative array from a range/ranges of keys and values.
     ))
     $(TR $(TD $(LREF byPair))
         $(TD Construct a range iterating over an associative array by key/value tuples.
@@ -295,6 +295,19 @@ if (is(Range == U*, U) && isIterable!U && !isAutodecodableString!Range && !isInf
     R().array;
 }
 
+// Test that `array(scope InputRange r)` returns a non-scope array
+// https://issues.dlang.org/show_bug.cgi?id=23300
+@safe pure nothrow unittest
+{
+    @safe int[] fun()
+    {
+        import std.algorithm.iteration : map;
+        int[3] arr = [1, 2, 3];
+        scope r = arr[].map!(x => x + 3);
+        return r.array;
+    }
+}
+
 /**
 Convert a narrow autodecoding string to an array type that fully supports
 random access.  This is handled as a special case and always returns an array
@@ -549,29 +562,19 @@ if (isAutodecodableString!String)
 }
 
 /**
-Returns a newly allocated associative array from a range of key/value tuples
-or from a range of keys and a range of values.
+Creates an associative array from a range of key/value tuples.
 
 Params:
     r = An $(REF_ALTTEXT input range, isInputRange, std,range,primitives)
-    of tuples of keys and values.
-    keys = An $(REF_ALTTEXT input range, isInputRange, std,range,primitives) of keys
-    values = An $(REF_ALTTEXT input range, isInputRange, std,range,primitives) of values
+    of $(REF_SHORT Tuple, std,typecons)`!(Key, Value)`.
+
+Duplicates: Associative arrays have unique keys. For any duplicate key in `r`,
+the result will contain the corresponding value from the last occurrence of that key in `r`.
 
 Returns:
-
-    A newly allocated associative array out of elements of the input
-    range, which must be a range of tuples (Key, Value) or
-    a range of keys and a range of values. If given two ranges of unequal
-    lengths after the elements of the shorter are exhausted the remaining
-    elements of the longer will not be considered.
-    Returns a null associative array reference when given an empty range.
-    Duplicates: Associative arrays have unique keys. If r contains duplicate keys,
-    then the result will contain the value of the last pair for that key in r.
-
-See_Also: $(REF Tuple, std,typecons), $(REF zip, std,range)
+    A newly allocated associative array, or a null associative array reference when
+    given an empty range. The type is `Value[Key]`.
  */
-
 auto assocArray(Range)(Range r)
 if (isInputRange!Range)
 {
@@ -591,7 +594,34 @@ if (isInputRange!Range)
     return aa;
 }
 
-/// ditto
+///
+@safe pure nothrow unittest
+{
+    import std.typecons : tuple;
+
+    auto b = assocArray([ tuple("foo", "bar"), tuple("baz", "quux") ]);
+    static assert(is(typeof(b) == string[string]));
+    assert(b == ["foo":"bar", "baz":"quux"]);
+}
+
+/**
+Creates an associative array from a range of keys and a range of values.
+
+If given two ranges of unequal lengths after the elements of the shorter are exhausted,
+the remaining elements of the longer will not be considered.
+
+Params:
+    keys = An $(REF_ALTTEXT input range, isInputRange, std,range,primitives) of keys
+    values = An $(REF_ALTTEXT input range, isInputRange, std,range,primitives) of values
+
+Duplicates: Associative arrays have unique keys. For any key with duplicates in `keys`,
+the result will have the corresponding value for the last occurrence of
+that key in `keys`.
+
+Returns:
+    A newly allocated associative array, or a null associative array reference when
+    given empty ranges.
+ */
 auto assocArray(Keys, Values)(Keys keys, Values values)
 if (isInputRange!Values && isInputRange!Keys)
 {
@@ -650,6 +680,8 @@ if (isInputRange!Values && isInputRange!Keys)
                 alias ValueElement = ElementType!Values;
                 static if (hasElaborateDestructor!ValueElement)
                     ValueElement.init.__xdtor();
+
+                aa[key] = values.front;
             })))
             {
                 () @trusted {
@@ -667,23 +699,16 @@ if (isInputRange!Values && isInputRange!Keys)
 }
 
 ///
-@safe pure /*nothrow*/ unittest
+@safe pure nothrow unittest
 {
-    import std.range : repeat, zip;
-    import std.typecons : tuple;
     import std.range.primitives : autodecodeStrings;
-    auto a = assocArray(zip([0, 1, 2], ["a", "b", "c"])); // aka zipMap
-    static assert(is(typeof(a) == string[int]));
-    assert(a == [0:"a", 1:"b", 2:"c"]);
-
-    auto b = assocArray([ tuple("foo", "bar"), tuple("baz", "quux") ]);
-    static assert(is(typeof(b) == string[string]));
-    assert(b == ["foo":"bar", "baz":"quux"]);
+    import std.range : repeat;
 
     static if (autodecodeStrings)
         alias achar = dchar;
     else
         alias achar = immutable(char);
+
     auto c = assocArray("ABCD", true.repeat);
     static assert(is(typeof(c) == bool[achar]));
     bool[achar] expected = ['D':true, 'A':true, 'B':true, 'C':true];
@@ -788,6 +813,20 @@ if (isInputRange!Values && isInputRange!Keys)
     }
     static assert(!__traits(compiles, () @safe { assocArray(1.iota, [UnsafeElement()]);}));
     assert(assocArray(1.iota, [UnsafeElement()]) == [0: UnsafeElement()]);
+}
+
+@safe unittest
+{
+    struct ValueRange
+    {
+        string front() const @system;
+        @safe:
+        void popFront() {}
+        bool empty() const { return false; }
+    }
+    int[] keys;
+    ValueRange values;
+    static assert(!__traits(compiles, assocArray(keys, values)));
 }
 
 /**
@@ -1044,14 +1083,6 @@ if (isDynamicArray!T && allSatisfy!(isIntegral, I))
     }
 }
 
-// from rt/lifetime.d
-private extern(C) void[] _d_newarrayU(const TypeInfo ti, size_t length) pure nothrow;
-
-// from rt/tracegc.d
-version (D_ProfileGC)
-private extern (C) void[] _d_newarrayUTrace(string file, size_t line,
-    string funcname, const scope TypeInfo ti, size_t length) pure nothrow;
-
 private auto arrayAllocImpl(bool minimallyInitialized, T, I...)(I sizes) nothrow
 {
     static assert(I.length <= nDimensions!T,
@@ -1102,18 +1133,19 @@ private auto arrayAllocImpl(bool minimallyInitialized, T, I...)(I sizes) nothrow
               which will inform the GC how to destroy the items in the block
               when it gets collected.
 
-              _d_newarrayU returns a void[], but with the length set according
-              to E.sizeof.
+              _d_newarrayU returns a E[], with the length set according to
+              to the size parameter.
             +/
+            enum isShared = is (E == shared);
             version (D_ProfileGC)
             {
                 // FIXME: file, line, function should be propagated from the
                 // caller, not here.
-                *(cast(void[]*)&ret) = _d_newarrayUTrace(__FILE__, __LINE__,
-                    __FUNCTION__, typeid(E[]), size);
+                ret = _d_newarrayUTrace!E(size, isShared,
+                    __FILE__, __LINE__, __FUNCTION__);
             }
             else
-                *(cast(void[]*)&ret) = _d_newarrayU(typeid(E[]), size);
+                ret = _d_newarrayU!E(size, isShared);
             static if (minimallyInitialized && hasIndirections!E)
                 // _d_newarrayU would have asserted if the multiplication below
                 // had overflowed, so we don't have to check it again.
@@ -1266,6 +1298,64 @@ if (is(typeof(a.ptr < b.ptr) == bool))
 
     //works at compile-time
     static assert(test == "three"d);
+}
+
+///
+@safe pure nothrow unittest
+{
+    import std.meta : AliasSeq;
+
+    // can be used as an alternative implementation of overlap that returns
+    // `true` or `false` instead of a slice of the overlap
+    bool isSliceOf(T)(const scope T[] part, const scope T[] whole)
+    {
+        return part.overlap(whole) is part;
+    }
+
+    auto x = [1, 2, 3, 4, 5];
+
+    assert(isSliceOf(x[3..$], x));
+    assert(isSliceOf(x[], x));
+    assert(!isSliceOf(x, x[3..$]));
+    assert(!isSliceOf([7, 8], x));
+    assert(isSliceOf(null, x));
+
+    // null is a slice of itself
+    assert(isSliceOf(null, null));
+
+    foreach (T; AliasSeq!(int[], const(int)[], immutable(int)[], const int[], immutable int[]))
+    {
+        T a = [1, 2, 3, 4, 5];
+        T b = a;
+        T c = a[1 .. $];
+        T d = a[0 .. 1];
+        T e = null;
+
+        assert(isSliceOf(a, a));
+        assert(isSliceOf(b, a));
+        assert(isSliceOf(a, b));
+
+        assert(isSliceOf(c, a));
+        assert(isSliceOf(c, b));
+        assert(!isSliceOf(a, c));
+        assert(!isSliceOf(b, c));
+
+        assert(isSliceOf(d, a));
+        assert(isSliceOf(d, b));
+        assert(!isSliceOf(a, d));
+        assert(!isSliceOf(b, d));
+
+        assert(isSliceOf(e, a));
+        assert(isSliceOf(e, b));
+        assert(isSliceOf(e, c));
+        assert(isSliceOf(e, d));
+
+        //verifies R-value compatibilty
+        assert(!isSliceOf(a[$ .. $], a));
+        assert(isSliceOf(a[0 .. 0], a));
+        assert(isSliceOf(a, a[0.. $]));
+        assert(isSliceOf(a[0 .. $], a));
+    }
 }
 
 @safe pure nothrow unittest
@@ -3557,11 +3647,14 @@ if (isDynamicArray!A)
         return _data ? _data.capacity : 0;
     }
 
+    /// Returns: The number of elements appended.
+    @property size_t length() const => _data ? _data.arr.length : 0;
+
     /**
      * Use opSlice() from now on.
      * Returns: The managed array.
      */
-    @property inout(T)[] data() inout @trusted
+    @property inout(T)[] data() inout
     {
         return this[];
     }
@@ -3607,6 +3700,7 @@ if (isDynamicArray!A)
         }
         else
         {
+            import core.stdc.string : memcpy, memset;
             // Time to reallocate.
             // We need to almost duplicate what's in druntime, except we
             // have better access to the capacity field.
@@ -3618,6 +3712,15 @@ if (isDynamicArray!A)
                 if (u)
                 {
                     // extend worked, update the capacity
+                    // if the type has indirections, we need to zero any new
+                    // data that we requested, as the existing data may point
+                    // at large unused blocks.
+                    static if (hasIndirections!T)
+                    {
+                        immutable addedSize = u - (_data.capacity * T.sizeof);
+                        () @trusted { memset(_data.arr.ptr + _data.capacity, 0, addedSize); }();
+                    }
+
                     _data.capacity = u / T.sizeof;
                     return;
                 }
@@ -3633,10 +3736,20 @@ if (isDynamicArray!A)
 
             auto bi = (() @trusted => GC.qalloc(nbytes, blockAttribute!T))();
             _data.capacity = bi.size / T.sizeof;
-            import core.stdc.string : memcpy;
             if (len)
                 () @trusted { memcpy(bi.base, _data.arr.ptr, len * T.sizeof); }();
+
             _data.arr = (() @trusted => (cast(Unqual!T*) bi.base)[0 .. len])();
+
+            // we requested new bytes that are not in the existing
+            // data. If T has pointers, then this new data could point at stale
+            // objects from the last time this block was allocated. Zero that
+            // new data out, it may point at large unused blocks!
+            static if (hasIndirections!T)
+                () @trusted {
+                    memset(bi.base + (len * T.sizeof), 0, (newlen - len) * T.sizeof);
+                }();
+
             _data.tryExtendBlock = true;
             // leave the old data, for safety reasons
         }
@@ -3669,7 +3782,8 @@ if (isDynamicArray!A)
      * Params:
      *     item = the single item to append
      */
-    void put(U)(U item) if (canPutItem!U)
+    void put(U)(U item)
+    if (canPutItem!U)
     {
         static if (isSomeChar!T && isSomeChar!U && T.sizeof < U.sizeof)
         {
@@ -3698,7 +3812,8 @@ if (isDynamicArray!A)
     }
 
     // Const fixing hack.
-    void put(Range)(Range items) if (canPutConstRange!Range)
+    void put(Range)(Range items)
+    if (canPutConstRange!Range)
     {
         alias p = put!(Unqual!Range);
         p(items);
@@ -3711,7 +3826,8 @@ if (isDynamicArray!A)
      * Params:
      *     items = the range of items to append
      */
-    void put(Range)(Range items) if (canPutRange!Range)
+    void put(Range)(Range items)
+    if (canPutRange!Range)
     {
         // note, we disable this branch for appending one type of char to
         // another because we can't trust the length portion.
@@ -3892,6 +4008,7 @@ if (isDynamicArray!A)
     int[] a = [ 1, 2 ];
     auto app2 = appender(a);
     app2.put(3);
+    assert(app2.length == 3);
     app2.put([ 4, 5, 6 ]);
     assert(app2[] == [ 1, 2, 3, 4, 5, 6 ]);
 }
@@ -4011,6 +4128,62 @@ if (isDynamicArray!A)
     app2.toString();
 }
 
+// https://issues.dlang.org/show_bug.cgi?id=24856
+@system unittest
+{
+    import core.memory : GC;
+    import std.stdio : writeln;
+    import std.algorithm.searching : canFind;
+    GC.disable();
+    scope(exit) GC.enable();
+    void*[] freeme;
+    // generate some poison blocks to allocate from.
+    auto poison = cast(void*) 0xdeadbeef;
+    foreach (i; 0 .. 10)
+    {
+        auto blk = new void*[7];
+        blk[] = poison;
+        freeme ~= blk.ptr;
+    }
+
+    foreach (p; freeme)
+        GC.free(p);
+
+    int tests = 0;
+    foreach (i; 0 .. 10)
+    {
+        Appender!(void*[]) app;
+        app.put(null);
+        // if not a realloc of one of the deadbeef pointers, continue
+        if (!freeme.canFind(app.data.ptr))
+            continue;
+        ++tests;
+        assert(!app.data.ptr[0 .. app.capacity].canFind(poison), "Appender not zeroing data!");
+    }
+    // just notify in the log whether this test actually could be done.
+    if (tests == 0)
+        writeln("WARNING: test of Appender zeroing did not occur");
+}
+
+// https://github.com/dlang/phobos/issues/10747
+@system unittest
+{
+    static struct A10747
+    {
+        this(ref A10747 rhs) { }
+    }
+
+    static class R10747
+    {
+        A10747 front() { return A10747.init; }
+        void popFront() { }
+        bool empty = true;
+    }
+
+    auto a = new R10747();
+    a.array();
+}
+
 //Calculates an efficient growth scheme based on the old capacity
 //of data, and the minimum requested capacity.
 //arg curLen: The current length
@@ -4105,6 +4278,9 @@ if (isDynamicArray!A)
         return impl.capacity;
     }
 
+    /// Returns: The number of elements appended.
+    @property size_t length() const => impl.length;
+
     /* Use opSlice() instead.
      * Returns: the managed array.
      */
@@ -4131,6 +4307,7 @@ unittest
     assert(app2[] == [1, 2]);
     assert(a == [1, 2]);
     app2 ~= 3;
+    assert(app2.length == 3);
     app2 ~= [4, 5, 6];
     assert(app2[] == [1, 2, 3, 4, 5, 6]);
     assert(a == [1, 2, 3, 4, 5, 6]);

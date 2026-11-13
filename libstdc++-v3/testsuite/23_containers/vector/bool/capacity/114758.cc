@@ -1,4 +1,4 @@
-// { dg-options "-O3 -Werror=stringop-overread" }
+// { dg-options "-O3 -Werror=stringop-overread -fno-assume-sane-operators-new-delete" }
 // { dg-do compile }
 
 // Bug libstdc++/114758 The layout of a std::vector<bool> reports a warning

@@ -1,4 +1,4 @@
-/* Copyright (C) 2002-2024 Free Software Foundation, Inc.
+/* Copyright (C) 2002-2026 Free Software Foundation, Inc.
    Contributed by Andy Vaught
    Namelist input contributed by Paul Thomas
    F2003 I/O support contributed by Jerry DeLisle
@@ -697,8 +697,8 @@ convert_integer (st_parameter_dt *dtp, int length, int negative)
 
       if (dtp->u.p.repeat_count == 0)
 	{
-	  snprintf (message, IOMSG_LEN, "Zero repeat count in item %d of list input",
-		   dtp->u.p.item_count);
+	  snprintf (message, IOMSG_LEN, "Zero repeat count in item %d of list "
+		    "input", dtp->u.p.item_count);
 
 	  generate_error (&dtp->common, LIBERROR_READ_VALUE, message);
 	  m = 1;
@@ -710,8 +710,8 @@ convert_integer (st_parameter_dt *dtp, int length, int negative)
 
  overflow:
   if (length == -1)
-    snprintf (message, IOMSG_LEN, "Repeat count overflow in item %d of list input",
-	     dtp->u.p.item_count);
+    snprintf (message, IOMSG_LEN, "Repeat count overflow in item %d of list "
+	      "input", dtp->u.p.item_count);
   else
     snprintf (message, IOMSG_LEN, "Integer overflow while reading item %d",
 	     dtp->u.p.item_count);
@@ -722,6 +722,86 @@ convert_integer (st_parameter_dt *dtp, int length, int negative)
   return 1;
 }
 
+/* Same as above, but for unsigneds, where overflow checks are only
+   preformed with -pedantic, except on the repeat count.  */
+
+static int
+convert_unsigned (st_parameter_dt *dtp, int length, int negative)
+{
+  char c, *buffer, message[IOMSG_LEN];
+  GFC_UINTEGER_LARGEST v, value, max, v_old;
+  int m;
+
+  if (compile_options.pedantic && negative)
+    goto overflow;
+
+  buffer = dtp->u.p.saved_string;
+  max = length == -1 ? MAX_REPEAT : us_max (length);
+
+  v = 0;
+  for (;;)
+    {
+      c = *buffer++;
+      if (c == '\0')
+	break;
+      c -= '0';
+      v_old = v;
+      v = v * 10 + c;
+
+      if (length == -1 && v > max)
+	goto overflow;
+      else if (compile_options.pedantic && v < v_old)
+	goto overflow;
+    }
+
+  m = 0;
+
+  if (length != -1)
+    {
+      if (negative)
+	value = -v;
+      else
+	value = v;
+
+      if (compile_options.pedantic && value > max)
+	goto overflow;
+      else
+	value = value & max;
+
+      set_unsigned (dtp->u.p.value, value, length);
+    }
+  else
+    {
+      dtp->u.p.repeat_count = v;
+
+      if (dtp->u.p.repeat_count == 0)
+	{
+	  snprintf (message, IOMSG_LEN, "Zero repeat count in item %d of list input",
+		   dtp->u.p.item_count);
+
+	  generate_error (&dtp->common, LIBERROR_READ_VALUE, message);
+	  m = 1;
+	}
+    }
+  free_saved (dtp);
+  return m;
+
+ overflow:
+  if (length== -1)
+    snprintf (message, IOMSG_LEN, "Repeat count overflow in item %d of list input",
+	      dtp->u.p.item_count);
+  else if (negative)
+    snprintf (message, IOMSG_LEN, "Negative sign for unsigned integer "
+	      "in item %d of list input", dtp->u.p.item_count);
+  else
+    snprintf (message, IOMSG_LEN, "Unsigned integer overflow while reading "
+	      "item %d of list input", dtp->u.p.item_count);
+
+  free_saved (dtp);
+  generate_error (&dtp->common, LIBERROR_READ_VALUE, message);
+
+  return 1;
+}
 
 /* Parse a repeat count for logical and complex values which cannot
    begin with a digit.  Returns nonzero if we are done, zero if we
@@ -837,6 +917,7 @@ read_logical (st_parameter_dt *dtp, int length)
   if (parse_repeat (dtp))
     return;
 
+next:
   c = safe_tolower (next_char (dtp));
   l_push_char (dtp, c);
   switch (c)
@@ -881,6 +962,9 @@ read_logical (st_parameter_dt *dtp, int length)
     case '!':
       if (!dtp->u.p.namelist_mode)
         goto bad_logical;
+      eat_line (dtp);
+      eat_spaces (dtp);
+      goto next;
 
     CASE_SEPARATORS:
     case EOF:
@@ -990,13 +1074,13 @@ read_logical (st_parameter_dt *dtp, int length)
    used for repeat counts.  */
 
 static void
-read_integer (st_parameter_dt *dtp, int length)
+read_integer (st_parameter_dt *dtp, int length, bt type)
 {
   char message[IOMSG_LEN];
   int c, negative;
-
   negative = 0;
 
+next:
   c = next_char (dtp);
   switch (c)
     {
@@ -1012,6 +1096,9 @@ read_integer (st_parameter_dt *dtp, int length)
     case '!':
       if (!dtp->u.p.namelist_mode)
         goto bad_integer;
+      eat_line (dtp);
+      eat_spaces (dtp);
+      goto next;
 
     CASE_SEPARATORS:		/* Single null.  */
       unget_char (dtp, c);
@@ -1055,8 +1142,11 @@ read_integer (st_parameter_dt *dtp, int length)
     }
 
  repeat:
-  if (convert_integer (dtp, -1, 0))
-    return;
+  if (type == BT_INTEGER)
+    {
+      if (convert_integer (dtp, -1, 0))
+	return;
+    }
 
   /* Get the real integer.  */
 
@@ -1077,6 +1167,9 @@ read_integer (st_parameter_dt *dtp, int length)
       return;
 
     case '-':
+      if (compile_options.pedantic && type == BT_UNSIGNED)
+	goto bad_integer;
+
       negative = 1;
       /* Fall through...  */
 
@@ -1127,8 +1220,13 @@ read_integer (st_parameter_dt *dtp, int length)
   else if (c != '\n')
     eat_line (dtp);
 
-  snprintf (message, IOMSG_LEN, "Bad integer for item %d in list input",
+  if (type == BT_INTEGER)
+    snprintf (message, IOMSG_LEN, "Bad integer for item %d in list input",
 	      dtp->u.p.item_count);
+  else
+    snprintf (message, IOMSG_LEN, "Bad unsigned for item %d in list input",
+	      dtp->u.p.item_count);
+
   free_line (dtp);
   generate_error (&dtp->common, LIBERROR_READ_VALUE, message);
 
@@ -1139,16 +1237,26 @@ read_integer (st_parameter_dt *dtp, int length)
   eat_separator (dtp);
 
   push_char (dtp, '\0');
-  if (convert_integer (dtp, length, negative))
+  if (type == BT_INTEGER)
     {
-       free_saved (dtp);
-       return;
+      if (convert_integer (dtp, length, negative))
+	{
+	  free_saved (dtp);
+	  return;
+	}
+    }
+  else
+    {
+      if (convert_unsigned (dtp, length, negative))
+	{
+	  free_saved (dtp);
+	  return;
+	}
     }
 
   free_saved (dtp);
-  dtp->u.p.saved_type = BT_INTEGER;
+  dtp->u.p.saved_type = type;
 }
-
 
 /* Read a character variable.  */
 
@@ -1160,8 +1268,14 @@ read_character (st_parameter_dt *dtp, int length __attribute__ ((unused)))
 
   quote = ' ';			/* Space means no quote character.  */
 
+next:
   if ((c = next_char (dtp)) == EOF)
     goto eof;
+  if (c == ';')
+    {
+      push_char (dtp, c);
+      goto get_string;
+    }
   switch (c)
     {
     CASE_DIGITS:
@@ -1179,6 +1293,15 @@ read_character (st_parameter_dt *dtp, int length __attribute__ ((unused)))
       quote = c;
       goto get_string;
 
+    case '!':
+      if (dtp->u.p.namelist_mode)
+	{
+	  eat_line (dtp);
+	  eat_spaces (dtp);
+	  goto next;
+	}
+      /* Fall through...  */
+
     default:
       if (dtp->u.p.namelist_mode)
 	{
@@ -1194,6 +1317,13 @@ read_character (st_parameter_dt *dtp, int length __attribute__ ((unused)))
   for (;;)
     {
       c = next_char (dtp);
+
+      if (c == ';')
+	{
+	  push_char (dtp, c);
+	  goto get_string;
+	}
+
       switch (c)
 	{
 	CASE_DIGITS:
@@ -1202,6 +1332,16 @@ read_character (st_parameter_dt *dtp, int length __attribute__ ((unused)))
 
 	CASE_SEPARATORS:
 	case EOF:
+	  /* At this point we have been reading a string of digits. Now we see
+	     the end of these digits without seeing the closing quote and not
+	     seeing the '*' for a repeat count.  When in namelist mode, if it
+	     was a string of digits it should have had the closing quote.  */
+	  if (dtp->u.p.namelist_mode)
+	    {
+	      snprintf (message, IOMSG_LEN, "Missing quote while reading item %d",
+			dtp->u.p.item_count);
+	      generate_error (&dtp->common, LIBERROR_READ_VALUE, message);
+	    }
 	  unget_char (dtp, c);
 	  goto done;		/* String was only digits!  */
 
@@ -1223,6 +1363,13 @@ read_character (st_parameter_dt *dtp, int length __attribute__ ((unused)))
 
   if ((c = next_char (dtp)) == EOF)
     goto eof;
+
+  if (c == ';')
+    {
+      push_char (dtp, c);
+      goto get_string;
+    }
+
   switch (c)
     {
     CASE_SEPARATORS:
@@ -1242,10 +1389,27 @@ read_character (st_parameter_dt *dtp, int length __attribute__ ((unused)))
 
  get_string:
 
+  /* We could be at the beginning of a string or partially through a string
+     that began with all digits. Either way, the quote character for a namelist
+     read should have been set.  */
+  if (dtp->u.p.namelist_mode && (quote == ' '))
+    {
+      snprintf (message, IOMSG_LEN, "Missing quote while reading item %d",
+		dtp->u.p.item_count);
+      generate_error (&dtp->common, LIBERROR_READ_VALUE, message);
+    }
+
   for (;;)
     {
       if ((c = next_char (dtp)) == EOF)
 	goto done_eof;
+
+      if (c == ';')
+	{
+	  push_char (dtp, c);
+	  continue;
+	}
+
       switch (c)
 	{
 	case '"':
@@ -1557,6 +1721,7 @@ read_complex (st_parameter_dt *dtp, void *dest, int kind, size_t size)
   if (parse_repeat (dtp))
     return;
 
+next:
   c = next_char (dtp);
   switch (c)
     {
@@ -1566,6 +1731,9 @@ read_complex (st_parameter_dt *dtp, void *dest, int kind, size_t size)
     case '!':
       if (!dtp->u.p.namelist_mode)
 	goto bad_complex;
+      eat_line (dtp);
+      eat_spaces (dtp);
+      goto next;
 
     CASE_SEPARATORS:
     case EOF:
@@ -1667,6 +1835,7 @@ read_real (st_parameter_dt *dtp, void *dest, int length)
 
   seen_dp = 0;
 
+next:
   c = next_char (dtp);
   if (dtp->u.p.current_unit->decimal_status == DECIMAL_COMMA)
     {
@@ -1698,6 +1867,9 @@ read_real (st_parameter_dt *dtp, void *dest, int length)
     case '!':
       if (!dtp->u.p.namelist_mode)
 	goto bad_real;
+      eat_line (dtp);
+      eat_spaces (dtp);
+      goto next;
 
     CASE_SEPARATORS:
       unget_char (dtp, c);		/* Single null.  */
@@ -2175,6 +2347,8 @@ list_formatted_read_scalar (st_parameter_dt *dtp, bt type, void *p,
 	}
       if (c == ',' && dtp->u.p.current_unit->decimal_status == DECIMAL_COMMA)
 	c = '.';
+      if (c == ';' && dtp->u.p.current_unit->decimal_status == DECIMAL_POINT)
+	unget_char (dtp, c);
       else if (is_separator (c))
 	{
 	  /* Found a null value.  */
@@ -2224,7 +2398,8 @@ list_formatted_read_scalar (st_parameter_dt *dtp, bt type, void *p,
   switch (type)
     {
     case BT_INTEGER:
-      read_integer (dtp, kind);
+    case BT_UNSIGNED:
+      read_integer (dtp, kind, type);
       break;
     case BT_LOGICAL:
       read_logical (dtp, kind);
@@ -2318,6 +2493,7 @@ list_formatted_read_scalar (st_parameter_dt *dtp, bt type, void *p,
       break;
 
     case BT_INTEGER:
+    case BT_UNSIGNED:
     case BT_LOGICAL:
       memcpy (p, dtp->u.p.value, size);
       break;
@@ -2424,6 +2600,7 @@ finish_list_read (st_parameter_dt *dtp)
       return;
     }
 
+  /* Only perform the following cleanup on external files or the stdin file.  */
   if (!is_internal_unit (dtp))
     {
       int c;
@@ -2431,22 +2608,31 @@ finish_list_read (st_parameter_dt *dtp)
       /* Set the next_char and push_char worker functions.  */
       set_workers (dtp);
 
+      /* Make sure there were no errors from a DTIO child read.  */
       if (likely (dtp->u.p.child_saved_iostat == LIBERROR_OK))
 	{
+	  /* Peek ahead to see where we are in the parent read.  */
 	  c = next_char (dtp);
-	  if (c == EOF)
+	  unget_char (dtp, c);
+
+	  /* If the last read used DTIO, handle end conditions differently.  */
+	  if ((dtp->common.flags & IOPARM_DT_HAS_UDTIO) != 0)
 	    {
-	      free_line (dtp);
-	      hit_eof (dtp);
-	      return;
+	      if ((c == EOF) || (c == ' '))
+		return;
+	    }
+	  else
+	    {
+	      if (c == EOF)
+		{
+		  hit_eof (dtp);
+		  return;
+		}
 	    }
 	  if (c != '\n')
 	    eat_line (dtp);
 	}
     }
-
-  free_line (dtp);
-
 }
 
 /*			NAMELIST INPUT
@@ -3028,7 +3214,8 @@ nml_read_obj (st_parameter_dt *dtp, namelist_info *nl, index_type offset,
           switch (nl->type)
 	  {
 	  case BT_INTEGER:
-	    read_integer (dtp, len);
+	  case BT_UNSIGNED:
+	    read_integer (dtp, len, nl->type);
             break;
 
 	  case BT_LOGICAL:

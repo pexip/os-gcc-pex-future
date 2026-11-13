@@ -1,4 +1,4 @@
-// Copyright (C) 2020-2024 Free Software Foundation, Inc.
+// Copyright (C) 2020-2026 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -158,35 +158,6 @@ test03()
   ok &= ranges::count(x, 1, &X::moved) == 5;
   ok &= ranges::count(y, 0, &X::moved) == 6;
   return ok;
-}
-
-namespace pr105609
-{
-  struct I {
-    using value_type = int;
-    using difference_type = std::ptrdiff_t;
-    int operator*() const;
-    I& operator++();
-    I operator++(int);
-    I& operator--();
-    I operator--(int);
-    bool operator==(I) const;
-    friend int& iter_move(const I&);
-  };
-}
-
-void
-test04(pr105609::I i)
-{
-  // PR libstdc++/105609
-  // ranges::move should use ranges::iter_move instead of std::move
-  struct O {
-    O(int&) { }
-    O(int&&) = delete;
-  };
-
-  O* o = nullptr;
-  std::ranges::move_backward(i, i, o);
 }
 
 int

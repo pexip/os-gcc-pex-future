@@ -1,5 +1,5 @@
 /* Process source files and output type information.
-   Copyright (C) 2006-2024 Free Software Foundation, Inc.
+   Copyright (C) 2006-2026 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -139,7 +139,7 @@ parse_error (const char *msg, ...)
 {
   va_list ap;
 
-  fprintf (stderr, "%s:%d: parse error: ", 
+  fprintf (stderr, "%s:%d: parse error: ",
 	   get_input_file_name (lexer_line.file), lexer_line.line);
 
   va_start (ap, msg);
@@ -237,9 +237,9 @@ string_seq (void)
 
       l1 = strlen (s1);
       l2 = strlen (s2);
-      buf = XRESIZEVEC (char, CONST_CAST (char *, s1), l1 + l2 + 1);
+      buf = XRESIZEVEC (char, const_cast<char *> (s1), l1 + l2 + 1);
       memcpy (buf + l1, s2, l2 + 1);
-      XDELETE (CONST_CAST (char *, s2));
+      XDELETE (const_cast<char *> (s2));
       s1 = buf;
     }
   return s1;

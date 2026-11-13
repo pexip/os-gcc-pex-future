@@ -1,11 +1,11 @@
 /* { dg-do compile { target { rv64 } } } */
 /* { dg-options "-march=rv64gc_xtheadvector -mabi=lp64d -O3" } */
 
-#include <riscv_vector.h>
+#include "riscv_vector.h"
 
 struct a
 {
-  int b[10];
+  int b[];
 } c (vuint32m4_t), d;
 
 char e;

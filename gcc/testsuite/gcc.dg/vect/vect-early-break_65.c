@@ -4,7 +4,7 @@
 /* { dg-require-effective-target vect_int } */
 /* { dg-additional-options "-Ofast -fno-vect-cost-model -fdump-tree-vect-details" } */
 
-enum a { b };
+enum a { b, dummy = __INT_MAX__ };
 
 struct {
   enum a c;
@@ -17,4 +17,4 @@ void f() {
       return;
 }
 
-/* { dg-final { scan-tree-dump-times "vectorized 1 loops" 0 "vect" } } */
+/* { dg-final { scan-tree-dump-times "vectorized 1 loops" 1 "vect" } } */

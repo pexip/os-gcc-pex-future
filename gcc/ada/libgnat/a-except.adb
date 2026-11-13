@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2026, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -450,6 +450,8 @@ package body Ada.Exceptions is
      (File : System.Address; Line : Integer);
    procedure Rcheck_CE_Tag_Check
      (File : System.Address; Line : Integer);
+   procedure Rcheck_PE_Abstract_Type_Component
+     (File : System.Address; Line : Integer);
    procedure Rcheck_PE_Access_Before_Elaboration
      (File : System.Address; Line : Integer);
    procedure Rcheck_PE_Accessibility_Check
@@ -481,6 +483,8 @@ package body Ada.Exceptions is
    procedure Rcheck_PE_Overlaid_Controlled_Object
      (File : System.Address; Line : Integer);
    procedure Rcheck_PE_Potentially_Blocking_Operation
+     (File : System.Address; Line : Integer);
+   procedure Rcheck_PE_Raise_Check
      (File : System.Address; Line : Integer);
    procedure Rcheck_PE_Stubbed_Subprogram_Called
      (File : System.Address; Line : Integer);
@@ -540,6 +544,8 @@ package body Ada.Exceptions is
                   "__gnat_rcheck_CE_Range_Check");
    pragma Export (C, Rcheck_CE_Tag_Check,
                   "__gnat_rcheck_CE_Tag_Check");
+   pragma Export (C, Rcheck_PE_Abstract_Type_Component,
+                  "__gnat_rcheck_PE_Abstract_Type_Component");
    pragma Export (C, Rcheck_PE_Access_Before_Elaboration,
                   "__gnat_rcheck_PE_Access_Before_Elaboration");
    pragma Export (C, Rcheck_PE_Accessibility_Check,
@@ -574,6 +580,8 @@ package body Ada.Exceptions is
                   "__gnat_rcheck_PE_Overlaid_Controlled_Object");
    pragma Export (C, Rcheck_PE_Potentially_Blocking_Operation,
                   "__gnat_rcheck_PE_Potentially_Blocking_Operation");
+   pragma Export (C, Rcheck_PE_Raise_Check,
+                  "__gnat_rcheck_PE_Raise_Check");
    pragma Export (C, Rcheck_PE_Stream_Operation_Not_Allowed,
                   "__gnat_rcheck_PE_Stream_Operation_Not_Allowed");
    pragma Export (C, Rcheck_PE_Stubbed_Subprogram_Called,
@@ -616,6 +624,7 @@ package body Ada.Exceptions is
    pragma No_Return (Rcheck_CE_Partition_Check);
    pragma No_Return (Rcheck_CE_Range_Check);
    pragma No_Return (Rcheck_CE_Tag_Check);
+   pragma No_Return (Rcheck_PE_Abstract_Type_Component);
    pragma No_Return (Rcheck_PE_Access_Before_Elaboration);
    pragma No_Return (Rcheck_PE_Accessibility_Check);
    pragma No_Return (Rcheck_PE_Address_Of_Intrinsic);
@@ -632,6 +641,7 @@ package body Ada.Exceptions is
    pragma No_Return (Rcheck_PE_Non_Transportable_Actual);
    pragma No_Return (Rcheck_PE_Overlaid_Controlled_Object);
    pragma No_Return (Rcheck_PE_Potentially_Blocking_Operation);
+   pragma No_Return (Rcheck_PE_Raise_Check);
    pragma No_Return (Rcheck_PE_Stream_Operation_Not_Allowed);
    pragma No_Return (Rcheck_PE_Stubbed_Subprogram_Called);
    pragma No_Return (Rcheck_PE_Unchecked_Union_Restriction);
@@ -678,6 +688,8 @@ package body Ada.Exceptions is
                              "expected_throw");
    pragma Machine_Attribute (Rcheck_CE_Tag_Check,
                              "expected_throw");
+   pragma Machine_Attribute (Rcheck_PE_Abstract_Type_Component,
+                             "expected_throw");
    pragma Machine_Attribute (Rcheck_PE_Access_Before_Elaboration,
                              "expected_throw");
    pragma Machine_Attribute (Rcheck_PE_Accessibility_Check,
@@ -709,6 +721,8 @@ package body Ada.Exceptions is
    pragma Machine_Attribute (Rcheck_PE_Overlaid_Controlled_Object,
                              "expected_throw");
    pragma Machine_Attribute (Rcheck_PE_Potentially_Blocking_Operation,
+                             "expected_throw");
+   pragma Machine_Attribute (Rcheck_PE_Raise_Check,
                              "expected_throw");
    pragma Machine_Attribute (Rcheck_PE_Stream_Operation_Not_Allowed,
                              "expected_throw");
@@ -767,6 +781,8 @@ package body Ada.Exceptions is
    pragma Machine_Attribute (Rcheck_CE_Range_Check,
                              "strub", "callable");
    pragma Machine_Attribute (Rcheck_CE_Tag_Check,
+                             "strub", "callable");
+   pragma Machine_Attribute (Rcheck_PE_Abstract_Type_Component,
                              "strub", "callable");
    pragma Machine_Attribute (Rcheck_PE_Access_Before_Elaboration,
                              "strub", "callable");
@@ -877,6 +893,9 @@ package body Ada.Exceptions is
    Rmsg_35 : constant String := "object too large"                 & NUL;
    Rmsg_36 : constant String := "stream operation not allowed"     & NUL;
    Rmsg_37 : constant String := "build-in-place mismatch"          & NUL;
+   Rmsg_38 : constant String := "raise check failed"               & NUL;
+   Rmsg_39 : constant String := "initialization of abstract type"  &
+                                " component not allowed"           & NUL;
 
    ---------
    -- AAA --
@@ -1463,6 +1482,13 @@ package body Ada.Exceptions is
       Raise_Constraint_Error_Msg (File, Line, 0, Rmsg_13'Address);
    end Rcheck_CE_Tag_Check;
 
+   procedure Rcheck_PE_Abstract_Type_Component
+     (File : System.Address; Line : Integer)
+   is
+   begin
+      Raise_Program_Error_Msg (File, Line, Rmsg_39'Address);
+   end Rcheck_PE_Abstract_Type_Component;
+
    procedure Rcheck_PE_Access_Before_Elaboration
      (File : System.Address; Line : Integer)
    is
@@ -1574,6 +1600,13 @@ package body Ada.Exceptions is
    begin
       Raise_Program_Error_Msg (File, Line, Rmsg_28'Address);
    end Rcheck_PE_Potentially_Blocking_Operation;
+
+   procedure Rcheck_PE_Raise_Check
+     (File : System.Address; Line : Integer)
+   is
+   begin
+      Raise_Program_Error_Msg (File, Line, Rmsg_38'Address);
+   end Rcheck_PE_Raise_Check;
 
    procedure Rcheck_PE_Stream_Operation_Not_Allowed
      (File : System.Address; Line : Integer)
@@ -1753,8 +1786,8 @@ package body Ada.Exceptions is
          Exception_Propagation.Propagate_Exception (X);
       else
          declare
-            Excep : constant EOA
-              := Exception_Propagation.Allocate_Occurrence;
+            Excep : constant EOA :=
+              Exception_Propagation.Allocate_Occurrence;
             Saved_MO : constant System.Address := Excep.Machine_Occurrence;
          begin
             Save_Occurrence (Excep.all, X);

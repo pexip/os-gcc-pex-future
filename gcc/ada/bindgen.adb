@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2026, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -24,7 +24,6 @@
 ------------------------------------------------------------------------------
 
 with Casing;   use Casing;
-with Fname;    use Fname;
 with Gnatvsn;  use Gnatvsn;
 with Hostparm;
 with Namet;    use Namet;
@@ -54,14 +53,7 @@ package body Bindgen is
    --  Flag which indicates whether the program uses the GNARL library
    --  (presence of the unit System.OS_Interface)
 
-   Num_Elab_Calls : Nat := 0;
-   --  Number of generated calls to elaboration routines
-
-   Num_Primary_Stacks : Int := 0;
-   --  Number of default-sized primary stacks the binder needs to allocate for
-   --  task objects declared in the program.
-
-   Num_Sec_Stacks : Int := 0;
+   Num_Sec_Stacks : Nat := 0;
    --  Number of default-sized primary stacks the binder needs to allocate for
    --  task objects declared in the program.
 
@@ -273,9 +265,8 @@ package body Bindgen is
    --  such a pragma is given (the string will be a null string if no pragmas
    --  were used). If pragma were present the entries apply to the interrupts
    --  in sequence from the first interrupt, and are set to one of four
-   --  possible settings: 'n' for not specified, 'u' for user, 'r' for run
-   --  time, 's' for system, see description of Interrupt_State pragma for
-   --  further details.
+   --  possible settings: 'n', 'u', 'r', 's', see description in init.c
+   --  (__gnat_get_interrupt_state) for further details.
 
    --  Num_Interrupt_States is the length of the Interrupt_States string. It
    --  will be set to zero if no Interrupt_State pragmas are present.
@@ -485,7 +476,10 @@ package body Bindgen is
       --  but False for mains in other languages.) We do not want to do this if
       --  we're binding a library.
 
-      if not Bind_For_Library and not CodePeer_Mode then
+      if not Bind_For_Library
+        and not CodePeer_Mode
+        and not Suppress_Standard_Library_On_Target
+      then
          WBI ("      procedure s_stalib_adafinal;");
          Set_String ("      pragma Import (Ada, s_stalib_adafinal, ");
          Set_String ("""system__standard_library__adafinal"");");
@@ -499,7 +493,9 @@ package body Bindgen is
       WBI ("");
       WBI ("   begin");
 
-      if not CodePeer_Mode then
+      if not CodePeer_Mode
+        and not Suppress_Standard_Library_On_Target
+      then
          WBI ("      if not Is_Elaborated then");
          WBI ("         return;");
          WBI ("      end if;");
@@ -512,7 +508,9 @@ package body Bindgen is
       --  on whether this is the main program or a library.
 
       if not CodePeer_Mode then
-         if not Bind_For_Library then
+         if not Bind_For_Library
+           and not Suppress_Standard_Library_On_Target
+         then
             WBI ("      s_stalib_adafinal;");
          elsif Lib_Final_Built then
             WBI ("      finalize_library;");
@@ -819,14 +817,26 @@ package body Bindgen is
             WBI ("      pragma Import (C, XDR_Stream, ""__gl_xdr_stream"");");
          end if;
 
-         --  Import entry point for elaboration time signal handler
-         --  installation, and indication of if it's been called previously.
+         WBI ("      Interrupts_Default_To_System : Integer;");
+         WBI ("      pragma Import (C, Interrupts_Default_To_System, " &
+              """__gl_interrupts_default_to_system"");");
+
+         --  Import entry point for initialization of the runtime
 
          WBI ("");
          WBI ("      procedure Runtime_Initialize " &
               "(Install_Handler : Integer);");
          WBI ("      pragma Import (C, Runtime_Initialize, " &
               """__gnat_runtime_initialize"");");
+
+         --  Import entry point for initialization of the tasking runtime
+
+         if With_GNARL then
+            WBI ("");
+            WBI ("      procedure Tasking_Runtime_Initialize;");
+            WBI ("      pragma Import (C, Tasking_Runtime_Initialize, " &
+                 """__gnat_tasking_runtime_initialize"");");
+         end if;
 
          --  Import handlers attach procedure for sequential elaboration policy
 
@@ -1032,6 +1042,11 @@ package body Bindgen is
          Set_String (";");
          Write_Statement_Buffer;
 
+         if Interrupts_Default_To_System_Specified then
+            Set_String ("      Interrupts_Default_To_System := 1;");
+            Write_Statement_Buffer;
+         end if;
+
          if Leap_Seconds_Support then
             WBI ("      Leap_Seconds_Support := 1;");
          end if;
@@ -1090,6 +1105,12 @@ package body Bindgen is
          --  Generate call to Runtime_Initialize
 
          WBI ("      Runtime_Initialize (1);");
+
+         --  Generate call to Tasking_Runtime_Initialize
+
+         if With_GNARL then
+            WBI ("      Tasking_Runtime_Initialize;");
+         end if;
       end if;
 
       --  Generate call to set Initialize_Scalar values if active
@@ -1517,7 +1538,7 @@ package body Bindgen is
 
             --  Nothing to do if predefined unit in no run time mode
 
-            if No_Run_Time_Mode and then Is_Predefined_File_Name (U.Sfile) then
+            if No_Run_Time_Mode and then U.Predefined then
                null;
 
             --  Likewise if this is an interface to a stand alone library
@@ -1702,9 +1723,7 @@ package body Bindgen is
               --  Don't generate reference for predefined file in No_Run_Time
               --  mode, since we don't include the object files in this case
 
-              and then not
-                (No_Run_Time_Mode
-                  and then Is_Predefined_File_Name (U.Sfile))
+              and then not (No_Run_Time_Mode and then U.Predefined)
             then
                Get_Name_String (U.Sfile);
                Set_String ("   ");
@@ -2091,7 +2110,7 @@ package body Bindgen is
       if Bind_Main_Program
         and then not Minimal_Binder
         and then not CodePeer_Mode
-        and then not Generate_C_Code
+        and then not CCG_Mode
       then
          WBI ("      Ensure_Reference : aliased System.Address := " &
               "Ada_Main_Program_Name'Address;");
@@ -2464,16 +2483,6 @@ package body Bindgen is
          ALIs.Table (ALIs.First).Time_Slice_Value := Opt.Time_Slice_Value;
       end if;
 
-      --  Count number of elaboration calls
-
-      for E in Elab_Order'Range loop
-         if Units.Table (Elab_Order (E)).No_Elab then
-            null;
-         else
-            Num_Elab_Calls := Num_Elab_Calls + 1;
-         end if;
-      end loop;
-
       --  Count the number of statically allocated stacks to be generated by
       --  the binder. If the user has specified the number of default-sized
       --  secondary stacks, use that number. Otherwise start the count at one
@@ -2487,9 +2496,6 @@ package body Bindgen is
       end if;
 
       for J in Units.First .. Units.Last loop
-         Num_Primary_Stacks :=
-           Num_Primary_Stacks + Units.Table (J).Primary_Stack_Count;
-
          Num_Sec_Stacks :=
            Num_Sec_Stacks + Units.Table (J).Sec_Stack_Count;
       end loop;
@@ -3491,7 +3497,11 @@ package body Bindgen is
 
             begin
                while IS_Pragma_Settings.Last < Inum loop
-                  IS_Pragma_Settings.Append ('n');
+                  if Interrupts_Default_To_System_Specified then
+                     IS_Pragma_Settings.Append ('s');
+                  else
+                     IS_Pragma_Settings.Append ('n');
+                  end if;
                end loop;
 
                IS_Pragma_Settings.Table (Inum) := Stat;

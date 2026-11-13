@@ -1,5 +1,5 @@
 /* IRA processing allocno lives to build allocno live ranges.
-   Copyright (C) 2006-2024 Free Software Foundation, Inc.
+   Copyright (C) 2006-2026 Free Software Foundation, Inc.
    Contributed by Vladimir Makarov <vmakarov@redhat.com>.
 
 This file is part of GCC.
@@ -24,6 +24,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "backend.h"
 #include "target.h"
 #include "rtl.h"
+#include "stmt.h"
 #include "predict.h"
 #include "df.h"
 #include "memmodel.h"
@@ -867,7 +868,7 @@ single_reg_class (const char *constraints, rtx op, rtx equiv_const)
 	  {
 	  case 'g':
 	    return NO_REGS;
-	    
+
 	  default:
 	    /* ??? Is this the best way to handle memory constraints?  */
 	    cn = lookup_constraint (constraints);
@@ -891,7 +892,7 @@ single_reg_class (const char *constraints, rtx op, rtx equiv_const)
 	      return NO_REGS;
 	    cl = next_cl;
 	    break;
-	    
+
 	  case '0': case '1': case '2': case '3': case '4':
 	  case '5': case '6': case '7': case '8': case '9':
 	    {
@@ -970,6 +971,12 @@ ira_implicitly_set_insn_hard_regs (HARD_REG_SET *set,
 		    int regno = ira_class_singleton[cl][mode];
 		    if (regno >= 0)
 		      add_to_hard_reg_set (set, mode, regno);
+		  }
+		else if (c == '{')
+		  {
+		    int regno = decode_hard_reg_constraint (p);
+		    gcc_assert (regno >= 0 && regno < FIRST_PSEUDO_REGISTER);
+		    add_to_hard_reg_set (set, mode, regno);
 		  }
 	      }
 	}
@@ -1185,7 +1192,7 @@ find_call_crossed_cheap_reg (rtx_insn *insn)
 	}
     }
   return cheap_reg;
-}  
+}
 
 /* Determine whether INSN is a register to register copy of the type where
    we do not need to make the source and destiniation registers conflict.
@@ -1260,14 +1267,8 @@ process_out_of_region_eh_regs (basic_block bb)
       for (int n = ALLOCNO_NUM_OBJECTS (a) - 1; n >= 0; n--)
 	{
 	  ira_object_t obj = ALLOCNO_OBJECT (a, n);
-	  for (int k = 0; ; k++)
-	    {
-	      unsigned int regno = EH_RETURN_DATA_REGNO (k);
-	      if (regno == INVALID_REGNUM)
-		break;
-	      SET_HARD_REG_BIT (OBJECT_CONFLICT_HARD_REGS (obj), regno);
-	      SET_HARD_REG_BIT (OBJECT_TOTAL_CONFLICT_HARD_REGS (obj), regno);
-	    }
+	  OBJECT_CONFLICT_HARD_REGS (obj) |= eh_return_data_regs;
+	  OBJECT_TOTAL_CONFLICT_HARD_REGS (obj) |= eh_return_data_regs;
 	}
     }
 }
@@ -1512,7 +1513,7 @@ process_bb_node_lives (ira_loop_tree_node_t loop_tree_node)
 	  make_early_clobber_and_input_conflicts ();
 
 	  curr_point++;
-	  
+
 	  /* Mark each used value as live.  */
 	  FOR_EACH_INSN_USE (use, insn)
 	    mark_ref_live (use);
@@ -1666,7 +1667,7 @@ remove_some_program_points_and_update_live_ranges (void)
   live_range_t r, prev_r, next_r;
   sbitmap_iterator sbi;
   bool born_p, dead_p, prev_born_p, prev_dead_p;
-  
+
   auto_sbitmap born (ira_max_point);
   auto_sbitmap dead (ira_max_point);
   bitmap_clear (born);

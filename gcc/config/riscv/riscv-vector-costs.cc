@@ -1,5 +1,5 @@
 /* Cost model implementation for RISC-V 'V' Extension for GNU compiler.
-   Copyright (C) 2023-2024 Free Software Foundation, Inc.
+   Copyright (C) 2023-2026 Free Software Foundation, Inc.
    Contributed by Juzhe Zhong (juzhe.zhong@rivai.ai), RiVAI Technologies Ltd.
 
 This file is part of GCC.
@@ -178,8 +178,8 @@ get_live_range (hash_map<tree, pair> *live_ranges, tree arg)
        STMT 5 (be vectorized)      -- point 2
        ...
 */
-static void
-compute_local_program_points (
+void
+costs::compute_local_program_points (
   vec_info *vinfo,
   hash_map<basic_block, vec<stmt_point>> &program_points_per_bb)
 {
@@ -193,7 +193,7 @@ compute_local_program_points (
       /* Collect the stmts that is vectorized and mark their program point.  */
       for (i = 0; i < nbbs; i++)
 	{
-	  int point = 1;
+	  unsigned int point = 1;
 	  basic_block bb = bbs[i];
 	  vec<stmt_point> program_points = vNULL;
 	  if (dump_enabled_p ())
@@ -205,9 +205,7 @@ compute_local_program_points (
 	      if (!is_gimple_assign_or_call (gsi_stmt (si)))
 		continue;
 	      stmt_vec_info stmt_info = vinfo->lookup_stmt (gsi_stmt (si));
-	      enum stmt_vec_info_type type
-		= STMT_VINFO_TYPE (vect_stmt_to_vectorize (stmt_info));
-	      if (type != undef_vec_info_type)
+	      if (STMT_VINFO_RELEVANT_P (stmt_info))
 		{
 		  stmt_point info = {point, gsi_stmt (si), stmt_info};
 		  program_points.safe_push (info);
@@ -216,6 +214,35 @@ compute_local_program_points (
 		    dump_printf_loc (MSG_NOTE, vect_location,
 				     "program point %d: %G", info.point,
 				     gsi_stmt (si));
+		}
+
+	      /* If the statement is part of a pattern, also add the other
+		 pattern statements.  */
+	      gimple_seq pattern_def_seq;
+	      if (STMT_VINFO_IN_PATTERN_P (stmt_info)
+		  && (pattern_def_seq = STMT_VINFO_PATTERN_DEF_SEQ (stmt_info)))
+		{
+		  gimple_stmt_iterator si2;
+
+		  for (si2 = gsi_start (pattern_def_seq);
+		       !gsi_end_p (si2);
+		       gsi_next (&si2))
+		    {
+		      stmt_vec_info pattern_def_stmt_info
+			= vinfo->lookup_stmt (gsi_stmt (si2));
+		      if (STMT_VINFO_RELEVANT_P (pattern_def_stmt_info)
+			  || STMT_VINFO_LIVE_P (pattern_def_stmt_info))
+			{
+			  stmt_point info = {point, gsi_stmt (si2),
+			      pattern_def_stmt_info};
+			  program_points.safe_push (info);
+			  point++;
+			  if (dump_enabled_p ())
+			    dump_printf_loc (MSG_NOTE, vect_location,
+					     "program point %d: %G",
+					     info.point, gsi_stmt (si2));
+			}
+		    }
 		}
 	    }
 	  program_points_per_bb.put (bb, program_points);
@@ -229,6 +256,14 @@ get_biggest_mode (machine_mode mode1, machine_mode mode2)
   unsigned int mode1_size = GET_MODE_BITSIZE (mode1).to_constant ();
   unsigned int mode2_size = GET_MODE_BITSIZE (mode2).to_constant ();
   return mode1_size >= mode2_size ? mode1 : mode2;
+}
+
+static machine_mode
+get_smallest_mode (machine_mode mode1, machine_mode mode2)
+{
+  unsigned int mode1_size = GET_MODE_BITSIZE (mode1).to_constant ();
+  unsigned int mode2_size = GET_MODE_BITSIZE (mode2).to_constant ();
+  return mode1_size <= mode2_size ? mode1 : mode2;
 }
 
 /* Return true if OP is invariant.  */
@@ -247,14 +282,14 @@ loop_invariant_op_p (class loop *loop,
 
 /* Return true if the variable should be counted into liveness.  */
 static bool
-variable_vectorized_p (class loop *loop, stmt_vec_info stmt_info, tree var,
-		       bool lhs_p)
+variable_vectorized_p (class loop *loop, stmt_vec_info stmt_info,
+		       slp_tree node, tree var, bool lhs_p)
 {
   if (!var)
     return false;
   gimple *stmt = STMT_VINFO_STMT (stmt_info);
-  enum stmt_vec_info_type type
-    = STMT_VINFO_TYPE (vect_stmt_to_vectorize (stmt_info));
+  stmt_info = vect_stmt_to_vectorize (stmt_info);
+  enum stmt_vec_info_type type = SLP_TREE_TYPE (node);
   if (is_gimple_call (stmt) && gimple_call_internal_p (stmt))
     {
       if (gimple_call_internal_fn (stmt) == IFN_MASK_STORE
@@ -330,13 +365,15 @@ variable_vectorized_p (class loop *loop, stmt_vec_info stmt_info, tree var,
 
    The live range of SSA 1 is [1, 3] in bb 2.
    The live range of SSA 2 is [0, 4] in bb 3.  */
-static machine_mode
-compute_local_live_ranges (
+machine_mode
+costs::compute_local_live_ranges (
   loop_vec_info loop_vinfo,
   const hash_map<basic_block, vec<stmt_point>> &program_points_per_bb,
-  hash_map<basic_block, hash_map<tree, pair>> &live_ranges_per_bb)
+  hash_map<basic_block, hash_map<tree, pair>> &live_ranges_per_bb,
+  machine_mode *smallest_mode_out)
 {
   machine_mode biggest_mode = QImode;
+  machine_mode smallest_mode = TImode;
   class loop *loop = LOOP_VINFO_LOOP (loop_vinfo);
   if (!program_points_per_bb.is_empty ())
     {
@@ -361,16 +398,23 @@ compute_local_live_ranges (
 	      unsigned int point = program_point.point;
 	      gimple *stmt = program_point.stmt;
 	      tree lhs = gimple_get_lhs (stmt);
-	      if (variable_vectorized_p (loop, program_point.stmt_info, lhs,
-					 true))
+	      slp_tree *node = vinfo_slp_map.get (program_point.stmt_info);
+	      if (!node)
+		continue;
+	      if (variable_vectorized_p (loop, program_point.stmt_info,
+					 *node, lhs, true))
 		{
-		  biggest_mode = get_biggest_mode (biggest_mode,
-						   TYPE_MODE (TREE_TYPE (lhs)));
+		  biggest_mode
+		    = get_biggest_mode (biggest_mode,
+					TYPE_MODE (TREE_TYPE (lhs)));
+		  smallest_mode
+		    = get_smallest_mode (smallest_mode,
+					 TYPE_MODE (TREE_TYPE (lhs)));
 		  bool existed_p = false;
 		  pair &live_range
 		    = live_ranges->get_or_insert (lhs, &existed_p);
 		  gcc_assert (!existed_p);
-		  if (STMT_VINFO_MEMORY_ACCESS_TYPE (program_point.stmt_info)
+		  if (SLP_TREE_MEMORY_ACCESS_TYPE (*node)
 		      == VMAT_LOAD_STORE_LANES)
 		    point = get_first_lane_point (program_points,
 						  program_point.stmt_info);
@@ -379,17 +423,19 @@ compute_local_live_ranges (
 	      for (i = 0; i < gimple_num_args (stmt); i++)
 		{
 		  tree var = gimple_arg (stmt, i);
-		  if (variable_vectorized_p (loop, program_point.stmt_info, var,
-					     false))
+		  if (variable_vectorized_p (loop, program_point.stmt_info,
+					     *node, var, false))
 		    {
 		      biggest_mode
 			= get_biggest_mode (biggest_mode,
 					    TYPE_MODE (TREE_TYPE (var)));
+		      smallest_mode
+			= get_smallest_mode (smallest_mode,
+					     TYPE_MODE (TREE_TYPE (var)));
 		      bool existed_p = false;
 		      pair &live_range
 			= live_ranges->get_or_insert (var, &existed_p);
-		      if (STMT_VINFO_MEMORY_ACCESS_TYPE (
-			    program_point.stmt_info)
+		      if (SLP_TREE_MEMORY_ACCESS_TYPE (*node)
 			  == VMAT_LOAD_STORE_LANES)
 			point = get_last_lane_point (program_points,
 						     program_point.stmt_info);
@@ -416,6 +462,8 @@ compute_local_live_ranges (
 				  (*r).second = MAX (point, (*r).second);
 				  biggest_mode = get_biggest_mode (
 				    biggest_mode, TYPE_MODE (TREE_TYPE (arg)));
+				  smallest_mode = get_smallest_mode (
+				    smallest_mode, TYPE_MODE (TREE_TYPE (arg)));
 				}
 			    }
 			  else
@@ -435,8 +483,14 @@ compute_local_live_ranges (
 	}
     }
   if (dump_enabled_p ())
-    dump_printf_loc (MSG_NOTE, vect_location, "Biggest mode = %s\n",
-		     GET_MODE_NAME (biggest_mode));
+    {
+      dump_printf_loc (MSG_NOTE, vect_location, "Biggest mode = %s\n",
+		       GET_MODE_NAME (biggest_mode));
+      dump_printf_loc (MSG_NOTE, vect_location, "Smallest mode = %s\n",
+		       GET_MODE_NAME (smallest_mode));
+    }
+  if (smallest_mode_out)
+    *smallest_mode_out = smallest_mode;
   return biggest_mode;
 }
 
@@ -488,9 +542,15 @@ max_number_of_live_regs (loop_vec_info loop_vinfo, const basic_block bb,
       pair live_range = (*iter).second;
       for (i = live_range.first + 1; i <= live_range.second; i++)
 	{
-	  machine_mode mode = TREE_CODE (TREE_TYPE (var)) == BOOLEAN_TYPE
-				? BImode
-				: TYPE_MODE (TREE_TYPE (var));
+	  machine_mode mode;
+	  if (TREE_CODE (TREE_TYPE (var)) == BOOLEAN_TYPE)
+	    mode = BImode;
+	  /* Constants do not have a mode, just use the biggest so
+	     compute_nregs will return 1.  */
+	  else if (TREE_CODE (var) == INTEGER_CST)
+	    mode = biggest_mode;
+	  else
+	    mode = TYPE_MODE (TREE_TYPE (var));
 	  unsigned int nregs
 	    = compute_nregs_for_mode (loop_vinfo, mode, biggest_mode, lmul);
 	  live_vars_vec[i] += nregs;
@@ -510,7 +570,7 @@ max_number_of_live_regs (loop_vec_info loop_vinfo, const basic_block bb,
     {
       machine_mode mode = TYPE_MODE (TREE_TYPE (t));
       if (!lookup_vector_type_attribute (TREE_TYPE (t))
-	  && !riscv_v_ext_vls_mode_p (mode))
+	  && !riscv_vls_mode_p (mode))
 	continue;
 
       gimple *def = SSA_NAME_DEF_STMT (t);
@@ -563,14 +623,24 @@ get_store_value (gimple *stmt)
     return gimple_assign_rhs1 (stmt);
 }
 
-/* Return true if it is non-contiguous load/store.  */
-static bool
-non_contiguous_memory_access_p (stmt_vec_info stmt_info)
+/* Return true if additional vector vars needed.  */
+bool
+costs::need_additional_vector_vars_p (stmt_vec_info stmt_info,
+				      slp_tree node)
 {
-  enum stmt_vec_info_type type
-    = STMT_VINFO_TYPE (vect_stmt_to_vectorize (stmt_info));
-  return ((type == load_vec_info_type || type == store_vec_info_type)
-	  && !adjacent_dr_p (STMT_VINFO_DATA_REF (stmt_info)));
+  enum stmt_vec_info_type type = SLP_TREE_TYPE (node);
+  if (type == load_vec_info_type || type == store_vec_info_type)
+    {
+      if (STMT_VINFO_GATHER_SCATTER_P (stmt_info)
+	  && mat_gather_scatter_p (SLP_TREE_MEMORY_ACCESS_TYPE (node)))
+	return true;
+
+      machine_mode mode = TYPE_MODE (STMT_VINFO_VECTYPE (stmt_info));
+      int lmul = riscv_get_v_regno_alignment (mode);
+      if (DR_GROUP_SIZE (stmt_info) * lmul > RVV_M8)
+	return true;
+    }
+  return false;
 }
 
 /* Return the LMUL of the current analysis.  */
@@ -579,38 +649,38 @@ compute_estimated_lmul (loop_vec_info loop_vinfo, machine_mode mode)
 {
   gcc_assert (GET_MODE_BITSIZE (mode).is_constant ());
   int regno_alignment = riscv_get_v_regno_alignment (loop_vinfo->vector_mode);
-  if (riscv_v_ext_vls_mode_p (loop_vinfo->vector_mode))
+  if (riscv_vls_mode_p (loop_vinfo->vector_mode))
     return regno_alignment;
-  else if (known_eq (LOOP_VINFO_SLP_UNROLLING_FACTOR (loop_vinfo), 1U))
+  else
     {
       int estimated_vf = vect_vf_for_cost (loop_vinfo);
       int estimated_lmul = estimated_vf * GET_MODE_BITSIZE (mode).to_constant ()
 			   / TARGET_MIN_VLEN;
       if (estimated_lmul > RVV_M8)
-	return regno_alignment;
+	return RVV_M8;
       else
 	return estimated_lmul;
     }
-  else
-    {
-      /* Estimate the VLA SLP LMUL.  */
-      if (regno_alignment > RVV_M1)
-	return regno_alignment;
-      else if (mode != QImode
-	       || LOOP_VINFO_SLP_UNROLLING_FACTOR (loop_vinfo).is_constant ())
-	{
-	  int ratio;
-	  if (can_div_trunc_p (BYTES_PER_RISCV_VECTOR,
-			       GET_MODE_SIZE (loop_vinfo->vector_mode), &ratio))
-	    {
-	      if (ratio == 1)
-		return RVV_M4;
-	      else if (ratio == 2)
-		return RVV_M2;
-	    }
-	}
-    }
   return 0;
+}
+
+/* Compute LMUL based on the ratio of biggest to smallest type size.
+   This is used for RVV_CONV_DYNAMIC.  */
+static int
+compute_lmul_from_conversion_ratio (machine_mode biggest_mode,
+				    machine_mode smallest_mode)
+{
+  gcc_assert (GET_MODE_BITSIZE (biggest_mode).is_constant ());
+  gcc_assert (GET_MODE_BITSIZE (smallest_mode).is_constant ());
+
+  unsigned int biggest_size = GET_MODE_BITSIZE (biggest_mode).to_constant ();
+  unsigned int smallest_size = GET_MODE_BITSIZE (smallest_mode).to_constant ();
+
+  int lmul = biggest_size / smallest_size;
+  lmul = std::min (lmul, (int) RVV_M8);
+  lmul = std::max (lmul, (int) RVV_M1);
+
+  return lmul;
 }
 
 /* Update the live ranges according PHI.
@@ -633,8 +703,8 @@ compute_estimated_lmul (loop_vec_info loop_vinfo, machine_mode mode)
 
    Then, after this function, we update SSA 1 live range in bb 2
    into [2, 4] since SSA 1 is live out into bb 3.  */
-static void
-update_local_live_ranges (
+void
+costs::update_local_live_ranges (
   vec_info *vinfo,
   hash_map<basic_block, vec<stmt_point>> &program_points_per_bb,
   hash_map<basic_block, hash_map<tree, pair>> &live_ranges_per_bb,
@@ -661,8 +731,13 @@ update_local_live_ranges (
 	{
 	  gphi *phi = psi.phi ();
 	  stmt_vec_info stmt_info = vinfo->lookup_stmt (phi);
-	  if (STMT_VINFO_TYPE (vect_stmt_to_vectorize (stmt_info))
-	      == undef_vec_info_type)
+	  stmt_info = vect_stmt_to_vectorize (stmt_info);
+	  slp_tree *node = vinfo_slp_map.get (stmt_info);
+
+	  if (!node)
+	    continue;
+
+	  if (SLP_TREE_TYPE (*node) == undef_vec_info_type)
 	    continue;
 
 	  for (j = 0; j < gimple_phi_num_args (phi); j++)
@@ -737,18 +812,18 @@ update_local_live_ranges (
 	  if (!is_gimple_assign_or_call (gsi_stmt (si)))
 	    continue;
 	  stmt_vec_info stmt_info = vinfo->lookup_stmt (gsi_stmt (si));
-	  enum stmt_vec_info_type type
-	    = STMT_VINFO_TYPE (vect_stmt_to_vectorize (stmt_info));
-	  if (non_contiguous_memory_access_p (stmt_info)
-	      /* LOAD_LANES/STORE_LANES doesn't need a perm indice.  */
-	      && STMT_VINFO_MEMORY_ACCESS_TYPE (stmt_info)
-		   != VMAT_LOAD_STORE_LANES)
+	  stmt_info = vect_stmt_to_vectorize (stmt_info);
+	  slp_tree *node = vinfo_slp_map.get (stmt_info);
+	  if (!node)
+	    continue;
+	  enum stmt_vec_info_type type = SLP_TREE_TYPE (*node);
+	  if (need_additional_vector_vars_p (stmt_info, *node))
 	    {
 	      /* For non-adjacent load/store STMT, we will potentially
 		 convert it into:
 
 		   1. MASK_LEN_GATHER_LOAD (..., perm indice).
-		   2. Continguous load/store + VEC_PERM (..., perm indice)
+		   2. Contiguous load/store + VEC_PERM (..., perm indice)
 
 		We will be likely using one more vector variable.  */
 	      unsigned int max_point
@@ -794,56 +869,37 @@ update_local_live_ranges (
     }
 }
 
-/* Compute the maximum live V_REGS.  */
-static bool
-has_unexpected_spills_p (loop_vec_info loop_vinfo)
+/* Helper to compute live ranges, modes, and LMUL.  */
+void
+costs::compute_live_ranges_and_lmul (loop_vec_info loop_vinfo,
+  hash_map<basic_block, vec<stmt_point>> &program_points_per_bb,
+  hash_map<basic_block, hash_map<tree, pair>> &live_ranges_per_bb,
+  machine_mode &biggest_mode, machine_mode &smallest_mode, int &lmul)
 {
-  /* Compute local program points.
-     It's a fast and effective computation.  */
-  hash_map<basic_block, vec<stmt_point>> program_points_per_bb;
   compute_local_program_points (loop_vinfo, program_points_per_bb);
 
-  /* Compute local live ranges.  */
-  hash_map<basic_block, hash_map<tree, pair>> live_ranges_per_bb;
-  machine_mode biggest_mode
-    = compute_local_live_ranges (loop_vinfo, program_points_per_bb,
-				 live_ranges_per_bb);
+  smallest_mode = TImode;
+  biggest_mode = compute_local_live_ranges (loop_vinfo, program_points_per_bb,
+					    live_ranges_per_bb, &smallest_mode);
 
-  /* Update live ranges according to PHI.  */
   update_local_live_ranges (loop_vinfo, program_points_per_bb,
 			    live_ranges_per_bb, &biggest_mode);
 
-  int lmul = compute_estimated_lmul (loop_vinfo, biggest_mode);
+  if (rvv_max_lmul == RVV_CONV_DYNAMIC)
+    lmul = compute_lmul_from_conversion_ratio (biggest_mode, smallest_mode);
+  else
+    lmul = compute_estimated_lmul (loop_vinfo, biggest_mode);
+
   gcc_assert (lmul <= RVV_M8);
-  /* TODO: We calculate the maximum live vars base on current STMTS
-     sequence.  We can support live range shrink if it can give us
-     big improvement in the future.  */
-  if (lmul > RVV_M1)
-    {
-      if (!live_ranges_per_bb.is_empty ())
-	{
-	  unsigned int max_nregs = 0;
-	  for (hash_map<basic_block, hash_map<tree, pair>>::iterator iter
-	       = live_ranges_per_bb.begin ();
-	       iter != live_ranges_per_bb.end (); ++iter)
-	    {
-	      basic_block bb = (*iter).first;
-	      unsigned int max_point
-		= (*program_points_per_bb.get (bb)).length () + 1;
-	      if ((*iter).second.is_empty ())
-		continue;
-	      /* We prefer larger LMUL unless it causes register spillings. */
-	      unsigned int nregs
-		= max_number_of_live_regs (loop_vinfo, bb, (*iter).second,
-					   max_point, biggest_mode, lmul);
-	      if (nregs > max_nregs)
-		max_nregs = nregs;
-	    }
-	  live_ranges_per_bb.empty ();
-	  if (max_nregs > V_REG_NUM)
-	    return true;
-	}
-    }
+}
+
+/* Helper to clean up live range data structures.  */
+void
+costs::cleanup_live_range_data (hash_map<basic_block, vec<stmt_point>>
+				&program_points_per_bb,
+				hash_map<basic_block, hash_map<tree, pair>>
+				&live_ranges_per_bb)
+{
   if (!program_points_per_bb.is_empty ())
     {
       for (hash_map<basic_block, vec<stmt_point>>::iterator iter
@@ -856,7 +912,72 @@ has_unexpected_spills_p (loop_vec_info loop_vinfo)
 	}
       program_points_per_bb.empty ();
     }
-  return false;
+  live_ranges_per_bb.empty ();
+}
+
+/* Compute LMUL for RVV_CONV_DYNAMIC mode based on conversion ratio.  */
+void
+costs::compute_conversion_dynamic_lmul (loop_vec_info loop_vinfo)
+{
+  hash_map<basic_block, vec<stmt_point>> program_points_per_bb;
+  hash_map<basic_block, hash_map<tree, pair>> live_ranges_per_bb;
+  machine_mode biggest_mode, smallest_mode;
+  int lmul;
+
+  compute_live_ranges_and_lmul (loop_vinfo, program_points_per_bb,
+				live_ranges_per_bb, biggest_mode,
+				smallest_mode, lmul);
+
+  /* Store the computed LMUL and biggest mode for later comparison
+     in cost model.  */
+  m_computed_lmul_from_conv = lmul;
+  m_biggest_mode_for_conv = biggest_mode;
+
+  cleanup_live_range_data (program_points_per_bb, live_ranges_per_bb);
+}
+
+/* Compute the maximum live V_REGS and check for unexpected spills.  */
+bool
+costs::has_unexpected_spills_p (loop_vec_info loop_vinfo)
+{
+  hash_map<basic_block, vec<stmt_point>> program_points_per_bb;
+  hash_map<basic_block, hash_map<tree, pair>> live_ranges_per_bb;
+  machine_mode biggest_mode, smallest_mode;
+  int lmul;
+
+  compute_live_ranges_and_lmul (loop_vinfo, program_points_per_bb,
+				live_ranges_per_bb, biggest_mode,
+				smallest_mode, lmul);
+
+  /* TODO: We calculate the maximum live vars base on current STMTS
+     sequence.  We can support live range shrink if it can give us
+     big improvement in the future.  */
+  bool has_spills = false;
+  if (lmul > RVV_M1 && !live_ranges_per_bb.is_empty ())
+    {
+      unsigned int max_nregs = 0;
+      for (hash_map<basic_block, hash_map<tree, pair>>::iterator iter
+	   = live_ranges_per_bb.begin ();
+	   iter != live_ranges_per_bb.end (); ++iter)
+	{
+	  basic_block bb = (*iter).first;
+	  unsigned int max_point
+	    = (*program_points_per_bb.get (bb)).length () + 1;
+	  if ((*iter).second.is_empty ())
+	    continue;
+	  /* We prefer larger LMUL unless it causes register spillings.  */
+	  unsigned int nregs
+	    = max_number_of_live_regs (loop_vinfo, bb, (*iter).second,
+				       max_point, biggest_mode, lmul);
+	  if (nregs > max_nregs)
+	    max_nregs = nregs;
+	}
+      if (max_nregs > V_REG_NUM)
+	has_spills = true;
+    }
+
+  cleanup_live_range_data (program_points_per_bb, live_ranges_per_bb);
+  return has_spills;
 }
 
 costs::costs (vec_info *vinfo, bool costing_for_scalar)
@@ -864,7 +985,7 @@ costs::costs (vec_info *vinfo, bool costing_for_scalar)
 {
   if (costing_for_scalar)
     m_cost_type = SCALAR_COST;
-  else if (riscv_v_ext_vector_mode_p (vinfo->vector_mode))
+  else if (riscv_vla_mode_p (vinfo->vector_mode))
     m_cost_type = VLA_VECTOR_COST;
   else
     m_cost_type = VLS_VECTOR_COST;
@@ -878,12 +999,16 @@ costs::analyze_loop_vinfo (loop_vec_info loop_vinfo)
   /* Detect whether we're vectorizing for VLA and should apply the unrolling
      heuristic described above m_unrolled_vls_niters.  */
   record_potential_vls_unrolling (loop_vinfo);
+}
 
+void
+costs::record_lmul_spills (loop_vec_info loop_vinfo)
+{
   /* Detect whether the LOOP has unexpected spills.  */
   record_potential_unexpected_spills (loop_vinfo);
 }
 
-/* Analyze the vectorized program stataments and use dynamic LMUL
+/* Analyze the vectorized program statements and use dynamic LMUL
    heuristic to detect whether the loop has unexpected spills.  */
 void
 costs::record_potential_unexpected_spills (loop_vec_info loop_vinfo)
@@ -902,6 +1027,8 @@ costs::record_potential_unexpected_spills (loop_vec_info loop_vinfo)
       if (!post_dom_available_p)
 	free_dominance_info (CDI_POST_DOMINATORS);
     }
+  else if (rvv_max_lmul == RVV_CONV_DYNAMIC)
+    compute_conversion_dynamic_lmul (loop_vinfo);
 }
 
 /* Decide whether to use the unrolling heuristic described above
@@ -998,6 +1125,50 @@ costs::better_main_loop_than_p (const vector_costs *uncast_other) const
 	  return other_prefer_unrolled;
 	}
     }
+  else if (rvv_max_lmul == RVV_CONV_DYNAMIC)
+    {
+      if (this->m_computed_lmul_from_conv > 0
+	  && other->m_computed_lmul_from_conv > 0
+	  && this->m_biggest_mode_for_conv != VOIDmode)
+	{
+	  int this_vf = vect_vf_for_cost (this_loop_vinfo);
+	  int other_vf = vect_vf_for_cost (other_loop_vinfo);
+
+	  /* Get element size from the biggest mode.  */
+	  unsigned int element_bits
+	    = GET_MODE_BITSIZE (this->m_biggest_mode_for_conv).to_constant ();
+
+	  /* Estimate LMUL from VF * element_size / MIN_VLEN.  */
+	  int this_lmul = (this_vf * element_bits) / TARGET_MIN_VLEN;
+	  int other_lmul = (other_vf * element_bits) / TARGET_MIN_VLEN;
+
+	  /* Clamp to valid LMUL range.  */
+	  this_lmul = MAX (1, MIN (this_lmul, 8));
+	  other_lmul = MAX (1, MIN (other_lmul, 8));
+
+	  int target_lmul = this->m_computed_lmul_from_conv;
+
+	  /* Prefer the LMUL that exactly matches our computed ratio.  */
+	  if (this_lmul == target_lmul && other_lmul != target_lmul)
+	    {
+	      if (dump_enabled_p ())
+		dump_printf_loc (MSG_NOTE, vect_location,
+				 "Preferring LMUL=%d loop because it matches"
+				 " conversion ratio (other LMUL=%d)\n",
+				 this_lmul, other_lmul);
+	      return true;
+	    }
+	  else if (this_lmul != target_lmul && other_lmul == target_lmul)
+	    {
+	      if (dump_enabled_p ())
+		dump_printf_loc (MSG_NOTE, vect_location,
+				 "Preferring other LMUL=%d loop because it"
+				 " matches conversion ratio"
+				 " (this LMUL=%d)\n", other_lmul, this_lmul);
+	      return false;
+	    }
+	}
+    }
   else if (rvv_max_lmul == RVV_DYNAMIC)
     {
       if (other->m_has_unexpected_spills_p)
@@ -1008,7 +1179,7 @@ costs::better_main_loop_than_p (const vector_costs *uncast_other) const
 			     " it has unexpected spills\n");
 	  return true;
 	}
-      else if (riscv_v_ext_vector_mode_p (other_loop_vinfo->vector_mode))
+      else if (riscv_vla_mode_p (other_loop_vinfo->vector_mode))
 	{
 	  if (LOOP_VINFO_NITERS_KNOWN_P (other_loop_vinfo))
 	    {
@@ -1045,6 +1216,25 @@ costs::better_main_loop_than_p (const vector_costs *uncast_other) const
   return vector_costs::better_main_loop_than_p (other);
 }
 
+/* Returns the group size i.e. the number of vectors to be loaded by a
+   segmented load/store instruction.  Return 0 if it is no segmented
+   load/store.  */
+static int
+segment_loadstore_group_size (enum vect_cost_for_stmt kind,
+			      stmt_vec_info stmt_info, slp_tree node)
+{
+  if (stmt_info
+      && (kind == vector_load || kind == vector_store)
+      && STMT_VINFO_DATA_REF (stmt_info))
+    {
+      stmt_info = DR_GROUP_FIRST_ELEMENT (stmt_info);
+      if (stmt_info
+	  && SLP_TREE_MEMORY_ACCESS_TYPE (node) == VMAT_LOAD_STORE_LANES)
+	return DR_GROUP_SIZE (stmt_info);
+    }
+  return 0;
+}
+
 /* Adjust vectorization cost after calling riscv_builtin_vectorization_cost.
    For some statement, we would like to further fine-grain tweak the cost on
    top of riscv_builtin_vectorization_cost handling which doesn't have any
@@ -1053,71 +1243,132 @@ costs::better_main_loop_than_p (const vector_costs *uncast_other) const
 unsigned
 costs::adjust_stmt_cost (enum vect_cost_for_stmt kind, loop_vec_info loop,
 			 stmt_vec_info stmt_info,
-			 slp_tree, tree vectype, int stmt_cost)
+			 slp_tree node, tree vectype, int stmt_cost)
 {
   const cpu_vector_cost *costs = get_vector_costs ();
   switch (kind)
     {
     case scalar_to_vec:
-      stmt_cost += (FLOAT_TYPE_P (vectype) ? costs->regmove->FR2VR
-		    : costs->regmove->GR2VR);
+      stmt_cost
+	+= (FLOAT_TYPE_P (vectype) ? get_fr2vr_cost () : get_gr2vr_cost ());
       break;
     case vec_to_scalar:
-      stmt_cost += (FLOAT_TYPE_P (vectype) ? costs->regmove->VR2FR
-		    : costs->regmove->VR2GR);
+      stmt_cost
+	+= (FLOAT_TYPE_P (vectype) ? get_vr2fr_cost () : get_vr2gr_cost ());
       break;
     case vector_load:
     case vector_store:
 	{
-	  /* Unit-stride vector loads and stores do not have offset addressing
-	     as opposed to scalar loads and stores.
-	     If the address depends on a variable we need an additional
-	     add/sub for each load/store in the worst case.  */
-	  if (stmt_info && stmt_info->stmt)
+	  if (stmt_info && stmt_info->stmt && STMT_VINFO_DATA_REF (stmt_info))
 	    {
-	      data_reference *dr = STMT_VINFO_DATA_REF (stmt_info);
-	      class loop *father = stmt_info->stmt->bb->loop_father;
-	      if (!loop && father && !father->inner && father->superloops)
+	      /* Segment loads and stores.  When the group size is > 1
+		 the vectorizer will add a vector load/store statement for
+		 each vector in the group.  Here we additionally add permute
+		 costs for each.  */
+	      /* TODO: Indexed and ordered/unordered cost.  */
+	      int group_size = segment_loadstore_group_size (kind, stmt_info,
+							     node);
+	      if (group_size > 1)
 		{
-		  tree ref;
-		  if (TREE_CODE (dr->ref) != MEM_REF
-		      || !(ref = TREE_OPERAND (dr->ref, 0))
-		      || TREE_CODE (ref) != SSA_NAME)
-		    break;
-
-		  if (SSA_NAME_IS_DEFAULT_DEF (ref))
-		    break;
-
-		  if (memrefs.contains ({ref, cst0}))
-		    break;
-
-		  memrefs.add ({ref, cst0});
-
-		  /* In case we have not seen REF before and the base address
-		     is a pointer operation try a bit harder.  */
-		  tree base = DR_BASE_ADDRESS (dr);
-		  if (TREE_CODE (base) == POINTER_PLUS_EXPR
-		      || TREE_CODE (base) == POINTER_DIFF_EXPR)
+		  switch (group_size)
 		    {
-		      /* Deconstruct BASE's first operand.  If it is a binary
-			 operation, i.e. a base and an "offset" store this
-			 pair.  Only increase the stmt_cost if we haven't seen
-			 it before.  */
-		      tree argp = TREE_OPERAND (base, 1);
-		      typedef std::pair<tree, tree> addr_pair;
-		      addr_pair pair;
-		      if (TREE_CODE_CLASS (TREE_CODE (argp)) == tcc_binary)
-			{
-			  tree argp0 = tree_strip_nop_conversions
-			    (TREE_OPERAND (argp, 0));
-			  tree argp1 = TREE_OPERAND (argp, 1);
-			  pair = addr_pair (argp0, argp1);
-			  if (memrefs.contains (pair))
-			    break;
+		    case 2:
+		      if (riscv_vla_mode_p (loop->vector_mode))
+			stmt_cost += costs->vla->segment_permute_2;
+		      else
+			stmt_cost += costs->vls->segment_permute_2;
+		      break;
+		    case 3:
+		      if (riscv_vla_mode_p (loop->vector_mode))
+			stmt_cost += costs->vla->segment_permute_3;
+		      else
+			stmt_cost += costs->vls->segment_permute_3;
+		      break;
+		    case 4:
+		      if (riscv_vla_mode_p (loop->vector_mode))
+			stmt_cost += costs->vla->segment_permute_4;
+		      else
+			stmt_cost += costs->vls->segment_permute_4;
+		      break;
+		    case 5:
+		      if (riscv_vla_mode_p (loop->vector_mode))
+			stmt_cost += costs->vla->segment_permute_5;
+		      else
+			stmt_cost += costs->vls->segment_permute_5;
+		      break;
+		    case 6:
+		      if (riscv_vla_mode_p (loop->vector_mode))
+			stmt_cost += costs->vla->segment_permute_6;
+		      else
+			stmt_cost += costs->vls->segment_permute_6;
+		      break;
+		    case 7:
+		      if (riscv_vla_mode_p (loop->vector_mode))
+			stmt_cost += costs->vla->segment_permute_7;
+		      else
+			stmt_cost += costs->vls->segment_permute_7;
+		      break;
+		    case 8:
+		      if (riscv_vla_mode_p (loop->vector_mode))
+			stmt_cost += costs->vla->segment_permute_8;
+		      else
+			stmt_cost += costs->vls->segment_permute_8;
+		      break;
+		    default:
+		      break;
+		    }
+		}
+	      else
+		{
+		  /* Unit-stride vector loads and stores do not have offset
+		     addressing as opposed to scalar loads and stores.
+		     If the address depends on a variable we need an additional
+		     add/sub for each load/store in the worst case.  */
+		  data_reference *dr = STMT_VINFO_DATA_REF (stmt_info);
+		  class loop *father = stmt_info->stmt->bb->loop_father;
+		  if (!loop && father && !father->inner && father->superloops)
+		    {
+		      tree ref;
+		      if (TREE_CODE (dr->ref) != MEM_REF
+			  || !(ref = TREE_OPERAND (dr->ref, 0))
+			  || TREE_CODE (ref) != SSA_NAME)
+			break;
 
-			  memrefs.add (pair);
-			  stmt_cost += builtin_vectorization_cost (scalar_stmt,
-								   NULL_TREE, 0);
+		      if (SSA_NAME_IS_DEFAULT_DEF (ref))
+			break;
+
+		      if (memrefs.contains ({ref, cst0}))
+			break;
+
+		      memrefs.add ({ref, cst0});
+
+		      /* In case we have not seen REF before and the base
+			 address is a pointer operation try a bit harder.  */
+		      tree base = DR_BASE_ADDRESS (dr);
+		      if (TREE_CODE (base) == POINTER_PLUS_EXPR
+			  || TREE_CODE (base) == POINTER_DIFF_EXPR)
+			{
+			  /* Deconstruct BASE's first operand.  If it is a
+			     binary operation, i.e. a base and an "offset"
+			     store this pair.  Only increase the stmt_cost if
+			     we haven't seen it before.  */
+			  tree argp = TREE_OPERAND (base, 1);
+			  typedef std::pair<tree, tree> addr_pair;
+			  addr_pair pair;
+			  if (TREE_CODE_CLASS (TREE_CODE (argp)) == tcc_binary)
+			    {
+			      tree argp0 = tree_strip_nop_conversions
+				(TREE_OPERAND (argp, 0));
+			      tree argp1 = TREE_OPERAND (argp, 1);
+			      pair = addr_pair (argp0, argp1);
+			      if (memrefs.contains (pair))
+				break;
+
+			      memrefs.add (pair);
+			      stmt_cost
+				+= builtin_vectorization_cost (scalar_stmt,
+							       NULL_TREE, 0);
+			    }
 			}
 		    }
 		}
@@ -1139,8 +1390,12 @@ costs::add_stmt_cost (int count, vect_cost_for_stmt kind,
   int stmt_cost
     = targetm.vectorize.builtin_vectorization_cost (kind, vectype, misalign);
 
+  if (stmt_info && node)
+    vinfo_slp_map.put (stmt_info, node);
+
   /* Do one-time initialization based on the vinfo.  */
   loop_vec_info loop_vinfo = dyn_cast<loop_vec_info> (m_vinfo);
+
   if (!m_analyzed_vinfo)
     {
       if (loop_vinfo)
@@ -1154,7 +1409,7 @@ costs::add_stmt_cost (int count, vect_cost_for_stmt kind,
     {
       /* If we're applying the VLA vs. VLS unrolling heuristic,
 	 estimate the number of statements in the unrolled VLS
-	 loop.  For simplicitly, we assume that one iteration of the
+	 loop.  For simplicity, we assume that one iteration of the
 	 VLS loop would need the same number of statements
 	 as one iteration of the VLA loop.  */
       if (where == vect_body && m_unrolled_vls_niters)
@@ -1226,6 +1481,8 @@ costs::finish_cost (const vector_costs *scalar_costs)
 {
   if (loop_vec_info loop_vinfo = dyn_cast<loop_vec_info> (m_vinfo))
     {
+      record_lmul_spills (loop_vinfo);
+
       adjust_vect_cost_per_loop (loop_vinfo);
     }
   vector_costs::finish_cost (scalar_costs);

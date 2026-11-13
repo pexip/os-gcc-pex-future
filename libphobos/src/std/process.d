@@ -127,49 +127,26 @@ else version (WatchOS)
     version = iOSDerived;
 }
 
-// When the DMC runtime is used, we have to use some custom functions
-// to convert between Windows file handles and FILE*s.
-version (Win32) version (CRuntime_DigitalMars) version = DMC_RUNTIME;
-
 
 // Some of the following should be moved to druntime.
 private
 {
     // Microsoft Visual C Runtime (MSVCRT) declarations.
-    version (Windows)
+    version (CRuntime_Microsoft)
     {
-        version (DMC_RUNTIME) { } else
+        import core.stdc.stdint;
+        enum
         {
-            import core.stdc.stdint;
-            enum
-            {
-                STDIN_FILENO  = 0,
-                STDOUT_FILENO = 1,
-                STDERR_FILENO = 2,
-            }
+            STDIN_FILENO  = 0,
+            STDOUT_FILENO = 1,
+            STDERR_FILENO = 2,
         }
     }
 
     // POSIX API declarations.
     version (Posix)
     {
-        version (Darwin)
-        {
-            extern(C) char*** _NSGetEnviron() nothrow;
-            const(char**) getEnvironPtr() @trusted
-            {
-                return *_NSGetEnviron;
-            }
-        }
-        else
-        {
-            // Made available by the C runtime:
-            extern(C) extern __gshared const char** environ;
-            const(char**) getEnvironPtr() @trusted
-            {
-                return environ;
-            }
-        }
+        import core.sys.posix.unistd : getEnvironPtr = environ;
 
         @system unittest
         {
@@ -350,6 +327,8 @@ static:
     */
     bool opBinaryRight(string op : "in")(scope const(char)[] name) @trusted
     {
+        if (name is null)
+            return false;
         version (Posix)
             return core.sys.posix.stdlib.getenv(name.tempCString()) !is null;
         else version (Windows)
@@ -451,6 +430,10 @@ private:
     // doesn't exist.
     void getImpl(scope const(char)[] name, scope void delegate(const(OSChar)[]) @safe sink) @trusted
     {
+        // fix issue https://issues.dlang.org/show_bug.cgi?id=24549
+        if (name is null)
+            return sink(null);
+
         version (Windows)
         {
             // first we ask windows how long the environment variable is,
@@ -598,6 +581,15 @@ private:
     // Setting null must have the same effect as remove
     environment["std_process"] = null;
     assert("std_process" !in environment);
+}
+
+// https://issues.dlang.org/show_bug.cgi?id=24549
+@safe unittest
+{
+    import std.exception : assertThrown;
+    assert(environment.get(null) is null);
+    assertThrown(environment[null]);
+    assert(!(null in environment));
 }
 
 // =============================================================================
@@ -1204,8 +1196,16 @@ private Pid spawnProcessPosix(scope const(char[])[] args,
                 }
             }
 
+            if (config.preExecDelegate !is null)
+            {
+                if (config.preExecDelegate() != true)
+                {
+                    abortOnError(forkPipeOut, InternalError.preExec, .errno);
+                }
+            }
+
             // Execute program.
-            core.sys.posix.unistd.execve(argz[0], argz.ptr, envz);
+            core.sys.posix.unistd.execve(argz[0], argz.ptr, envz is null ? getEnvironPtr : envz);
 
             // If execution fails, exit as quickly as possible.
             abortOnError(forkPipeOut, InternalError.exec, .errno);
@@ -1247,8 +1247,19 @@ private Pid spawnProcessPosix(scope const(char[])[] args,
     else
     {
         closePipeWriteEnds();
+
+        T retryInterrupted(T)(scope T delegate() syscall)
+        {
+            import core.stdc.errno : errno, EINTR;
+            T result;
+            do
+                result = syscall();
+            while (result == -1 && .errno == EINTR);
+            return result;
+        }
+
         auto status = InternalError.noerror;
-        auto readExecResult = core.sys.posix.unistd.read(forkPipe[0], &status, status.sizeof);
+        auto readExecResult = retryInterrupted(() => core.sys.posix.unistd.read(forkPipe[0], &status, status.sizeof));
         // Save error number just in case if subsequent "waitpid" fails and overrides errno
         immutable lastError = .errno;
 
@@ -1257,7 +1268,7 @@ private Pid spawnProcessPosix(scope const(char[])[] args,
             // Forked child exits right after creating second fork. So it should be safe to wait here.
             import core.sys.posix.sys.wait : waitpid;
             int waitResult;
-            waitpid(id, &waitResult, 0);
+            retryInterrupted(() => waitpid(id, &waitResult, 0));
         }
 
         if (readExecResult == -1)
@@ -1267,7 +1278,7 @@ private Pid spawnProcessPosix(scope const(char[])[] args,
         if (status != InternalError.noerror)
         {
             int error;
-            readExecResult = read(forkPipe[0], &error, error.sizeof);
+            readExecResult = retryInterrupted(() => read(forkPipe[0], &error, error.sizeof));
             string errorMsg;
             final switch (status)
             {
@@ -1289,7 +1300,7 @@ private Pid spawnProcessPosix(scope const(char[])[] args,
                     errorMsg = "Failed to allocate memory";
                     break;
                 case InternalError.preExec:
-                    errorMsg = "Failed to execute preExecFunction";
+                    errorMsg = "Failed to execute preExecFunction or preExecDelegate";
                     break;
                 case InternalError.closefds_dup2:
                     assert(!(config.flags & Config.Flags.inheritFDs));
@@ -1375,6 +1386,29 @@ version (Posix)
 
     auto received = receiveTimeout(3.seconds, (int) {});
     assert(received);
+}
+
+version (Posix)
+@system unittest
+{
+    __gshared int j;
+    foreach (i; 0 .. 3)
+    {
+        auto config = Config(
+            preExecFunction: function() @trusted {
+                j = 1;
+                return true;
+            },
+            preExecDelegate: delegate() @trusted {
+                // j should now be 1, as preExecFunction is called before
+                // preExecDelegate is.
+                _Exit(i + j);
+                return true;
+            },
+        );
+        auto pid = spawnProcess(["false"], config: config);
+        assert(wait(pid) == i + 1);
+    }
 }
 
 /*
@@ -1488,7 +1522,7 @@ private Pid spawnProcessWin(scope const(char)[] commandLine,
 // on the form "name=value", optionally adding those of the current process'
 // environment strings that are not present in childEnv.  If the parent's
 // environment should be inherited without modification, this function
-// returns environ directly.
+// returns null.
 version (Posix)
 private const(char*)* createEnv(const string[string] childEnv,
                                 bool mergeWithParentEnv)
@@ -1498,7 +1532,7 @@ private const(char*)* createEnv(const string[string] childEnv,
     auto environ = getEnvironPtr;
     if (mergeWithParentEnv)
     {
-        if (childEnv.length == 0) return environ;
+        if (childEnv.length == 0) return null;
         while (environ[parentEnvLength] != null) ++parentEnvLength;
     }
 
@@ -1528,16 +1562,7 @@ version (Posix) @system unittest
     assert(e1 != null && *e1 == null);
 
     auto e2 = createEnv(null, true);
-    assert(e2 != null);
-    int i = 0;
-    auto environ = getEnvironPtr;
-    for (; environ[i] != null; ++i)
-    {
-        assert(e2[i] != null);
-        import core.stdc.string : strcmp;
-        assert(strcmp(e2[i], environ[i]) == 0);
-    }
-    assert(e2[i] == null);
+    assert(e2 == null);
 
     auto e3 = createEnv(["foo" : "bar", "hello" : "world"], false);
     assert(e3 != null && e3[0] != null && e3[1] != null && e3[2] == null);
@@ -2292,13 +2317,30 @@ struct Config
             Please note that the code in this function must only use
             async-signal-safe functions.)
 
+        If $(LREF preExecDelegate) is also set, it is called last.
+
         On Windows, this member is not available.
         */
         bool function() nothrow @nogc @safe preExecFunction;
+
+        /**
+        A delegate that is called before `exec` in $(LREF spawnProcess).
+        It returns `true` if succeeded and otherwise returns `false`.
+
+        $(RED Warning:
+            Please note that the code in this function must only use
+            async-signal-safe functions.)
+
+        If $(LREF preExecFunction) is also set, it is called first.
+
+        On Windows, this member is not available.
+        */
+        bool delegate() nothrow @nogc @safe preExecDelegate;
     }
     else version (Posix)
     {
         bool function() nothrow @nogc @safe preExecFunction;
+        bool delegate() nothrow @nogc @safe preExecDelegate;
     }
 }
 
@@ -2759,6 +2801,10 @@ void kill(Pid pid, int codeOrSignal)
     else version (Posix)
     {
         import core.sys.posix.signal : kill;
+        if (pid.osHandle == Pid.invalid)
+            throw new ProcessException("Pid is invalid");
+        if (pid.osHandle == Pid.terminated)
+            throw new ProcessException("Pid is already terminated");
         if (kill(pid.osHandle, codeOrSignal) == -1)
             throw ProcessException.newFromErrno();
     }
@@ -2800,7 +2846,7 @@ void kill(Pid pid, int codeOrSignal)
     do { s = tryWait(pid); } while (!s.terminated);
     version (Windows)    assert(s.status == 123);
     else version (Posix) assert(s.status == -SIGKILL);
-    assertThrown!ProcessException(kill(pid));
+    assertThrown!ProcessException(kill(pid)); // Already terminated
 }
 
 @system unittest // wait() and kill() detached process
@@ -4280,14 +4326,14 @@ version (Posix)
     import core.sys.posix.stdlib;
 }
 
-private void toAStringz(in string[] a, const(char)**az)
+private const(char)** toAStringz(in string[] a)
 {
     import std.string : toStringz;
-    foreach (string s; a)
-    {
-        *az++ = toStringz(s);
-    }
-    *az = null;
+    auto p = (new const(char)*[1 + a.length]).ptr;
+    foreach (i, string s; a)
+        p[i] = toStringz(s);
+    p[a.length] = null;
+    return p;
 }
 
 
@@ -4417,45 +4463,17 @@ extern(C)
 
 private int execv_(in string pathname, in string[] argv)
 {
-    import core.exception : OutOfMemoryError;
-    import std.exception : enforce;
-    auto argv_ = cast(const(char)**)core.stdc.stdlib.malloc((char*).sizeof * (1 + argv.length));
-    enforce!OutOfMemoryError(argv_ !is null, "Out of memory in std.process.");
-    scope(exit) core.stdc.stdlib.free(argv_);
-
-    toAStringz(argv, argv_);
-
-    return execv(pathname.tempCString(), argv_);
+    return execv(pathname.tempCString(), toAStringz(argv));
 }
 
 private int execve_(in string pathname, in string[] argv, in string[] envp)
 {
-    import core.exception : OutOfMemoryError;
-    import std.exception : enforce;
-    auto argv_ = cast(const(char)**)core.stdc.stdlib.malloc((char*).sizeof * (1 + argv.length));
-    enforce!OutOfMemoryError(argv_ !is null, "Out of memory in std.process.");
-    scope(exit) core.stdc.stdlib.free(argv_);
-    auto envp_ = cast(const(char)**)core.stdc.stdlib.malloc((char*).sizeof * (1 + envp.length));
-    enforce!OutOfMemoryError(envp_ !is null, "Out of memory in std.process.");
-    scope(exit) core.stdc.stdlib.free(envp_);
-
-    toAStringz(argv, argv_);
-    toAStringz(envp, envp_);
-
-    return execve(pathname.tempCString(), argv_, envp_);
+    return execve(pathname.tempCString(), toAStringz(argv), toAStringz(envp));
 }
 
 private int execvp_(in string pathname, in string[] argv)
 {
-    import core.exception : OutOfMemoryError;
-    import std.exception : enforce;
-    auto argv_ = cast(const(char)**)core.stdc.stdlib.malloc((char*).sizeof * (1 + argv.length));
-    enforce!OutOfMemoryError(argv_ !is null, "Out of memory in std.process.");
-    scope(exit) core.stdc.stdlib.free(argv_);
-
-    toAStringz(argv, argv_);
-
-    return execvp(pathname.tempCString(), argv_);
+    return execvp(pathname.tempCString(), toAStringz(argv));
 }
 
 private int execvpe_(in string pathname, in string[] argv, in string[] envp)
@@ -4497,19 +4515,7 @@ version (Posix)
 }
 else version (Windows)
 {
-    import core.exception : OutOfMemoryError;
-    import std.exception : enforce;
-    auto argv_ = cast(const(char)**)core.stdc.stdlib.malloc((char*).sizeof * (1 + argv.length));
-    enforce!OutOfMemoryError(argv_ !is null, "Out of memory in std.process.");
-    scope(exit) core.stdc.stdlib.free(argv_);
-    auto envp_ = cast(const(char)**)core.stdc.stdlib.malloc((char*).sizeof * (1 + envp.length));
-    enforce!OutOfMemoryError(envp_ !is null, "Out of memory in std.process.");
-    scope(exit) core.stdc.stdlib.free(envp_);
-
-    toAStringz(argv, argv_);
-    toAStringz(envp, envp_);
-
-    return execvpe(pathname.tempCString(), argv_, envp_);
+    return execvpe(pathname.tempCString(), toAStringz(argv), toAStringz(envp));
 }
 else
 {
@@ -4575,11 +4581,12 @@ else version (Posix)
         if (childpid == 0)
         {
             // Trusted because args and all entries are always zero-terminated
-            (() @trusted =>
-                core.sys.posix.unistd.execvp(args[0], &args[0]) ||
-                perror(args[0]) // failed to execute
-            )();
-            return;
+            (() @trusted {
+                core.sys.posix.unistd.execvp(args[0], &args[0]);
+                perror(args[0]);
+                core.sys.posix.unistd._exit(1);
+            })();
+            assert(0, "Child failed to exec");
         }
         if (browser)
             // Trusted because it's allocated via strdup above

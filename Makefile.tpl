@@ -6,19 +6,19 @@ in
 #
 # Makefile for directory with subdirs to build.
 #   Copyright (C) 1990, 1991, 1992, 1993, 1994, 1995, 1996, 1997, 1998,
-#   1999, 2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2011, 2023
+#   1999, 2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2011
 #   Free Software Foundation
 #
 # This file is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation; either version 3 of the License, or
 # (at your option) any later version.
-# 
+#
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-# 
+#
 # You should have received a copy of the GNU General Public License
 # along with this program; see the file COPYING3.  If not see
 # <http://www.gnu.org/licenses/>.
@@ -41,6 +41,7 @@ build_alias=@build_noncanonical@
 build_vendor=@build_vendor@
 build_os=@build_os@
 build=@build@
+cpu_type=@cpu_type@
 host_alias=@host_noncanonical@
 host_vendor=@host_vendor@
 host_os=@host_os@
@@ -146,8 +147,7 @@ BASE_EXPORTS = \
 	M4="$(M4)"; export M4; \
 	SED="$(SED)"; export SED; \
 	AWK="$(AWK)"; export AWK; \
-	MAKEINFO="$(MAKEINFO)"; export MAKEINFO; \
-	GUILE="$(GUILE)"; export GUILE;
+	MAKEINFO="$(MAKEINFO)"; export MAKEINFO;
 
 # This is the list of variables to export in the environment when
 # configuring subdirectories for the build system.
@@ -163,6 +163,8 @@ BUILD_EXPORTS = \
 	CXX="$(CXX_FOR_BUILD)"; export CXX; \
 	CXXFLAGS="$(CXXFLAGS_FOR_BUILD)"; export CXXFLAGS; \
 	GFORTRAN="$(GFORTRAN_FOR_BUILD)"; export GFORTRAN; \
+	A68="$(A68_FOR_BUILD)"; export A68; \
+	A68FLAGS="$(A68FLAGS_FOR_BUILD)"; export A68FLAGS; \
 	GOC="$(GOC_FOR_BUILD)"; export GOC; \
 	GOCFLAGS="$(GOCFLAGS_FOR_BUILD)"; export GOCFLAGS; \
 	GDC="$(GDC_FOR_BUILD)"; export GDC; \
@@ -200,14 +202,17 @@ HOST_EXPORTS = \
 	$(BASE_EXPORTS) \
 	CC="$(CC)"; export CC; \
 	ADA_CFLAGS="$(ADA_CFLAGS)"; export ADA_CFLAGS; \
+	CRAB1_LIBS="$(CRAB1_LIBS)"; export CRAB1_LIBS; \
 	CFLAGS="$(CFLAGS)"; export CFLAGS; \
 	CONFIG_SHELL="$(SHELL)"; export CONFIG_SHELL; \
 	CXX="$(CXX)"; export CXX; \
 	CXXFLAGS="$(CXXFLAGS)"; export CXXFLAGS; \
 	GFORTRAN="$(GFORTRAN)"; export GFORTRAN; \
+	A68="$(A68)"; export A68; \
 	GOC="$(GOC)"; export GOC; \
 	GDC="$(GDC)"; export GDC; \
 	GM2="$(GM2)"; export GM2; \
+	GNATMAKE_FOR_BUILD="$(GNATMAKE_FOR_BUILD)"; export GNATMAKE_FOR_BUILD; \
 	AR="$(AR)"; export AR; \
 	AS="$(AS)"; export AS; \
 	CC_FOR_BUILD="$(CC_FOR_BUILD)"; export CC_FOR_BUILD; \
@@ -244,6 +249,7 @@ HOST_EXPORTS = \
 	GMPINC="$(HOST_GMPINC)"; export GMPINC; \
 	ISLLIBS="$(HOST_ISLLIBS)"; export ISLLIBS; \
 	ISLINC="$(HOST_ISLINC)"; export ISLINC; \
+	TARGET_CONFIGDIRS="$(TARGET_CONFIGDIRS)"; export TARGET_CONFIGDIRS; \
 	XGCC_FLAGS_FOR_TARGET="$(XGCC_FLAGS_FOR_TARGET)"; export XGCC_FLAGS_FOR_TARGET; \
 @if gcc-bootstrap
 	$(RPATH_ENVVAR)=`echo "$(TARGET_LIB_PATH)$$$(RPATH_ENVVAR)" | sed 's,::*,:,g;s,^:*,,;s,:*$$,,'`; export $(RPATH_ENVVAR); \
@@ -278,6 +284,11 @@ POSTSTAGE1_HOST_EXPORTS = \
 	CC_FOR_BUILD="$$CC"; export CC_FOR_BUILD; \
 	$(POSTSTAGE1_CXX_EXPORT) \
 	$(LTO_EXPORTS) \
+	A68="$$r/$(HOST_SUBDIR)/prev-gcc/ga68$(exeext) -B$$r/$(HOST_SUBDIR)/prev-gcc/ \
+	  -B$(build_tooldir)/bin/ $(A68FLAGS_FOR_TARGET) \
+	  -B$$r/prev-$(TARGET_SUBDIR)/libga68/.libs"; \
+	export A68; \
+	A68_FOR_BUILD="$$A68"; export A68_FOR_BUILD; \
 	GDC="$$r/$(HOST_SUBDIR)/prev-gcc/gdc$(exeext) -B$$r/$(HOST_SUBDIR)/prev-gcc/ \
 	  -B$(build_tooldir)/bin/ $(GDCFLAGS_FOR_TARGET) \
 	  -B$$r/prev-$(TARGET_SUBDIR)/libphobos/libdruntime/gcc \
@@ -310,9 +321,11 @@ BASE_TARGET_EXPORTS = \
 	CPPFLAGS="$(CPPFLAGS_FOR_TARGET)"; export CPPFLAGS; \
 	CXXFLAGS="$(CXXFLAGS_FOR_TARGET)"; export CXXFLAGS; \
 	GFORTRAN="$(GFORTRAN_FOR_TARGET) $(XGCC_FLAGS_FOR_TARGET) $$TFLAGS"; export GFORTRAN; \
+	A68="$(A68_FOR_TARGET) $(XGCC_FLAGS_FOR_TARGET) $$TFLAGS"; export A68; \
 	GOC="$(GOC_FOR_TARGET) $(XGCC_FLAGS_FOR_TARGET) $$TFLAGS"; export GOC; \
 	GDC="$(GDC_FOR_TARGET) $(XGCC_FLAGS_FOR_TARGET) $$TFLAGS"; export GDC; \
 	GM2="$(GM2_FOR_TARGET) $(XGCC_FLAGS_FOR_TARGET) $$TFLAGS"; export GM2; \
+	GNATMAKE_FOR_BUILD="$(GNATMAKE_FOR_BUILD)"; export GNATMAKE_FOR_BUILD; \
 	DLLTOOL="$(DLLTOOL_FOR_TARGET)"; export DLLTOOL; \
 	DSYMUTIL="$(DSYMUTIL_FOR_TARGET)"; export DSYMUTIL; \
 	LD="$(COMPILER_LD_FOR_TARGET)"; export LD; \
@@ -341,6 +354,7 @@ RAW_CXX_TARGET_EXPORTS = \
 
 NORMAL_TARGET_EXPORTS = \
 	$(BASE_TARGET_EXPORTS) \
+	CXX_FOR_TARGET="$(CXX_FOR_TARGET)"; export CXX_FOR_TARGET; \
 	CXX="$(CXX_FOR_TARGET) $(XGCC_FLAGS_FOR_TARGET) $$TFLAGS"; export CXX;
 
 # Where to find GMP
@@ -378,9 +392,11 @@ CXX_FOR_BUILD = @CXX_FOR_BUILD@
 DLLTOOL_FOR_BUILD = @DLLTOOL_FOR_BUILD@
 DSYMUTIL_FOR_BUILD = @DSYMUTIL_FOR_BUILD@
 GFORTRAN_FOR_BUILD = @GFORTRAN_FOR_BUILD@
+A68_FOR_BUILD = @A68_FOR_BUILD@
 GOC_FOR_BUILD = @GOC_FOR_BUILD@
 GDC_FOR_BUILD = @GDC_FOR_BUILD@
 GM2_FOR_BUILD = @GM2_FOR_BUILD@
+GNATMAKE_FOR_BUILD = @GNATMAKE_FOR_BUILD@
 LDFLAGS_FOR_BUILD = @LDFLAGS_FOR_BUILD@
 LD_FOR_BUILD = @LD_FOR_BUILD@
 NM_FOR_BUILD = @NM_FOR_BUILD@
@@ -431,7 +447,7 @@ DLLTOOL = @DLLTOOL@
 DSYMUTIL = @DSYMUTIL@
 LD = @LD@
 LIPO = @LIPO@
-NM = @NM@
+NM = @NM@ @NM_PLUGIN_OPTION@
 OBJDUMP = @OBJDUMP@
 OTOOL = @OTOOL@
 RANLIB = @RANLIB@ @RANLIB_PLUGIN_OPTION@
@@ -440,6 +456,7 @@ STRIP = @STRIP@
 WINDRES = @WINDRES@
 WINDMC = @WINDMC@
 
+A68 = @A68@
 GDC = @GDC@
 GNATBIND = @GNATBIND@
 GNATMAKE = @GNATMAKE@
@@ -450,12 +467,13 @@ LIBCFLAGS = $(CFLAGS)
 CXXFLAGS = @CXXFLAGS@
 LIBCXXFLAGS = $(CXXFLAGS) -fno-implicit-templates
 GOCFLAGS = $(CFLAGS)
+A68FLAGS = @A68FLAGS@
 GDCFLAGS = @GDCFLAGS@
 GM2FLAGS = $(CFLAGS)
 
-PKG_CONFIG_PATH = @PKG_CONFIG_PATH@
+CRAB1_LIBS = @CRAB1_LIBS@
 
-GUILE = guile
+PKG_CONFIG_PATH = @PKG_CONFIG_PATH@
 
 # Pass additional PGO and LTO compiler options to the PGO build.
 BUILD_CFLAGS = $(PGO_BUILD_CFLAGS) $(PGO_BUILD_LTO_CFLAGS)
@@ -530,18 +548,25 @@ STAGE[+id+]_CONFIGURE_FLAGS = $(STAGE_CONFIGURE_FLAGS)
 STAGE1_CFLAGS = @stage1_cflags@
 STAGE1_CHECKING = @stage1_checking@
 STAGE1_LANGUAGES = @stage1_languages@
-# * We force-disable intermodule optimizations, even if
-#   --enable-intermodule was passed, since the installed compiler
-#   probably can't handle them.  Luckily, autoconf always respects
-#   the last argument when conflicting --enable arguments are passed.
-# * Likewise, we force-disable coverage flags, since the installed
-#   compiler probably has never heard of them.
+# * We force-disable coverage flags, since the installed compiler probably
+#   has never heard of them. Luckily, autoconf always respects the last
+#   argument when conflicting --enable arguments are passed.
 # * We also disable -Wformat, since older GCCs don't understand newer %s.
-STAGE1_CONFIGURE_FLAGS = --disable-intermodule $(STAGE1_CHECKING) \
+STAGE1_CONFIGURE_FLAGS = $(STAGE1_CHECKING) \
 	  --disable-coverage --enable-languages="$(STAGE1_LANGUAGES)" \
 	  --disable-build-format-warnings
 
+@if target-libstdc++-v3-bootstrap
+STAGE1_CONFIGURE_FLAGS += --disable-libstdcxx-pch
+STAGE2_CONFIGURE_FLAGS += --disable-libstdcxx-pch
+STAGEprofile_CONFIGURE_FLAGS += --disable-libstdcxx-pch
+@endif target-libstdc++-v3-bootstrap
+
 @if target-libphobos-bootstrap
+# Defaults for each stage if we're bootstrapping D.
+[+ FOR bootstrap-stage +]
+STAGE[+id+]_GDCFLAGS = $(GDCFLAGS)
+[+ ENDFOR bootstrap-stage +]
 STAGE1_CONFIGURE_FLAGS += --with-libphobos-druntime-only
 STAGE2_CONFIGURE_FLAGS += --with-libphobos-druntime-only
 @endif target-libphobos-bootstrap
@@ -555,6 +580,10 @@ STAGE2_CFLAGS += -fno-checking
 STAGE2_TFLAGS += -fno-checking
 STAGE3_CFLAGS += -fchecking=1
 STAGE3_TFLAGS += -fchecking=1
+@if target-libphobos-bootstrap
+STAGE2_GDCFLAGS += -fno-checking
+STAGE3_GDCFLAGS += -fchecking=1
+@endif target-libphobos-bootstrap
 
 STAGEprofile_CFLAGS = $(STAGE2_CFLAGS) -fprofile-generate
 STAGEprofile_TFLAGS = $(STAGE2_TFLAGS)
@@ -585,7 +614,7 @@ do-compare3 = $(do-compare)
 # Programs producing files for the TARGET machine
 # -----------------------------------------------
 
-AR_FOR_TARGET=@AR_FOR_TARGET@
+AR_FOR_TARGET=@AR_FOR_TARGET@ @AR_PLUGIN_OPTION_FOR_TARGET@
 AS_FOR_TARGET=@AS_FOR_TARGET@
 CC_FOR_TARGET=$(STAGE_CC_WRAPPER) @CC_FOR_TARGET@
 
@@ -598,6 +627,7 @@ CXX_FOR_TARGET=$(STAGE_CC_WRAPPER) @CXX_FOR_TARGET@
 RAW_CXX_FOR_TARGET=$(STAGE_CC_WRAPPER) @RAW_CXX_FOR_TARGET@
 GFORTRAN_FOR_TARGET=$(STAGE_CC_WRAPPER) @GFORTRAN_FOR_TARGET@
 GOC_FOR_TARGET=$(STAGE_CC_WRAPPER) @GOC_FOR_TARGET@
+A68_FOR_TARGET=$(STAGE_CC_WRAPPER) @A68_FOR_TARGET@
 GDC_FOR_TARGET=$(STAGE_CC_WRAPPER) @GDC_FOR_TARGET@
 GM2_FOR_TARGET=$(STAGE_CC_WRAPPER) @GM2_FOR_TARGET@
 DLLTOOL_FOR_TARGET=@DLLTOOL_FOR_TARGET@
@@ -605,11 +635,11 @@ DSYMUTIL_FOR_TARGET=@DSYMUTIL_FOR_TARGET@
 LD_FOR_TARGET=@LD_FOR_TARGET@
 
 LIPO_FOR_TARGET=@LIPO_FOR_TARGET@
-NM_FOR_TARGET=@NM_FOR_TARGET@
+NM_FOR_TARGET=@NM_FOR_TARGET@ @NM_PLUGIN_OPTION_FOR_TARGET@
 OBJDUMP_FOR_TARGET=@OBJDUMP_FOR_TARGET@
 OBJCOPY_FOR_TARGET=@OBJCOPY_FOR_TARGET@
 OTOOL_FOR_TARGET=@OTOOL_FOR_TARGET@
-RANLIB_FOR_TARGET=@RANLIB_FOR_TARGET@
+RANLIB_FOR_TARGET=@RANLIB_FOR_TARGET@ @RANLIB_PLUGIN_OPTION_FOR_TARGET@
 READELF_FOR_TARGET=@READELF_FOR_TARGET@
 STRIP_FOR_TARGET=@STRIP_FOR_TARGET@
 WINDRES_FOR_TARGET=@WINDRES_FOR_TARGET@
@@ -627,6 +657,7 @@ LIBCXXFLAGS_FOR_TARGET = $(CXXFLAGS_FOR_TARGET) -fno-implicit-templates
 LDFLAGS_FOR_TARGET = @LDFLAGS_FOR_TARGET@
 GM2FLAGS_FOR_TARGET = -O2 -g
 GOCFLAGS_FOR_TARGET = -O2 -g
+A68FLAGS_FOR_TARGET = -O2 -g
 GDCFLAGS_FOR_TARGET = -O2 -g
 
 FLAGS_FOR_TARGET = @FLAGS_FOR_TARGET@
@@ -709,6 +740,7 @@ BASE_FLAGS_TO_PASS =[+ FOR flags_to_pass +][+ IF optional +] \
 	"[+flag+]=$([+flag+])"[+ ENDIF optional+][+ ENDFOR flags_to_pass +][+ FOR bootstrap-stage +] \
 	"STAGE[+id+]_CFLAGS=$(STAGE[+id+]_CFLAGS)" \
 	"STAGE[+id+]_CXXFLAGS=$(STAGE[+id+]_CXXFLAGS)" \
+	"STAGE[+id+]_GDCFLAGS=$(STAGE[+id+]_GDCFLAGS)" \
 	"STAGE[+id+]_GENERATOR_CFLAGS=$(STAGE[+id+]_GENERATOR_CFLAGS)" \
 	"STAGE[+id+]_TFLAGS=$(STAGE[+id+]_TFLAGS)"[+ ENDFOR bootstrap-stage +] \
 	$(CXX_FOR_TARGET_FLAG_TO_PASS) \
@@ -731,6 +763,7 @@ EXTRA_HOST_FLAGS = \
 	'DSYMUTIL=$(DSYMUTIL)' \
 	'GFORTRAN=$(GFORTRAN)' \
 	'GOC=$(GOC)' \
+	'A68=$(A68)' \
 	'GDC=$(GDC)' \
 	'GM2=$(GM2)' \
 	'LD=$(LD)' \
@@ -759,6 +792,7 @@ STAGE1_FLAGS_TO_PASS = \
 POSTSTAGE1_FLAGS_TO_PASS = \
 	CC="$${CC}" CC_FOR_BUILD="$${CC_FOR_BUILD}" \
 	CXX="$${CXX}" CXX_FOR_BUILD="$${CXX_FOR_BUILD}" \
+	A68="$${A68}" A68_FOR_BUILD="$${A68_FOR_BUILD}" \
 	GDC="$${GDC}" GDC_FOR_BUILD="$${GDC_FOR_BUILD}" \
 	GM2="$${GM2}" GM2_FOR_BUILD="$${GM2_FOR_BUILD}" \
 	GNATBIND="$${GNATBIND}" \
@@ -794,6 +828,8 @@ EXTRA_TARGET_FLAGS = \
 	'GFORTRAN=$$(GFORTRAN_FOR_TARGET) $$(XGCC_FLAGS_FOR_TARGET) $$(TFLAGS)' \
 	'GOC=$$(GOC_FOR_TARGET) $$(XGCC_FLAGS_FOR_TARGET) $$(TFLAGS)' \
 	'GOCFLAGS=$$(GOCFLAGS_FOR_TARGET)' \
+	'A68=$$(A68_FOR_TARGET) $$(XGCC_FLAGS_FOR_TARGET) $$(TFLAGS)' \
+	'A68FLAGS=$$(A68FLAGS_FOR_TARGET)' \
 	'GDC=$$(GDC_FOR_TARGET) $$(XGCC_FLAGS_FOR_TARGET) $$(TFLAGS)' \
 	'GDCFLAGS=$$(GDCFLAGS_FOR_TARGET)' \
 	'GM2=$$(GM2_FOR_TARGET) $$(XGCC_FLAGS_FOR_TARGET) $$(TFLAGS)' \
@@ -976,7 +1012,7 @@ local-distclean:
 	-rmdir texinfo/makeinfo texinfo/po texinfo/util 2>/dev/null
 	-rmdir c++tools fastjar gcc gnattools gotools 2>/dev/null
 	-rmdir libcc1 libiberty texinfo zlib 2>/dev/null
-	-find . -name config.cache -exec rm -f {} \; \; 2>/dev/null
+	-find . -name config.cache -exec rm -f {} \; 2>/dev/null
 
 local-maintainer-clean:
 	@echo "This command is intended for maintainers to use;"
@@ -1236,7 +1272,8 @@ configure-stage[+id+]-[+prefix+][+module+]:
 	CXXFLAGS="$(CXXFLAGS_FOR_TARGET)"; export CXXFLAGS; \
 	LIBCFLAGS="$(LIBCFLAGS_FOR_TARGET)"; export LIBCFLAGS;[+ ELSE prefix +] \
 	CFLAGS="$(STAGE[+id+]_CFLAGS)"; export CFLAGS; \
-	CXXFLAGS="$(STAGE[+id+]_CXXFLAGS)"; export CXXFLAGS;[+ IF prev +] \
+	CXXFLAGS="$(STAGE[+id+]_CXXFLAGS)"; export CXXFLAGS;[+ IF (= (get "module") "gcc") +] \
+	GDCFLAGS="$(STAGE[+id+]_GDCFLAGS)"; export GDCFLAGS;[+ ENDIF +][+ IF prev +] \
 	LIBCFLAGS="$(STAGE[+id+]_CFLAGS)"[+ ELSE prev +] \
 	LIBCFLAGS="$(LIBCFLAGS)"[+ ENDIF prev +]; export LIBCFLAGS;[+
   ENDIF prefix +] [+extra_exports+] \
@@ -1306,7 +1343,8 @@ all-stage[+id+]-[+prefix+][+module+]: configure-stage[+id+]-[+prefix+][+module+]
 		LIBCFLAGS="$(LIBCFLAGS_FOR_TARGET)"[+ ELSE prefix +] \
 		CFLAGS="$(STAGE[+id+]_CFLAGS)" \
 		GENERATOR_CFLAGS="$(STAGE[+id+]_GENERATOR_CFLAGS)" \
-		CXXFLAGS="$(STAGE[+id+]_CXXFLAGS)"[+ IF prev +] \
+		CXXFLAGS="$(STAGE[+id+]_CXXFLAGS)"[+ IF (= (get "module") "gcc") +] \
+		GDCFLAGS="$(STAGE[+id+]_GDCFLAGS)"[+ ENDIF +][+ IF prev +] \
 		LIBCFLAGS="$(STAGE[+id+]_CFLAGS)"[+ ELSE prev +] \
 		LIBCFLAGS="$(LIBCFLAGS)"[+ ENDIF prev +][+ ENDIF prefix +] \
 		CFLAGS_FOR_TARGET="$(CFLAGS_FOR_TARGET)" \
@@ -2096,6 +2134,11 @@ ENDFOR dependencies +]@endif gcc-bootstrap
    (if (exist? "no_gcc")
        (hash-create-handle! lang-env-deps
 	  (string-append (get "module") "-" "no_gcc") #t))
+
+   (if (exist? "no_atomic")
+       (hash-create-handle! lang-env-deps
+	  (string-append (get "module") "-" "no_atomic") #t))
+
    "" +][+ ENDFOR lang_env_dependencies +]
 
 @if gcc-bootstrap[+ FOR target_modules +][+ IF (not (lang-dep "no_gcc"))
@@ -2115,6 +2158,17 @@ configure-target-[+module+]: maybe-all-target-newlib maybe-all-target-libgloss[+
 configure-target-[+module+]: maybe-all-target-libstdc++-v3[+
   ENDIF +]
 [+ ENDFOR target_modules +]
+
+@if gcc-bootstrap[+ FOR target_modules +][+ IF (not (lang-dep "no_atomic"))
+  +][+ IF bootstrap +][+ FOR bootstrap_stage +]
+configure-stage[+id+]-target-[+module+]: maybe-all-stage[+id+]-target-libatomic[+
+  ENDFOR +][+ ENDIF bootstrap +][+ ENDIF +][+ ENDFOR target_modules +]
+@endif gcc-bootstrap
+
+@if gcc-no-bootstrap[+ FOR target_modules +][+ IF (not (lang-dep "no_atomic")) +]
+configure-target-[+module+]: maybe-all-target-libatomic[+
+  ENDIF +][+ ENDFOR target_modules +]
+@endif gcc-no-bootstrap
 
 CONFIGURE_GDB_TK = @CONFIGURE_GDB_TK@
 GDB_TK = @GDB_TK@

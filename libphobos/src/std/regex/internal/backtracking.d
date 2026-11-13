@@ -657,9 +657,10 @@ final:
                     break;
                 case IR.Backref:
                     immutable n = re.ir[pc].data;
-                    auto referenced = re.ir[pc].localRef
-                            ? s[matches[n].begin .. matches[n].end]
-                            : s[backrefed[n].begin .. backrefed[n].end];
+                    auto g = re.ir[pc].localRef ? matches[n] : backrefed[n];
+                    if (!g)
+                        goto L_backtrack;
+                    auto referenced = s[g.begin .. g.end];
                     while (!atEnd && !referenced.empty && front == referenced.front)
                     {
                         next();
@@ -702,7 +703,7 @@ final:
     }
 
     void stackPush(T)(T val)
-        if (!isDynamicArray!T)
+    if (!isDynamicArray!T)
     {
         *cast(T*)&memory[lastState] = val;
         enum delta = (T.sizeof+size_t.sizeof/2)/size_t.sizeof;
@@ -720,7 +721,7 @@ final:
     }
 
     void stackPop(T)(ref T val)
-        if (!isDynamicArray!T)
+    if (!isDynamicArray!T)
     {
         enum delta = (T.sizeof+size_t.sizeof/2)/size_t.sizeof;
         lastState -= delta;
@@ -1430,14 +1431,13 @@ struct CtContext
                     $$`, ir[0].data, nextInstr);
             break;
         case IR.Backref:
-            string mStr = "auto referenced = ";
-            mStr ~= ir[0].localRef
-                ? ctSub("s[matches[$$].begin .. matches[$$].end];",
-                    ir[0].data, ir[0].data)
-                : ctSub("s[backrefed[$$].begin .. backrefed[$$].end];",
-                    ir[0].data, ir[0].data);
+            string gStr = ir[0].localRef
+                ? ctSub("matches[$$]", ir[0].data)
+                : ctSub("backrefed[$$]", ir[0].data);
             code ~= ctSub( `
-                    $$
+                    if (!$$)
+                        $$
+                    auto referenced = s[$$.begin .. $$.end];
                     while (!atEnd && !referenced.empty && front == referenced.front)
                     {
                         next();
@@ -1446,7 +1446,7 @@ struct CtContext
                     if (referenced.empty)
                         $$
                     else
-                        $$`, mStr, nextInstr, bailOut);
+                        $$`, gStr, bailOut, gStr, gStr, nextInstr, bailOut);
             break;
         case IR.Nop:
         case IR.End:

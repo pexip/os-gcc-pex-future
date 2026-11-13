@@ -1,5 +1,5 @@
 /* Darwin support needed only by C/C++ frontends.
-   Copyright (C) 2001-2024 Free Software Foundation, Inc.
+   Copyright (C) 2001-2026 Free Software Foundation, Inc.
    Contributed by Apple Computer Inc.
 
 This file is part of GCC.
@@ -537,17 +537,18 @@ find_subframework_header (cpp_reader *pfile, const char *header, cpp_dir **dirp)
   const char *n;
 
   for (b = cpp_get_buffer (pfile);
-       b && cpp_get_file (b) && cpp_get_path (cpp_get_file (b));
+       b && cpp_get_file (b) && _cpp_get_file_path (cpp_get_file (b));
        b = cpp_get_prev (b))
     {
-      n = find_subframework_file (fname, cpp_get_path (cpp_get_file (b)));
+      n = find_subframework_file (fname,
+				  _cpp_get_file_path (cpp_get_file (b)));
       if (n)
 	{
 	  /* Logically, the place where we found the subframework is
 	     the place where we found the Framework that contains the
 	     subframework.  This is useful for tracking wether or not
 	     we are in a system header.  */
-	  *dirp = cpp_get_dir (cpp_get_file (b));
+	  *dirp = _cpp_get_file_dir (cpp_get_file (b));
 	  return n;
 	}
     }
@@ -733,7 +734,7 @@ darwin_cpp_builtins (cpp_reader *pfile)
 
   /* Since we do not (at 4.6) support ObjC gc for the NeXT runtime, the
      following will cause a syntax error if one tries to compile gc attributed
-     items.  However, without this, NeXT system headers cannot be parsed 
+     items.  However, without this, NeXT system headers cannot be parsed
      properly (on systems >= darwin 9).  */
   if (flag_objc_gc)
     {
@@ -805,24 +806,24 @@ darwin_cfstring_ref_p (const_tree strp)
     return false;
 
   tn = TYPE_NAME (strp);
-  if (tn) 
+  if (tn)
     tn = DECL_NAME (tn);
-  return (tn 
+  return (tn
 	  && IDENTIFIER_POINTER (tn)
 	  && startswith (IDENTIFIER_POINTER (tn), "CFStringRef"));
 }
 
 /* At present the behavior of this is undefined and it does nothing.  */
 static void
-darwin_check_cfstring_format_arg (tree ARG_UNUSED (format_arg), 
+darwin_check_cfstring_format_arg (tree ARG_UNUSED (format_arg),
 				  tree ARG_UNUSED (args_list))
 {
 }
 
 /* The extra format types we recognize.  */
 EXPORTED_CONST format_kind_info darwin_additional_format_types[] = {
-  { "CFString",   NULL,  NULL, NULL, NULL, 
-    NULL, NULL, 
+  { "CFString",   NULL,  NULL, NULL, NULL,
+    NULL, NULL,
     FMT_FLAG_ARG_CONVERT|FMT_FLAG_PARSE_ARG_CONVERT_EXTERNAL, 0, 0, 0, 0, 0, 0,
     NULL, NULL
   }

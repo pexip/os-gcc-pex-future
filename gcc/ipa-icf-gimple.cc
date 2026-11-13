@@ -1,5 +1,5 @@
 /* Interprocedural Identical Code Folding pass
-   Copyright (C) 2014-2024 Free Software Foundation, Inc.
+   Copyright (C) 2014-2026 Free Software Foundation, Inc.
 
    Contributed by Jan Hubicka <hubicka@ucw.cz> and Martin Liska <mliska@suse.cz>
 
@@ -708,7 +708,8 @@ func_checker::compare_gimple_call (gcall *s1, gcall *s2)
       || gimple_call_from_thunk_p (s1) != gimple_call_from_thunk_p (s2)
       || gimple_call_from_new_or_delete (s1) != gimple_call_from_new_or_delete (s2)
       || gimple_call_va_arg_pack_p (s1) != gimple_call_va_arg_pack_p (s2)
-      || gimple_call_alloca_for_var_p (s1) != gimple_call_alloca_for_var_p (s2))
+      || gimple_call_alloca_for_var_p (s1) != gimple_call_alloca_for_var_p (s2)
+      || gimple_call_must_tail_p (s1) != gimple_call_must_tail_p (s2))
     return false;
 
   unsigned check_arg_types_from = 0;
@@ -1003,7 +1004,7 @@ func_checker::compare_gimple_asm (const gasm *g1, const gasm *g2)
   if (gimple_asm_volatile_p (g1) != gimple_asm_volatile_p (g2))
     return false;
 
-  if (gimple_asm_input_p (g1) != gimple_asm_input_p (g2))
+  if (gimple_asm_basic_p (g1) != gimple_asm_basic_p (g2))
     return false;
 
   if (gimple_asm_inline_p (g1) != gimple_asm_inline_p (g2))

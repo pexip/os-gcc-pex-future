@@ -1,5 +1,5 @@
 ;; Predicate definitions for POWER and PowerPC.
-;; Copyright (C) 2005-2024 Free Software Foundation, Inc.
+;; Copyright (C) 2005-2026 Free Software Foundation, Inc.
 ;;
 ;; This file is part of GCC.
 ;;
@@ -19,7 +19,7 @@
 
 ;; Return 1 for anything except PARALLEL.
 (define_predicate "any_operand"
-  (match_code "const_int,const_double,const_wide_int,const,symbol_ref,label_ref,subreg,reg,mem"))
+  (match_code "const_int,const_double,const_wide_int,const_vector,const,symbol_ref,label_ref,subreg,reg,mem"))
 
 ;; Return 1 for any PARALLEL.
 (define_predicate "any_parallel_operand"
@@ -161,6 +161,40 @@
     return 1;
 
   return VINT_REGNO_P (REGNO (op));
+})
+
+;; Return 1 if op is a dense math register
+(define_predicate "dmr_register_operand"
+  (match_operand 0 "register_operand")
+{
+  if (!TARGET_DMF)
+    return 0;
+
+  if (!REG_P (op))
+    return 0;
+
+  if (!HARD_REGISTER_P (op))
+    return 1;
+
+  return DMR_REGNO_P (REGNO (op));
+})
+
+;; Return 1 if op is an accumulator.  On power10/11 systems, the accumulators
+;; overlap with the FPRs. If TARGET_DMF is true, it will be Dense math register.
+(define_predicate "accumulator_operand"
+  (match_operand 0 "register_operand")
+{
+  if (SUBREG_P (op))
+    op = SUBREG_REG (op);
+
+  if (!REG_P (op))
+    return 0;
+
+  if (!HARD_REGISTER_P (op))
+    return 1;
+
+  int r = REGNO (op);
+  return TARGET_DMF ? DMR_REGNO_P (r) : (FP_REGNO_P (r) && (r & 3) == 0);
 })
 
 ;; Return 1 if op is a vector register to do logical operations on (and, or,
@@ -312,6 +346,11 @@
   (and (match_code "const_int")
        (match_test "IN_RANGE (INTVAL (op), 2, 3)")))
 
+;; Match op = 0..6.
+(define_predicate "const_0_to_6_operand"
+  (and (match_code "const_int")
+       (match_test "IN_RANGE (INTVAL (op), 0, 6)")))
+
 ;; Match op = 0..7.
 (define_predicate "const_0_to_7_operand"
   (and (match_code "const_int")
@@ -362,6 +401,9 @@
     return 1;
 
   if (TARGET_VSX && VSX_REGNO_P (REGNO (op)))
+    return 1;
+
+  if (TARGET_DMF && DMR_REGNO_P (REGNO (op)))
     return 1;
 
   return INT_REGNO_P (REGNO (op)) || FP_REGNO_P (REGNO (op));
@@ -796,7 +838,7 @@
       elt += (BYTES_BIG_ENDIAN ? -1 : 1) * (sz - isz) / isz;
     }
   else if (isz > sz)
-    inner = smallest_int_mode_for_size (sz * BITS_PER_UNIT);
+    inner = smallest_int_mode_for_size (sz * BITS_PER_UNIT).require ();
   val = const_vector_elt_as_int (op, elt);
   return EASY_VECTOR_MSB (val, inner);
 })
@@ -859,6 +901,69 @@
 
   else
     return op == CONST0_RTX (mode) || op == CONSTM1_RTX (mode);
+})
+
+;; Return 1 if the operand is a V2DI or V4SI const_vector, where each element
+;; is the same constant, and the constant can be used for a shift operation.
+;; This is to prevent sub-optimal code, that needs to load up the constant and
+;; then zero extend it 32 or 64-bit vectors or load up the constant from the
+;; literal pool.
+;;
+;; For V4SImode, we only recognize shifts by 16..31 on ISA 3.0, since shifts by
+;; 1..15 can be handled by the normal VSPLTISW and vector shift instruction.
+;; For V2DImode, we do this all of the time, since there is no convenient
+;; instruction to load up a vector long long splatted constant.
+;;
+;; If we can use XXSPLTIB, then allow constants up to 63.  If not, we restrict
+;; the constant to 0..15 that can be loaded with VSPLTISW.  V4SI shifts are
+;; only optimized for ISA 3.0 when the shift value is >= 16 and <= 31.  Values
+;; between 0 and 15 can use a normal VSPLTISW to load the value, and it doesn't
+;; need this optimization.
+(define_predicate "vector_shift_constant"
+  (match_code "const_vector,vec_duplicate")
+{
+  unsigned HOST_WIDE_INT min_value;
+
+  if (mode == V2DImode)
+    {
+      min_value = 0;
+      if (!TARGET_P8_VECTOR)
+	return 0;
+    }
+  else if (mode == V4SImode)
+    {
+      min_value = 16;
+      if (!TARGET_P9_VECTOR)
+	return 0;
+    }
+  else
+    return 0;
+
+  unsigned HOST_WIDE_INT max_value = TARGET_P9_VECTOR ? 63 : 15;
+
+  if (GET_CODE (op) == CONST_VECTOR)
+    {
+      unsigned HOST_WIDE_INT first = UINTVAL (CONST_VECTOR_ELT (op, 0));
+      unsigned nunits = GET_MODE_NUNITS (mode);
+      unsigned i;
+
+      if (!IN_RANGE (first, min_value, max_value))
+	return 0;
+
+      for (i = 1; i < nunits; i++)
+	if (first != UINTVAL (CONST_VECTOR_ELT (op, i)))
+	  return 0;
+
+      return 1;
+    }
+  else
+    {
+      rtx op0 = XEXP (op, 0);
+      if (!CONST_INT_P (op0))
+	return 0;
+
+      return IN_RANGE (UINTVAL (op0), min_value, max_value);
+    }
 })
 
 ;; Return 1 if operand is 0.0.
@@ -2103,3 +2208,8 @@
   (and (match_code "subreg")
        (match_test "subreg_lowpart_offset (mode, GET_MODE (SUBREG_REG (op)))
 		    == SUBREG_BYTE (op)")))
+
+; Else operand for LEN_LOAD.
+(define_predicate "lxvl_else_operand"
+  (and (match_code "const_vector")
+       (match_test "op == CONST0_RTX (GET_MODE (op))")))

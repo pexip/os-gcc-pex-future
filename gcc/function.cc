@@ -1,5 +1,5 @@
 /* Expands front end tree to back end RTL for GCC.
-   Copyright (C) 1987-2024 Free Software Foundation, Inc.
+   Copyright (C) 1987-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -85,6 +85,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "value-range.h"
 #include "gimple-range.h"
 #include "insn-attr.h"
+#include "hierarchical_discriminator.h"
 
 /* So we can assign to cfun in this file.  */
 #undef cfun
@@ -217,6 +218,7 @@ free_after_compilation (struct function *f)
   f->cfg = NULL;
   f->curr_properties &= ~PROP_cfg;
   delete f->cond_uids;
+  free_copyid_allocator (f);
 
   regno_reg_rtx = NULL;
 }
@@ -1355,8 +1357,7 @@ emit_initial_value_sets (void)
   start_sequence ();
   for (i = 0; i < ivs->num_entries; i++)
     emit_move_insn (ivs->entries[i].pseudo, ivs->entries[i].hard_reg);
-  seq = get_insns ();
-  end_sequence ();
+  seq = end_sequence ();
 
   emit_insn_at_entry (seq);
 }
@@ -1574,8 +1575,7 @@ instantiate_virtual_regs_in_insn (rtx_insn *insn)
 	  if (x != new_rtx)
 	    emit_move_insn (new_rtx, x);
 
-	  seq = get_insns ();
-	  end_sequence ();
+	  seq = end_sequence ();
 
 	  emit_insn_before (seq, insn);
 	  delete_insn (insn);
@@ -1601,8 +1601,7 @@ instantiate_virtual_regs_in_insn (rtx_insn *insn)
 	  if (x != SET_DEST (set))
 	    emit_move_insn (SET_DEST (set), x);
 
-	  seq = get_insns ();
-	  end_sequence ();
+	  seq = end_sequence ();
 
 	  emit_insn_before (seq, insn);
 	  delete_insn (insn);
@@ -1631,8 +1630,7 @@ instantiate_virtual_regs_in_insn (rtx_insn *insn)
 	    {
 	      start_sequence ();
 	      emit_move_insn (SET_DEST (set), new_rtx);
-	      seq = get_insns ();
-	      end_sequence ();
+	      seq = end_sequence ();
 
 	      emit_insn_before (seq, insn);
 	      delete_insn (insn);
@@ -1692,8 +1690,7 @@ instantiate_virtual_regs_in_insn (rtx_insn *insn)
 		addr = force_reg (GET_MODE (addr), addr);
 		x = replace_equiv_address (x, addr, true);
 	      }
-	    seq = get_insns ();
-	    end_sequence ();
+	    seq = end_sequence ();
 	    if (seq)
 	      emit_insn_before (seq, insn);
 	  }
@@ -1718,8 +1715,7 @@ instantiate_virtual_regs_in_insn (rtx_insn *insn)
 	      x = expand_simple_binop (GET_MODE (x), PLUS, new_rtx,
 				       gen_int_mode (offset, GET_MODE (x)),
 				       NULL_RTX, 1, OPTAB_LIB_WIDEN);
-	      seq = get_insns ();
-	      end_sequence ();
+	      seq = end_sequence ();
 	      emit_insn_before (seq, insn);
 	    }
 	  break;
@@ -1728,20 +1724,17 @@ instantiate_virtual_regs_in_insn (rtx_insn *insn)
 	  new_rtx = instantiate_new_reg (SUBREG_REG (x), &offset);
 	  if (new_rtx == NULL)
 	    continue;
+	  start_sequence ();
 	  if (maybe_ne (offset, 0))
-	    {
-	      start_sequence ();
-	      new_rtx = expand_simple_binop
-		(GET_MODE (new_rtx), PLUS, new_rtx,
-		 gen_int_mode (offset, GET_MODE (new_rtx)),
-		 NULL_RTX, 1, OPTAB_LIB_WIDEN);
-	      seq = get_insns ();
-	      end_sequence ();
-	      emit_insn_before (seq, insn);
-	    }
-	  x = simplify_gen_subreg (recog_data.operand_mode[i], new_rtx,
-				   GET_MODE (new_rtx), SUBREG_BYTE (x));
+	    new_rtx = expand_simple_binop
+	      (GET_MODE (new_rtx), PLUS, new_rtx,
+	       gen_int_mode (offset, GET_MODE (new_rtx)),
+	       NULL_RTX, 1, OPTAB_LIB_WIDEN);
+	  x = force_subreg (recog_data.operand_mode[i], new_rtx,
+			    GET_MODE (new_rtx), SUBREG_BYTE (x));
 	  gcc_assert (x);
+	  seq = end_sequence ();
+	  emit_insn_before (seq, insn);
 	  break;
 
 	default:
@@ -1761,8 +1754,7 @@ instantiate_virtual_regs_in_insn (rtx_insn *insn)
 	    }
 	  else
 	    x = force_reg (insn_data[insn_code].operand[i].mode, x);
-	  seq = get_insns ();
-	  end_sequence ();
+	  seq = end_sequence ();
 	  if (seq)
 	    emit_insn_before (seq, insn);
 	}
@@ -2231,6 +2223,7 @@ use_register_for_decl (const_tree decl)
       /* We don't set DECL_IGNORED_P for the function_result_decl.  */
       if (optimize)
 	return true;
+      /* Needed for [[musttail]] which can operate even at -O0 */
       if (cfun->tail_call_marked)
 	return true;
       /* We don't set DECL_REGISTER for the function_result_decl.  */
@@ -2386,7 +2379,7 @@ split_complex_args (vec<tree> *args)
    the hidden struct return argument, and (abi willing) complex args.
    Return the new parameter list.  */
 
-static vec<tree> 
+static vec<tree>
 assign_parms_augmented_arg_list (struct assign_parm_data_all *all)
 {
   tree fndecl = current_function_decl;
@@ -2832,7 +2825,7 @@ assign_parm_remove_parallels (struct assign_parm_data_one *data)
    always valid and properly aligned.  */
 
 static void
-assign_parm_adjust_stack_rtl (struct assign_parm_data_one *data)
+assign_parm_adjust_stack_rtl (tree parm, struct assign_parm_data_one *data)
 {
   rtx stack_parm = data->stack_parm;
 
@@ -2847,7 +2840,14 @@ assign_parm_adjust_stack_rtl (struct assign_parm_data_one *data)
 						 MEM_ALIGN (stack_parm))))
 	  || (data->nominal_type
 	      && TYPE_ALIGN (data->nominal_type) > MEM_ALIGN (stack_parm)
-	      && MEM_ALIGN (stack_parm) < PREFERRED_STACK_BOUNDARY)))
+	      && ((MEM_ALIGN (stack_parm)
+		   < MIN (BIGGEST_ALIGNMENT, MAX_SUPPORTED_STACK_ALIGNMENT))
+		  /* If its address is taken, make a local copy whose
+		     maximum alignment is MAX_SUPPORTED_STACK_ALIGNMENT.
+		   */
+		  || (TREE_ADDRESSABLE (parm)
+		      && (MEM_ALIGN (stack_parm)
+			  < MAX_SUPPORTED_STACK_ALIGNMENT))))))
     stack_parm = NULL;
 
   /* If parm was passed in memory, and we need to convert it on entry,
@@ -2944,7 +2944,7 @@ assign_parm_setup_block (struct assign_parm_data_all *all,
   if (stack_parm == 0)
     {
       HOST_WIDE_INT parm_align
-	= (STRICT_ALIGNMENT
+	= ((STRICT_ALIGNMENT || BITS_PER_WORD <= MAX_SUPPORTED_STACK_ALIGNMENT)
 	   ? MAX (DECL_ALIGN (parm), BITS_PER_WORD) : DECL_ALIGN (parm));
 
       SET_DECL_ALIGN (parm, parm_align);
@@ -3721,7 +3721,7 @@ assign_parms (tree fndecl)
       else
 	set_decl_incoming_rtl (parm, data.entry_parm, false);
 
-      assign_parm_adjust_stack_rtl (&data);
+      assign_parm_adjust_stack_rtl (parm, &data);
 
       if (assign_parm_setup_block_p (&data))
 	assign_parm_setup_block (&all, parm, &data);
@@ -4706,22 +4706,59 @@ invoke_set_current_function_hook (tree fndecl)
     }
 }
 
+/* Set cfun to NEW_CFUN and switch to the optimization and target options
+   associated with NEW_FNDECL.
+
+   FORCE says whether we should do the switch even if NEW_CFUN is the current
+   function, e.g. because there has been a change in optimization or target
+   options.  */
+
+static void
+set_function_decl (function *new_cfun, tree new_fndecl, bool force)
+{
+  if (cfun != new_cfun || force)
+    {
+      cfun = new_cfun;
+      invoke_set_current_function_hook (new_fndecl);
+      redirect_edge_var_map_empty ();
+    }
+}
+
 /* cfun should never be set directly; use this function.  */
 
 void
 set_cfun (struct function *new_cfun, bool force)
 {
-  if (cfun != new_cfun || force)
-    {
-      cfun = new_cfun;
-      invoke_set_current_function_hook (new_cfun ? new_cfun->decl : NULL_TREE);
-      redirect_edge_var_map_empty ();
-    }
+  set_function_decl (new_cfun, new_cfun ? new_cfun->decl : NULL_TREE, force);
 }
 
 /* Initialized with NOGC, making this poisonous to the garbage collector.  */
 
 static vec<function *> cfun_stack;
+
+/* Push the current cfun onto the stack, then switch to function NEW_CFUN
+   and FUNCTION_DECL NEW_FNDECL.  FORCE is as for set_function_decl.  */
+
+static void
+push_function_decl (function *new_cfun, tree new_fndecl, bool force)
+{
+  gcc_assert ((!cfun && !current_function_decl)
+	      || (cfun && current_function_decl == cfun->decl));
+  cfun_stack.safe_push (cfun);
+  current_function_decl = new_fndecl;
+  set_function_decl (new_cfun, new_fndecl, force);
+}
+
+/* Push the current cfun onto the stack and switch to function declaration
+   NEW_FNDECL, which might or might not have a function body.  FORCE is as for
+   set_function_decl.  */
+
+void
+push_function_decl (tree new_fndecl, bool force)
+{
+  force |= current_function_decl != new_fndecl;
+  push_function_decl (DECL_STRUCT_FUNCTION (new_fndecl), new_fndecl, force);
+}
 
 /* Push the current cfun onto the stack, and set cfun to new_cfun.  Also set
    current_function_decl accordingly.  */
@@ -4729,17 +4766,14 @@ static vec<function *> cfun_stack;
 void
 push_cfun (struct function *new_cfun)
 {
-  gcc_assert ((!cfun && !current_function_decl)
-	      || (cfun && current_function_decl == cfun->decl));
-  cfun_stack.safe_push (cfun);
-  current_function_decl = new_cfun ? new_cfun->decl : NULL_TREE;
-  set_cfun (new_cfun);
+  push_function_decl (new_cfun, new_cfun ? new_cfun->decl : NULL_TREE, false);
 }
 
-/* Pop cfun from the stack.  Also set current_function_decl accordingly.  */
+/* A common subroutine for pop_cfun and pop_function_decl.  FORCE is as
+   for set_function_decl.  */
 
-void
-pop_cfun (void)
+static void
+pop_cfun_1 (bool force)
 {
   struct function *new_cfun = cfun_stack.pop ();
   /* When in_dummy_function, we do have a cfun but current_function_decl is
@@ -4749,8 +4783,28 @@ pop_cfun (void)
   gcc_checking_assert (in_dummy_function
 		       || !cfun
 		       || current_function_decl == cfun->decl);
-  set_cfun (new_cfun);
+  set_cfun (new_cfun, force);
   current_function_decl = new_cfun ? new_cfun->decl : NULL_TREE;
+}
+
+/* Pop cfun from the stack.  Also set current_function_decl accordingly.  */
+
+void
+pop_cfun (void)
+{
+  pop_cfun_1 (false);
+}
+
+/* Undo push_function_decl.  */
+
+void
+pop_function_decl (void)
+{
+  /* If the previous cfun was null, the options should be reset to the
+     global set.  Checking the current cfun against the new (popped) cfun
+     wouldn't catch this if the current function decl has no function
+     struct.  */
+  pop_cfun_1 (!cfun_stack.last ());
 }
 
 /* Return value of funcdef and increase it.  */
@@ -4920,6 +4974,10 @@ prepare_function_start (void)
 
   /* Indicate we have no need of a frame pointer yet.  */
   frame_pointer_needed = 0;
+
+  /* Reset the cache of the "extended" flag in the target's
+     _BitInt info struct.  */
+  bitint_extended = -1;
 }
 
 void
@@ -5107,7 +5165,7 @@ expand_function_start (tree subr)
   else if (DECL_MODE (res) == VOIDmode)
     /* If return mode is void, this decl rtl should not be used.  */
     set_parm_rtl (res, NULL_RTX);
-  else 
+  else
     {
       /* Compute the return values into a pseudo reg, which we will copy
 	 into the true return register after the cleanups are done.  */
@@ -5362,8 +5420,7 @@ expand_function_end (void)
 	      anti_adjust_stack_and_probe (max_frame_size, true);
 	    else
 	      probe_stack_range (STACK_OLD_CHECK_PROTECT, max_frame_size);
-	    seq = get_insns ();
-	    end_sequence ();
+	    seq = end_sequence ();
 	    set_insn_locations (seq, prologue_location);
 	    emit_insn_before (seq, stack_check_probe_note);
 	    break;
@@ -5542,8 +5599,7 @@ expand_function_end (void)
     {
       start_sequence ();
       clobber_return_register ();
-      rtx_insn *seq = get_insns ();
-      end_sequence ();
+      rtx_insn *seq = end_sequence ();
 
       emit_insn_after (seq, clobber_after);
     }
@@ -5575,8 +5631,7 @@ expand_function_end (void)
 
       start_sequence ();
       emit_stack_save (SAVE_FUNCTION, &tem);
-      rtx_insn *seq = get_insns ();
-      end_sequence ();
+      rtx_insn *seq = end_sequence ();
       emit_insn_before (seq, parm_birth_insn);
 
       emit_stack_restore (SAVE_FUNCTION, tem);
@@ -5608,8 +5663,7 @@ get_arg_pointer_save_area (void)
       start_sequence ();
       emit_move_insn (validize_mem (copy_rtx (ret)),
                       crtl->args.internal_arg_pointer);
-      rtx_insn *seq = get_insns ();
-      end_sequence ();
+      rtx_insn *seq = end_sequence ();
 
       push_topmost_sequence ();
       emit_insn_after (seq, entry_of_function ());
@@ -5798,8 +5852,7 @@ make_split_prologue_seq (void)
 
   start_sequence ();
   emit_insn (targetm.gen_split_stack_prologue ());
-  rtx_insn *seq = get_insns ();
-  end_sequence ();
+  rtx_insn *seq = end_sequence ();
 
   record_insns (seq, NULL, &prologue_insn_hash);
   set_insn_locations (seq, prologue_location);
@@ -5835,8 +5888,7 @@ make_prologue_seq (void)
   if (!targetm.profile_before_prologue () && crtl->profile)
     emit_insn (gen_blockage ());
 
-  seq = get_insns ();
-  end_sequence ();
+  seq = end_sequence ();
   set_insn_locations (seq, prologue_location);
 
   return seq;
@@ -5939,16 +5991,14 @@ gen_call_used_regs_seq (rtx_insn *ret, unsigned int zero_regs_type)
      all call used registers.  */
   gcc_assert (hard_reg_set_subset_p (zeroed_hardregs, all_call_used_regs));
 
-  rtx_insn *seq = get_insns ();
-  end_sequence ();
+  rtx_insn *seq = end_sequence ();
   if (seq)
     {
       /* Emit the memory blockage and register clobber asm volatile before
 	 the whole sequence.  */
       start_sequence ();
       expand_asm_reg_clobber_mem_blockage (zeroed_hardregs);
-      rtx_insn *seq_barrier = get_insns ();
-      end_sequence ();
+      rtx_insn *seq_barrier = end_sequence ();
 
       emit_insn_before (seq_barrier, ret);
       emit_insn_before (seq, ret);
@@ -6217,8 +6267,7 @@ thread_prologue_and_epilogue_insns (void)
 	{
 	  start_sequence ();
 	  targetm.emit_epilogue_for_sibcall (as_a<rtx_call_insn *> (insn));
-	  ep_seq = get_insns ();
-	  end_sequence ();
+	  ep_seq = end_sequence ();
 	}
       else
 	ep_seq = targetm.gen_sibcall_epilogue ();
@@ -6227,8 +6276,7 @@ thread_prologue_and_epilogue_insns (void)
 	  start_sequence ();
 	  emit_note (NOTE_INSN_EPILOGUE_BEG);
 	  emit_insn (ep_seq);
-	  rtx_insn *seq = get_insns ();
-	  end_sequence ();
+	  rtx_insn *seq = end_sequence ();
 
 	  /* Retain a map of the epilogue insns.  Used in life analysis to
 	     avoid getting rid of sibcall epilogue insns.  Do this before we
@@ -6261,8 +6309,11 @@ thread_prologue_and_epilogue_insns (void)
     }
 
   /* Threading the prologue and epilogue changes the artificial refs in the
-     entry and exit blocks, and may invalidate DF info for tail calls.  */
+     entry and exit blocks, and may invalidate DF info for tail calls.
+     This is also needed for [[musttail]] conversion even when not
+     optimizing.  */
   if (optimize
+      || cfun->tail_call_marked
       || flag_optimize_sibling_calls
       || flag_ipa_icf_functions
       || in_lto_p)
@@ -6559,7 +6610,7 @@ rest_of_handle_thread_prologue_and_epilogue (function *fun)
 {
   /* prepare_shrink_wrap is sensitive to the block structure of the control
      flow graph, so clean it up first.  */
-  if (optimize)
+  if (cfun->tail_call_marked || optimize)
     cleanup_cfg (0);
 
   /* On some machines, the prologue and epilogue code, or parts thereof,
@@ -6914,8 +6965,7 @@ match_asm_constraints_1 (rtx_insn *insn, rtx *p_sets, int noutputs)
 
       start_sequence ();
       emit_move_insn (output, copy_rtx (input));
-      insns = get_insns ();
-      end_sequence ();
+      insns = end_sequence ();
       emit_insn_before (insns, insn);
 
       constraint = ASM_OPERANDS_OUTPUT_CONSTRAINT(SET_SRC(p_sets[match]));
@@ -6965,6 +7015,115 @@ match_asm_constraints_1 (rtx_insn *insn, rtx *p_sets, int noutputs)
 						   input, output);
 	  }
 
+      changed = true;
+    }
+
+  if (changed)
+    df_insn_rescan (insn);
+}
+
+/* It is expected and desired that optimizations coalesce multiple pseudos into
+   one whenever possible.  However, in case of hard register constraints we may
+   have to undo this and introduce copies since otherwise we could constraint a
+   single pseudo to different hard registers.  For example, during register
+   allocation the following insn would be unsatisfiable since pseudo 60 is
+   constrained to hard register r5 and r6 at the same time.
+
+   (insn 7 5 0 2 (asm_operands/v ("foo") ("") 0 [
+	       (reg:DI 60) repeated x2
+	   ]
+	    [
+	       (asm_input:DI ("{r5}") t.c:4)
+	       (asm_input:DI ("{r6}") t.c:4)
+	   ]
+	    [] t.c:4) "t.c":4:3 -1
+	(expr_list:REG_DEAD (reg:DI 60)
+	   (nil)))
+
+   Therefore, introduce a copy of pseudo 60 and transform it into
+
+   (insn 10 5 7 2 (set (reg:DI 62)
+	   (reg:DI 60)) "t.c":4:3 1503 {*movdi_64}
+	(nil))
+   (insn 7 10 11 2 (asm_operands/v ("foo") ("") 0 [
+	       (reg:DI 60)
+	       (reg:DI 62)
+	   ]
+	    [
+	       (asm_input:DI ("{r5}") t.c:4)
+	       (asm_input:DI ("{r6}") t.c:4)
+	   ]
+	    [] t.c:4) "t.c":4:3 -1
+	(expr_list:REG_DEAD (reg:DI 62)
+	   (expr_list:REG_DEAD (reg:DI 60)
+	       (nil))))
+
+   Now, LRA can assign pseudo 60 to r5, and pseudo 62 to r6.
+
+   TODO: The current implementation is conservative and we could do a bit
+   better in case of alternatives.  For example
+
+   (insn 7 5 0 2 (asm_operands/v ("foo") ("") 0 [
+	       (reg:DI 60) repeated x2
+	   ]
+	    [
+	       (asm_input:DI ("r,{r5}") t.c:4)
+	       (asm_input:DI ("{r6},r") t.c:4)
+	   ]
+	    [] t.c:4) "t.c":4:3 -1
+	(expr_list:REG_DEAD (reg:DI 60)
+	   (nil)))
+
+   For this insn we wouldn't need to come up with a copy of pseudo 60 since in
+   each alternative pseudo 60 is constrained exactly one time.  */
+
+static void
+match_asm_constraints_2 (rtx_insn *insn, rtx pat)
+{
+  rtx op;
+  if (GET_CODE (pat) == SET && GET_CODE (SET_SRC (pat)) == ASM_OPERANDS)
+    op = SET_SRC (pat);
+  else if (GET_CODE (pat) == ASM_OPERANDS)
+    op = pat;
+  else
+    return;
+  int ninputs = ASM_OPERANDS_INPUT_LENGTH (op);
+  rtvec inputs = ASM_OPERANDS_INPUT_VEC (op);
+  bool changed = false;
+  auto_bitmap constrained_regs;
+
+  for (int i = 0; i < ninputs; ++i)
+    {
+      rtx input = RTVEC_ELT (inputs, i);
+      const char *constraint = ASM_OPERANDS_INPUT_CONSTRAINT (op, i);
+      if ((!REG_P (input) && !SUBREG_P (input))
+	  || (REG_P (input) && HARD_REGISTER_P (input))
+	  || strchr (constraint, '{') == nullptr)
+	continue;
+      int regno;
+      if (SUBREG_P (input))
+	{
+	  if (REG_P (SUBREG_REG (input)))
+	    regno = REGNO (SUBREG_REG (input));
+	  else
+	    continue;
+	}
+      else
+	regno = REGNO (input);
+      /* Keep the first usage of a constrained pseudo as is and only
+	 introduce copies for subsequent usages.  */
+      if (! bitmap_bit_p (constrained_regs, regno))
+	{
+	  bitmap_set_bit (constrained_regs, regno);
+	  continue;
+	}
+      rtx tmp = gen_reg_rtx (GET_MODE (input));
+      start_sequence ();
+      emit_move_insn (tmp, input);
+      rtx_insn *insns = get_insns ();
+      end_sequence ();
+      emit_insn_before (insns, insn);
+      RTVEC_ELT (inputs, i) = tmp;
       changed = true;
     }
 
@@ -7028,6 +7187,13 @@ pass_match_asm_constraints::execute (function *fun)
 	    continue;
 
 	  pat = PATTERN (insn);
+
+	  if (GET_CODE (pat) == PARALLEL)
+	    for (int i = XVECLEN (pat, 0) - 1; i >= 0; --i)
+	      match_asm_constraints_2 (insn, XVECEXP (pat, 0, i));
+	  else
+	    match_asm_constraints_2 (insn, pat);
+
 	  if (GET_CODE (pat) == PARALLEL)
 	    p_sets = &XVECEXP (pat, 0, 0), noutputs = XVECLEN (pat, 0);
 	  else if (GET_CODE (pat) == SET)

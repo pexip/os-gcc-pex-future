@@ -1,5 +1,5 @@
 /* Common subexpression elimination for GNU compiler.
-   Copyright (C) 1987-2024 Free Software Foundation, Inc.
+   Copyright (C) 1987-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -23,6 +23,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "backend.h"
 #include "target.h"
 #include "rtl.h"
+#include "stmt.h"
 #include "tree.h"
 #include "cfghooks.h"
 #include "df.h"
@@ -2534,6 +2535,10 @@ hash_rtx (const_rtx x, machine_mode mode,
 	  hash += (unsigned int) XINT (x, i);
 	  break;
 
+	case 'L':
+	  hash += (unsigned int) XLOC (x, i);
+	  break;
+
 	case 'p':
 	  hash += constant_lower_bound (SUBREG_BYTE (x));
 	  break;
@@ -2766,6 +2771,11 @@ exp_equiv_p (const_rtx x, const_rtx y, int validate, bool for_gcse)
 	    return false;
 	  break;
 
+	case 'L':
+	  if (XLOC (x, i) != XLOC (y, i))
+	    return false;
+	  break;
+
 	case 'w':
 	  if (XWINT (x, i) != XWINT (y, i))
 	    return false;
@@ -2836,6 +2846,24 @@ canon_reg (rtx x, rtx_insn *insn)
     case ADDR_VEC:
     case ADDR_DIFF_VEC:
       return x;
+
+    case SUBREG:
+      {
+	rtx inner = canon_reg (SUBREG_REG (x), insn);
+	if (inner != SUBREG_REG (x))
+	  {
+	    rtx newx = simplify_subreg (GET_MODE (x), inner,
+					GET_MODE (SUBREG_REG (x)),
+					SUBREG_BYTE (x));
+	    if (newx)
+	      return newx;
+
+	    if (validate_subreg (GET_MODE (x), GET_MODE (inner),
+				 inner, SUBREG_BYTE (x)))
+	      validate_change (insn, &SUBREG_REG (x), inner, 1);
+	  }
+	return x;
+      }
 
     case REG:
       {
@@ -4103,11 +4131,11 @@ record_jump_cond (enum rtx_code code, machine_mode mode, rtx op0, rtx op1)
    The main function is cse_insn, and between here and that function
    a couple of helper functions is defined to keep the size of cse_insn
    within reasonable proportions.
-   
+
    Data is shared between the main and helper functions via STRUCT SET,
    that contains all data related for every set in the instruction that
    is being processed.
-   
+
    Note that cse_main processes all sets in the instruction.  Most
    passes in GCC only process simple SET insns or single_set insns, but
    CSE processes insns with multiple sets as well.  */
@@ -4159,7 +4187,7 @@ struct set
    Do not make this change if REG1 is a hard register, because it will
    then be used in the sequel and we may be changing a two-operand insn
    into a three-operand insn.
-   
+
    This is the last transformation that cse_insn will try to do.  */
 
 static void
@@ -4288,8 +4316,11 @@ find_sets_in_insn (rtx_insn *insn, vec<struct set> *psets)
 		 used to tell CSE how to get to a particular constant.  */
 	      rtx y = simplify_gen_vec_select (SET_DEST (x), i);
 	      gcc_assert (y);
-	      rtx set = gen_rtx_SET (y, CONST_VECTOR_ELT (src, i));
-	      add_to_set (psets, set, true);
+	      if (!REG_P (y))
+		{
+		  rtx set = gen_rtx_SET (y, CONST_VECTOR_ELT (src, i));
+		  add_to_set (psets, set, true);
+		}
 	    }
 	}
       else
@@ -6208,6 +6239,35 @@ invalidate_from_sets_and_clobbers (rtx_insn *insn)
 	    invalidate (SET_DEST (y), VOIDmode);
 	}
     }
+
+  /* Any single register constraint may introduce a conflict, if the associated
+     hard register is live.  For example:
+
+     r100=%1
+     r101=42
+     r102=exp(r101)
+
+     If the first operand r101 of exp is constrained to hard register %1, then
+     r100 cannot be trivially substituted by %1 in the following since %1 got
+     clobbered.  Such conflicts may stem from single register classes as well
+     as hard register constraints.  Since prior RA we do not know which
+     alternative will be chosen, be conservative and consider any such hard
+     register from any alternative as a potential clobber.  */
+  extract_insn (insn);
+  for (int nop = recog_data.n_operands - 1; nop >= 0; --nop)
+    {
+      int c;
+      const char *p = recog_data.constraints[nop];
+      for (; (c = *p); p += CONSTRAINT_LEN (c, p))
+	if (c == ',')
+	  ;
+	else if (c == '{')
+	  {
+	    int regno = decode_hard_reg_constraint (p);
+	    machine_mode mode = recog_data.operand_mode[nop];
+	    invalidate_reg (gen_rtx_REG (mode, regno));
+	  }
+    }
 }
 
 static rtx cse_process_note (rtx);
@@ -6283,7 +6343,7 @@ cse_process_note (rtx x)
 
 static bool
 cse_find_path (basic_block first_bb, struct cse_basic_block_data *data,
-	       int follow_jumps)
+	       bool follow_jumps)
 {
   basic_block bb;
   edge e;
@@ -6753,7 +6813,18 @@ cse_main (rtx_insn *f ATTRIBUTE_UNUSED, int nregs)
    modify the liveness of DEST.
    DEST is set to pc_rtx for a trapping insn, or for an insn with side effects.
    We must then count uses of a SET_DEST regardless, because the insn can't be
-   deleted here.  */
+   deleted here.
+   Also count uses of a SET_DEST if it has been used by an earlier insn,
+   but in that case only when incrementing and not when decrementing, effectively
+   making setters of such a pseudo non-eliminable.  This is for cases like
+   (set (reg x) (expr))
+   ...
+   (set (reg y) (expr (reg (x))))
+   ...
+   (set (reg x) (expr (reg (x))))
+   where we can't eliminate the last insn because x is is still used, if y
+   is unused we can eliminate the middle insn and when considering the first insn
+   we used to eliminate it despite it being used in the last insn.  */
 
 static void
 count_reg_usage (rtx x, int *counts, rtx dest, int incr)
@@ -6769,7 +6840,7 @@ count_reg_usage (rtx x, int *counts, rtx dest, int incr)
   switch (code = GET_CODE (x))
     {
     case REG:
-      if (x != dest)
+      if (x != dest || (incr > 0 && counts[REGNO (x)]))
 	counts[REGNO (x)] += incr;
       return;
 

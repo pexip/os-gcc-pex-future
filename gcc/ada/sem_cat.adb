@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2026, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -25,7 +25,6 @@
 
 with Atree;          use Atree;
 with Debug;          use Debug;
-with Einfo;          use Einfo;
 with Einfo.Entities; use Einfo.Entities;
 with Einfo.Utils;    use Einfo.Utils;
 with Elists;         use Elists;
@@ -40,7 +39,6 @@ with Sem_Aux;        use Sem_Aux;
 with Sem_Dist;       use Sem_Dist;
 with Sem_Eval;       use Sem_Eval;
 with Sem_Util;       use Sem_Util;
-with Sinfo;          use Sinfo;
 with Sinfo.Nodes;    use Sinfo.Nodes;
 with Sinfo.Utils;    use Sinfo.Utils;
 with Snames;         use Snames;
@@ -1031,7 +1029,7 @@ package body Sem_Cat is
          while Present (Item) loop
             if Nkind (Item) = N_With_Clause
               and then
-                not (Implicit_With (Item)
+                not (Is_Implicit_With (Item)
                       or else Limited_Present (Item)
 
                       --  Skip if error already posted on the WITH clause (in
@@ -2177,6 +2175,7 @@ package body Sem_Cat is
         or else not Comes_From_Source (N)
         or else In_Subprogram_Or_Concurrent_Unit
         or else Ekind (Current_Scope) = E_Block
+        or else In_Strict_Preanalysis
       then
          return;
 

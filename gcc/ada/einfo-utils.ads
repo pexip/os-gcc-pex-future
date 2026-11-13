@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 S p e c                                  --
 --                                                                          --
---           Copyright (C) 2020-2024, Free Software Foundation, Inc.        --
+--           Copyright (C) 2020-2026, Free Software Foundation, Inc.        --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -161,6 +161,15 @@ package Einfo.Utils is
    function First_Formal (Id : E) return Entity_Id;
    function First_Formal_With_Extras (Id : E) return Entity_Id;
 
+   function Base_Type_If_Set (Id : E) return Opt_N_Entity_Id;
+   function Implementation_Base_Type_If_Set (Id : E) return Opt_N_Entity_Id;
+   function Root_Type_If_Set (Id : E) return Opt_N_Entity_Id;
+   --  Base_Type_If_Set is a more permissive version of Base_Type, which
+   --  returns the same value, except it returns Empty in cases where Base_Type
+   --  would crash because relevant fields are not yet set. Likewise for the
+   --  other two. These are used in Treepr, to allow it to print half-baked
+   --  nodes without crashing.
+
    function Float_Rep
      (N : Entity_Id) return F with Inline, Pre =>
       N in E_Void_Id
@@ -177,14 +186,14 @@ package Einfo.Utils is
    function Has_Interrupt_Handler (Id : E) return B;
    function Has_Invariants (Id : E) return B;
    function Has_Limited_View (Id : E) return B;
+   function Has_Modular_Operations (Id : E) return B with Inline;
    function Has_Non_Limited_View (Id : E) return B with Inline;
    function Has_Non_Null_Abstract_State (Id : E) return B;
    function Has_Non_Null_Visible_Refinement (Id : E) return B;
    function Has_Null_Abstract_State (Id : E) return B;
    function Has_Null_Visible_Refinement (Id : E) return B;
+   function Has_Overflow_Operations (Id : E) return B with Inline;
    function Implementation_Base_Type (Id : E) return E;
-   function Is_Base_Type (Id : E) return B with Inline;
-   --  Note that Is_Base_Type returns True for nontypes
    function Is_Boolean_Type (Id : E) return B with Inline;
    function Is_Constant_Object (Id : E) return B with Inline;
    function Is_Controlled (Id : E) return B with Inline;
@@ -192,7 +201,6 @@ package Einfo.Utils is
    function Is_Dynamic_Scope (Id : E) return B;
    function Is_Elaboration_Target (Id : E) return B;
    function Is_External_State (Id : E) return B;
-   function Is_Finalizer (Id : E) return B with Inline;
    function Is_Full_Access (Id : E) return B with Inline;
    function Is_Null_State (Id : E) return B;
    function Is_Package_Or_Generic_Package (Id : E) return B with Inline;
@@ -201,7 +209,6 @@ package Einfo.Utils is
    function Is_Protected_Component (Id : E) return B with Inline;
    function Is_Protected_Interface (Id : E) return B;
    function Is_Protected_Record_Type (Id : E) return B with Inline;
-   function Is_Relaxed_Initialization_State (Id : E) return B;
    function Is_Standard_Character_Type (Id : E) return B;
    function Is_Standard_String_Type (Id : E) return B;
    function Is_String_Type (Id : E) return B with Inline;
@@ -242,7 +249,7 @@ package Einfo.Utils is
    function Stream_Size_Clause (Id : E) return N with Inline;
    function Type_High_Bound (Id : E) return N with Inline;
    function Type_Low_Bound (Id : E) return N with Inline;
-   function Underlying_Type (Id : E) return Entity_Id;
+   function Underlying_Type (Id : E) return Opt_N_Entity_Id;
 
    function Scope_Depth (Id : Scope_Kind_Id) return U with Inline;
    function Scope_Depth_Set (Id : Scope_Kind_Id) return B with Inline;
@@ -451,6 +458,8 @@ package Einfo.Utils is
    --    Effective_Reads
    --    Effective_Writes
    --    Exceptional_Cases
+   --    Exit_Cases
+   --    Extensions_Visible
    --    Global
    --    Initial_Condition
    --    Initializes
@@ -458,6 +467,7 @@ package Einfo.Utils is
    --    No_Caching
    --    Part_Of
    --    Precondition
+   --    Program_Exit
    --    Postcondition
    --    Refined_Depends
    --    Refined_Global
@@ -505,6 +515,12 @@ package Einfo.Utils is
    --  is the name of a class_wide type whose root is incomplete, return the
    --  corresponding full declaration, else return T itself.
 
+   function Is_Base_Type (Id : E) return B with Inline;
+   --  Return True for a type entity and False for a subtype entity. Note that
+   --  this returns True for nontypes.
+
+   --  WARNING: There is a matching C declaration of this subprogram in fe.h
+
    function Is_Entity_Name (N : Node_Id) return Boolean with Inline;
    --  Test if the node N is the name of an entity (i.e. is an identifier,
    --  expanded name, or an attribute reference that returns an entity).
@@ -534,6 +550,9 @@ package Einfo.Utils is
    procedure Set_Is_Volatile (Id : E; V : B := True);
    --  Call [Set_]Is_Volatile_Type/Is_Volatile_Object as appropriate for the
    --  Ekind of Id.
+
+   function Can_Have_Formals (Id : Entity_Id) return Boolean;
+   --  A utility function to see whether the entity can have formals.
 
    function Convention
      (N : Entity_Id) return Convention_Id renames Basic_Convention;

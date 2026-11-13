@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 S p e c                                  --
 --                                                                          --
---          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2026, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -121,7 +121,6 @@ package Rtsfind is
       --  Children of Ada.Numerics.Big_Numbers
 
       Ada_Numerics_Big_Numbers_Big_Integers,
-      Ada_Numerics_Big_Numbers_Big_Integers_Ghost,
 
       --  Children of Ada.Real_Time
 
@@ -193,13 +192,20 @@ package Rtsfind is
 
       Interfaces_C_Strings,
 
+      --  Package SPARK
+
+      SPARK,
+
+      --  Children of SPARK
+
+      SPARK_Big_Integers,
+
       --  Package System
 
       System,
 
       --  Children of System
 
-      System_Address_Image,
       System_Address_To_Access_Conversions,
       System_Arith_64,
       System_Arith_128,
@@ -254,7 +260,7 @@ package Rtsfind is
       System_Fat_LFlt,
       System_Fat_LLF,
       System_Fat_SFlt,
-      System_Finalization_Masters,
+      System_Finalization_Primitives,
       System_Finalization_Root,
       System_Fore_Decimal_32,
       System_Fore_Decimal_64,
@@ -263,6 +269,8 @@ package Rtsfind is
       System_Fore_Fixed_64,
       System_Fore_Fixed_128,
       System_Fore_Real,
+      System_Img_Address_32,
+      System_Img_Address_64,
       System_Img_Bool,
       System_Img_Char,
       System_Img_Decimal_32,
@@ -573,7 +581,7 @@ package Rtsfind is
      RE_Reference,                       -- Ada.Interrupts
 
      RE_Big_Integer,             -- Ada.Numerics.Big_Numbers.Big_Integers
-     RO_GH_Big_Integer,          -- Ada.Numerics.Big_Numbers.Big_Integers_Ghost
+     RO_SP_Big_Integer,          -- SPARK.Big_Integers
 
      RE_Names,                           -- Ada.Interrupts.Names
 
@@ -756,7 +764,8 @@ package Rtsfind is
      RE_Null_Address,                    -- System
      RE_Priority,                        -- System
 
-     RE_Address_Image,                   -- System.Address_Image
+     RE_Address_Image32,                 -- System.Img_Address_32
+     RE_Address_Image64,                 -- System.Img_Address_64
 
      RE_Add_With_Ovflo_Check64,          -- System.Arith_64
      RE_Double_Divide64,                 -- System.Arith_64
@@ -764,11 +773,19 @@ package Rtsfind is
      RE_Scaled_Divide64,                 -- System.Arith_64
      RE_Subtract_With_Ovflo_Check64,     -- System.Arith_64
 
+     RE_Uns_Add_With_Ovflo_Check64,      -- System.Arith_64
+     RE_Uns_Multiply_With_Ovflo_Check64, -- System.Arith_64
+     RE_Uns_Subtract_With_Ovflo_Check64, -- System.Arith_64
+
      RE_Add_With_Ovflo_Check128,         -- System.Arith_128
      RE_Double_Divide128,                -- System.Arith_128
      RE_Multiply_With_Ovflo_Check128,    -- System.Arith_128
      RE_Subtract_With_Ovflo_Check128,    -- System.Arith_128
      RE_Scaled_Divide128,                -- System.Arith_128
+
+     RE_Uns_Add_With_Ovflo_Check128,      -- System.Arith_128
+     RE_Uns_Multiply_With_Ovflo_Check128, -- System.Arith_128
+     RE_Uns_Subtract_With_Ovflo_Check128, -- System.Arith_128
 
      RE_Assert_Failure,                  -- System.Assertions
      RE_Raise_Assert_Failure,            -- System.Assertions
@@ -822,6 +839,8 @@ package Rtsfind is
      RE_Bignum_In_LLI_Range,             -- System.Bignums
      RE_To_Bignum,                       -- System.Bignums
      RE_From_Bignum,                     -- System.Bignums
+     RE_LLU_To_Bignum,                   -- System.Bignums
+     RE_LLU_From_Bignum,                 -- System.Bignums
 
      RE_Val_2,                           -- System.Bitfields
      RE_Copy_Bitfield,                   -- System.Bitfields
@@ -917,12 +936,18 @@ package Rtsfind is
 
      RE_Attr_Long_Long_Float,            -- System.Fat_LLF
 
-     RE_Add_Offset_To_Address,           -- System.Finalization_Masters
-     RE_Base_Pool,                       -- System.Finalization_Masters
-     RE_Finalization_Master,             -- System.Finalization_Masters
-     RE_Finalization_Master_Ptr,         -- System.Finalization_Masters
-     RE_Set_Base_Pool,                   -- System.Finalization_Masters
-     RE_Set_Finalize_Address,            -- System.Finalization_Masters
+     RE_Attach_Object_To_Collection,     -- System.Finalization_Primitives
+     RE_Attach_Object_To_Master,         -- System.Finalization_Primitives
+     RE_Attach_Object_To_Node,           -- System.Finalization_Primitives
+     RE_Chain_Node_To_Master,            -- System.Finalization_Primitives
+     RE_Detach_Object_From_Collection,   -- System.Finalization_Primitives
+     RE_Finalization_Collection,         -- System.Finalization_Primitives
+     RE_Finalization_Collection_Ptr,     -- System.Finalization_Primitives
+     RE_Finalization_Master,             -- System.Finalization_Primitives
+     RE_Finalize_Master,                 -- System.Finalization_Primitives
+     RE_Finalize_Object,                 -- System.Finalization_Primitives
+     RE_Master_Node,                     -- System.Finalization_Primitives
+     RE_Suppress_Object_Finalize_At_End, -- System.Finalization_Primitives
 
      RE_Root_Controlled,                 -- System.Finalization_Root
 
@@ -1601,6 +1626,7 @@ package Rtsfind is
 
      RE_Adjust_Storage_Size,             -- System.Parameters
      RE_Default_Stack_Size,              -- System.Parameters
+     RE_Minimum_Stack_Size,              -- System.Parameters
      RE_Size_Type,                       -- System.Parameters
      RE_Unspecified_Size,                -- System.Parameters
 
@@ -1636,6 +1662,7 @@ package Rtsfind is
      RE_Put_Image_Long_Long_Long_Unsigned, -- System.Put_Images
      RE_Put_Image_Thin_Pointer,          -- System.Put_Images
      RE_Put_Image_Fat_Pointer,           -- System.Put_Images
+     RE_Put_Image_Extended_Access_Pointer, -- System.Put_Images
      RE_Put_Image_Access_Subp,           -- System.Put_Images
      RE_Put_Image_Access_Prot_Subp,      -- System.Put_Images
      RE_Put_Image_String,                -- System.Put_Images
@@ -1875,6 +1902,7 @@ package Rtsfind is
      RE_W_U24,                           -- System.Stream_Attributes
      RE_W_WC,                            -- System.Stream_Attributes
      RE_W_WWC,                           -- System.Stream_Attributes
+     RE_W_80IEEE,                        -- System.Stream_Attributes
 
      RE_Storage_Array_Input,             -- System.Strings.Stream_Ops
      RE_Storage_Array_Input_Blk_IO,      -- System.Strings.Stream_Ops
@@ -2036,6 +2064,8 @@ package Rtsfind is
      RE_String_To_Wide_String,           -- System.WCh_StW
      RE_String_To_Wide_Wide_String,      -- System.WCh_StW
 
+     RE_Enum_Wide_String_To_String,      -- System.WCh_WtS
+     RE_Enum_Wide_Wide_String_To_String, -- System.WCh_WtS
      RE_Wide_String_To_String,           -- System.WCh_WtS
      RE_Wide_Wide_String_To_String,      -- System.WCh_WtS
 
@@ -2211,7 +2241,7 @@ package Rtsfind is
      RE_Reference                        => Ada_Interrupts,
 
      RE_Big_Integer             => Ada_Numerics_Big_Numbers_Big_Integers,
-     RO_GH_Big_Integer          => Ada_Numerics_Big_Numbers_Big_Integers_Ghost,
+     RO_SP_Big_Integer          => SPARK_Big_Integers,
 
      RE_Names                            => Ada_Interrupts_Names,
 
@@ -2394,7 +2424,8 @@ package Rtsfind is
      RE_Null_Address                     => System,
      RE_Priority                         => System,
 
-     RE_Address_Image                    => System_Address_Image,
+     RE_Address_Image32                  => System_Img_Address_32,
+     RE_Address_Image64                  => System_Img_Address_64,
 
      RE_Add_With_Ovflo_Check64           => System_Arith_64,
      RE_Double_Divide64                  => System_Arith_64,
@@ -2402,11 +2433,19 @@ package Rtsfind is
      RE_Scaled_Divide64                  => System_Arith_64,
      RE_Subtract_With_Ovflo_Check64      => System_Arith_64,
 
+     RE_Uns_Add_With_Ovflo_Check64       => System_Arith_64,
+     RE_Uns_Multiply_With_Ovflo_Check64  => System_Arith_64,
+     RE_Uns_Subtract_With_Ovflo_Check64  => System_Arith_64,
+
      RE_Add_With_Ovflo_Check128          => System_Arith_128,
      RE_Double_Divide128                 => System_Arith_128,
      RE_Multiply_With_Ovflo_Check128     => System_Arith_128,
      RE_Subtract_With_Ovflo_Check128     => System_Arith_128,
      RE_Scaled_Divide128                 => System_Arith_128,
+
+     RE_Uns_Add_With_Ovflo_Check128      => System_Arith_128,
+     RE_Uns_Multiply_With_Ovflo_Check128 => System_Arith_128,
+     RE_Uns_Subtract_With_Ovflo_Check128 => System_Arith_128,
 
      RE_Assert_Failure                   => System_Assertions,
      RE_Raise_Assert_Failure             => System_Assertions,
@@ -2460,6 +2499,8 @@ package Rtsfind is
      RE_Bignum_In_LLI_Range              => System_Bignums,
      RE_To_Bignum                        => System_Bignums,
      RE_From_Bignum                      => System_Bignums,
+     RE_LLU_To_Bignum                    => System_Bignums,
+     RE_LLU_From_Bignum                  => System_Bignums,
 
      RE_Val_2                            => System_Bitfields,
      RE_Copy_Bitfield                    => System_Bitfields,
@@ -2561,12 +2602,18 @@ package Rtsfind is
 
      RE_Attr_Long_Long_Float             => System_Fat_LLF,
 
-     RE_Add_Offset_To_Address            => System_Finalization_Masters,
-     RE_Base_Pool                        => System_Finalization_Masters,
-     RE_Finalization_Master              => System_Finalization_Masters,
-     RE_Finalization_Master_Ptr          => System_Finalization_Masters,
-     RE_Set_Base_Pool                    => System_Finalization_Masters,
-     RE_Set_Finalize_Address             => System_Finalization_Masters,
+     RE_Attach_Object_To_Collection      => System_Finalization_Primitives,
+     RE_Attach_Object_To_Master          => System_Finalization_Primitives,
+     RE_Attach_Object_To_Node            => System_Finalization_Primitives,
+     RE_Chain_Node_To_Master             => System_Finalization_Primitives,
+     RE_Detach_Object_From_Collection    => System_Finalization_Primitives,
+     RE_Finalization_Collection          => System_Finalization_Primitives,
+     RE_Finalization_Collection_Ptr      => System_Finalization_Primitives,
+     RE_Finalization_Master              => System_Finalization_Primitives,
+     RE_Finalize_Master                  => System_Finalization_Primitives,
+     RE_Finalize_Object                  => System_Finalization_Primitives,
+     RE_Master_Node                      => System_Finalization_Primitives,
+     RE_Suppress_Object_Finalize_At_End  => System_Finalization_Primitives,
 
      RE_Root_Controlled                  => System_Finalization_Root,
 
@@ -3247,6 +3294,7 @@ package Rtsfind is
 
      RE_Adjust_Storage_Size              => System_Parameters,
      RE_Default_Stack_Size               => System_Parameters,
+     RE_Minimum_Stack_Size               => System_Parameters,
      RE_Size_Type                        => System_Parameters,
      RE_Unspecified_Size                 => System_Parameters,
 
@@ -3399,6 +3447,7 @@ package Rtsfind is
      RE_Put_Image_Long_Long_Long_Unsigned => System_Put_Images,
      RE_Put_Image_Thin_Pointer           => System_Put_Images,
      RE_Put_Image_Fat_Pointer            => System_Put_Images,
+     RE_Put_Image_Extended_Access_Pointer => System_Put_Images,
      RE_Put_Image_Access_Subp            => System_Put_Images,
      RE_Put_Image_Access_Prot_Subp       => System_Put_Images,
      RE_Put_Image_String                 => System_Put_Images,
@@ -3521,6 +3570,7 @@ package Rtsfind is
      RE_W_U24                            => System_Stream_Attributes,
      RE_W_WC                             => System_Stream_Attributes,
      RE_W_WWC                            => System_Stream_Attributes,
+     RE_W_80IEEE                         => System_Stream_Attributes,
 
      RE_Storage_Array_Input              => System_Strings_Stream_Ops,
      RE_Storage_Array_Input_Blk_IO       => System_Strings_Stream_Ops,
@@ -3686,6 +3736,8 @@ package Rtsfind is
      RE_String_To_Wide_String            => System_WCh_StW,
      RE_String_To_Wide_Wide_String       => System_WCh_StW,
 
+     RE_Enum_Wide_String_To_String       => System_WCh_WtS,
+     RE_Enum_Wide_Wide_String_To_String  => System_WCh_WtS,
      RE_Wide_String_To_String            => System_WCh_WtS,
      RE_Wide_Wide_String_To_String       => System_WCh_WtS,
 

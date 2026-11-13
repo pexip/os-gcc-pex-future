@@ -1,5 +1,5 @@
 /* Instruction scheduling pass.
-   Copyright (C) 1992-2024 Free Software Foundation, Inc.
+   Copyright (C) 1992-2026 Free Software Foundation, Inc.
    Contributed by Michael Tiemann (tiemann@cygnus.com) Enhanced by,
    and currently maintained by, Jim Wilson (wilson@cygnus.com)
 
@@ -1532,7 +1532,12 @@ compute_trg_info (int trg)
 	  int tf = prob[trg], cf = prob[i];
 
 	  /* In CFGs with low probability edges TF can possibly be zero.  */
-	  sp->src_prob = (tf ? GCOV_COMPUTE_SCALE (cf, tf) : 0);
+	  sp->src_prob = (tf ?
+			  profile_count::from_gcov_type (cf)
+			    .probability_in
+			      (profile_count::from_gcov_type (tf))
+				.to_reg_br_prob_base ()
+			  : 0);
 	  sp->is_valid = (sp->src_prob >= min_spec_prob);
 	}
 
@@ -2855,15 +2860,25 @@ void debug_dependencies (rtx_insn *head, rtx_insn *tail)
       else
 	print_reservation (sched_dump, insn);
 
-      fprintf (sched_dump, "\t: ");
+      fprintf (sched_dump, "\t: FW:");
       {
 	sd_iterator_def sd_it;
 	dep_t dep;
 
 	FOR_EACH_DEP (insn, SD_LIST_FORW, sd_it, dep)
-	  fprintf (sched_dump, "%d%s%s ", INSN_UID (DEP_CON (dep)),
+	  fprintf (sched_dump, " %d%s%s%s", INSN_UID (DEP_CON (dep)),
+		   DEP_TYPE (dep) == REG_DEP_TRUE ? "t" : "",
 		   DEP_NONREG (dep) ? "n" : "",
 		   DEP_MULTIPLE (dep) ? "m" : "");
+	if (sched_verbose >= 5)
+	  {
+	    fprintf (sched_dump, "\n;;\t\t\t\t\t\t: BK:");
+	    FOR_EACH_DEP (insn, SD_LIST_HARD_BACK, sd_it, dep)
+	      fprintf (sched_dump, " %d%s%s%s", INSN_UID (DEP_PRO (dep)),
+		       DEP_TYPE (dep) == REG_DEP_TRUE ? "t" : "",
+		       DEP_NONREG (dep) ? "n" : "",
+		       DEP_MULTIPLE (dep) ? "m" : "");
+	  }
       }
       fprintf (sched_dump, "\n");
     }
@@ -2882,7 +2897,7 @@ dump_rgn_dependencies_dot (FILE *file)
   int bb;
   pretty_printer pp;
 
-  pp.buffer->stream = file;
+  pp.set_output_stream (file);
   pp_printf (&pp, "digraph SchedDG {\n");
 
   for (bb = 0; bb < current_nr_blocks; ++bb)

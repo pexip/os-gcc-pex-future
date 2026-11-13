@@ -1,5 +1,5 @@
 /* IPA visibility pass
-   Copyright (C) 2003-2024 Free Software Foundation, Inc.
+   Copyright (C) 2003-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -17,7 +17,7 @@ You should have received a copy of the GNU General Public License
 along with GCC; see the file COPYING3.  If not see
 <http://www.gnu.org/licenses/>.  */
 
-/* This file implements two related passes: 
+/* This file implements two related passes:
 
      - pass_data_ipa_function_and_variable_visibility run just after
        symbol table, references and callgraph are built
@@ -158,7 +158,7 @@ comdat_can_be_unshared_p_1 (symtab_node *node)
 
 /* COMDAT functions must be shared only if they have address taken,
    otherwise we can produce our own private implementation with
-   -fwhole-program.  
+   -fwhole-program.
    Return true when turning COMDAT function static cannot lead to wrong
    code when the resulting object links with a library defining same COMDAT.
 
@@ -198,6 +198,8 @@ cgraph_externally_visible_p (struct cgraph_node *node,
   if (!TREE_PUBLIC (node->decl)
       || DECL_EXTERNAL (node->decl))
     return false;
+  if (node->ref_by_asm)
+    return true;
 
   /* Do not try to localize built-in functions yet.  One of problems is that we
      end up mangling their asm for WHOPR that makes it impossible to call them
@@ -269,6 +271,8 @@ varpool_node::externally_visible_p (void)
 
   if (!TREE_PUBLIC (decl))
     return false;
+  if (ref_by_asm)
+    return true;
 
   /* If linker counts on us, we must preserve the function.  */
   if (used_from_object_file_p ())
@@ -353,7 +357,7 @@ can_replace_by_local_alias (symtab_node *node)
     node = node->get_alias_target ();
   if (node->weakref)
     return false;
-  
+
   return (node->get_availability () > AVAIL_INTERPOSABLE
 	  && !decl_binds_to_current_def_p (node->decl)
 	  && !node->can_be_discarded_p ());
@@ -390,7 +394,7 @@ update_vtable_references (tree *tp, int *walk_subtrees,
 }
 
 /* In LTO we can remove COMDAT groups and weak symbols.
-   Either turn them into normal symbols or external symbol depending on 
+   Either turn them into normal symbols or external symbol depending on
    resolution info.  */
 
 static void
@@ -769,7 +773,7 @@ function_and_variable_visibility (bool whole_program)
 	 enable more optimization.
 
 	 TODO: We can also update virtual tables.  */
-      if (node->callers 
+      if (node->callers
 	  && can_replace_by_local_alias (node))
 	{
 	  cgraph_node *alias = dyn_cast<cgraph_node *>

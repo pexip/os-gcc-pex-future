@@ -1,5 +1,5 @@
 /* Loop distribution.
-   Copyright (C) 2006-2024 Free Software Foundation, Inc.
+   Copyright (C) 2006-2026 Free Software Foundation, Inc.
    Contributed by Georges-Andre Silber <Georges-Andre.Silber@ensmp.fr>
    and Sebastian Pop <sebastian.pop@amd.com>.
 
@@ -345,9 +345,9 @@ static void
 dot_rdg_1 (FILE *file, struct graph *rdg)
 {
   int i;
-  pretty_printer buffer;
-  pp_needs_newline (&buffer) = false;
-  buffer.buffer->stream = file;
+  pretty_printer pp;
+  pp_needs_newline (&pp) = false;
+  pp.set_output_stream (file);
 
   fprintf (file, "digraph RDG {\n");
 
@@ -357,8 +357,8 @@ dot_rdg_1 (FILE *file, struct graph *rdg)
       struct graph_edge *e;
 
       fprintf (file, "%d [label=\"[%d] ", i, i);
-      pp_gimple_stmt_1 (&buffer, RDGV_STMT (v), 0, TDF_SLIM);
-      pp_flush (&buffer);
+      pp_gimple_stmt_1 (&pp, RDGV_STMT (v), 0, TDF_SLIM);
+      pp_flush (&pp);
       fprintf (file, "\"]\n");
 
       /* Highlight reads from memory.  */
@@ -704,7 +704,7 @@ bb_top_order_cmp_r (const void *x, const void *y, void *loop)
 	      || _loop->get_bb_top_order_index(bb1->index)
 		 != _loop->get_bb_top_order_index(bb2->index));
 
-  return (_loop->get_bb_top_order_index(bb1->index) - 
+  return (_loop->get_bb_top_order_index(bb1->index) -
 	  _loop->get_bb_top_order_index(bb2->index));
 }
 
@@ -1353,6 +1353,7 @@ destroy_loop (class loop *loop)
   redirect_edge_pred (exit, src);
   exit->flags &= ~(EDGE_TRUE_VALUE|EDGE_FALSE_VALUE);
   exit->flags |= EDGE_FALLTHRU;
+  exit->probability = profile_probability::always ();
   cancel_loop_tree (loop);
   rescan_loop_exit (exit, false, true);
 
@@ -1372,7 +1373,7 @@ destroy_loop (class loop *loop)
 
 /* Generates code for PARTITION.  Return whether LOOP needs to be destroyed.  */
 
-static bool 
+static bool
 generate_code_for_partition (class loop *loop,
 			     partition *partition, bool copy_p,
 			     bool keep_lc_phis_p)
@@ -1846,11 +1847,11 @@ loop_distribution::classify_builtin_ldst (loop_p loop, struct graph *rdg,
   /* Now check that if there is a dependence.  */
   ddr_p ddr = get_data_dependence (rdg, src_dr, dst_dr);
 
-  /* Classify as memmove if no dependence between load and store.  */
+  /* Classify as memcpy if no dependence between load and store.  */
   if (DDR_ARE_DEPENDENT (ddr) == chrec_known)
     {
       partition->builtin = alloc_builtin (dst_dr, src_dr, base, src_base, size);
-      partition->kind = PKIND_MEMMOVE;
+      partition->kind = PKIND_MEMCPY;
       return;
     }
 
@@ -3966,7 +3967,8 @@ loop_distribution::execute (function *fun)
   if (changed)
     {
       /* Destroy loop bodies that could not be reused.  Do this late as we
-	 otherwise can end up refering to stale data in control dependences.  */
+	 otherwise can end up referring to stale data in control
+	 dependences.  */
       unsigned i;
       class loop *loop;
       FOR_EACH_VEC_ELT (loops_to_be_destroyed, i, loop)

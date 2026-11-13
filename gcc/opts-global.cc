@@ -1,6 +1,6 @@
 /* Command line option handling.  Code involving global state that
    should not be shared with the driver.
-   Copyright (C) 2002-2024 Free Software Foundation, Inc.
+   Copyright (C) 2002-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -181,7 +181,7 @@ lang_handle_option (struct gcc_options *opts,
 		    unsigned int lang_mask ATTRIBUTE_UNUSED, int kind,
 		    location_t loc,
 		    const struct cl_option_handlers *handlers,
-		    diagnostic_context *dc,
+		    diagnostics::context *dc,
 		    void (*) (void))
 {
   gcc_assert (opts == &global_options);
@@ -215,7 +215,7 @@ read_cmdline_options (struct gcc_options *opts, struct gcc_options *opts_set,
 		      location_t loc,
 		      unsigned int lang_mask,
 		      const struct cl_option_handlers *handlers,
-		      diagnostic_context *dc)
+		      diagnostics::context *dc)
 {
   unsigned int i;
 
@@ -256,13 +256,19 @@ init_options_once (void)
   /* Perform language-specific options initialization.  */
   initial_lang_mask = lang_hooks.option_lang_mask ();
 
+  const bool show_highlight_colors
+    = pp_show_highlight_colors (global_dc->get_reference_printer ());
+
   lang_hooks.initialize_diagnostics (global_dc);
   /* ??? Ideally, we should do this earlier and the FEs will override
      it if desired (none do it so far).  However, the way the FEs
      construct their pretty-printers means that all previous settings
      are overriden.  */
+  global_dc->set_show_highlight_colors (show_highlight_colors);
+
   diagnostic_color_init (global_dc);
   diagnostic_urls_init (global_dc);
+  global_dc->refresh_output_sinks ();
 }
 
 /* Decode command-line options to an array, like
@@ -271,7 +277,7 @@ init_options_once (void)
 
 void
 decode_cmdline_options_to_array_default_mask (unsigned int argc,
-					      const char **argv, 
+					      const char **argv,
 					      struct cl_decoded_option **decoded_options,
 					      unsigned int *decoded_options_count)
 {
@@ -306,7 +312,7 @@ void
 decode_options (struct gcc_options *opts, struct gcc_options *opts_set,
 		struct cl_decoded_option *decoded_options,
 		unsigned int decoded_options_count,
-		location_t loc, diagnostic_context *dc,
+		location_t loc, diagnostics::context *dc,
 		void (*target_option_override_hook) (void))
 {
   struct cl_option_handlers handlers;

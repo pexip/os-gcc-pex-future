@@ -1,6 +1,6 @@
 /* Get common system includes and various definitions and declarations based
    on autoconf macros.
-   Copyright (C) 1998-2024 Free Software Foundation, Inc.
+   Copyright (C) 1998-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -56,8 +56,8 @@ along with GCC; see the file COPYING3.  If not see
    the names to 64bit capable functions for LARGE_FILES support. These
    redefs are pointless here so we can override them.  */
 
-#undef fopen 
-#undef freopen 
+#undef fopen
+#undef freopen
 
 #define fopen(PATH, MODE) fopen_unlocked (PATH, MODE)
 #define fdopen(FILDES, MODE) fdopen_unlocked (FILDES, MODE)
@@ -201,6 +201,9 @@ extern int fprintf_unlocked (FILE *, const char *, ...);
 #if defined (INCLUDE_ALGORITHM) || !defined (HAVE_SWAP_IN_UTILITY)
 # include <algorithm>
 #endif
+#ifdef INCLUDE_DEQUE
+# include <deque>
+#endif
 #ifdef INCLUDE_LIST
 # include <list>
 #endif
@@ -222,6 +225,10 @@ extern int fprintf_unlocked (FILE *, const char *, ...);
 #ifdef INCLUDE_FUNCTIONAL
 # include <functional>
 #endif
+#ifdef INCLUDE_SSTREAM
+# include <sstream>
+#endif
+# include <memory>
 # include <cstring>
 # include <initializer_list>
 # include <new>
@@ -400,7 +407,7 @@ extern int errno;
 
 /* This macro rounds x down to the y boundary.  */
 #define ROUND_DOWN(x,y) ((x) & ~((y) - 1))
- 	
+
 #ifdef HAVE_SYS_WAIT_H
 #include <sys/wait.h>
 #endif
@@ -758,20 +765,9 @@ private:
 #define LIKELY(x) (__builtin_expect ((x), 1))
 #define UNLIKELY(x) (__builtin_expect ((x), 0))
 
-/* Some of the headers included by <memory> can use "abort" within a
-   namespace, e.g. "_VSTD::abort();", which fails after we use the
-   preprocessor to redefine "abort" as "fancy_abort" below.  */
-
-#ifdef INCLUDE_MEMORY
-# include <memory>
-#endif
 
 #ifdef INCLUDE_MUTEX
 # include <mutex>
-#endif
-
-#ifdef INCLUDE_SSTREAM
-# include <sstream>
 #endif
 
 #ifdef INCLUDE_MALLOC_H
@@ -1000,7 +996,8 @@ extern void fancy_abort (const char *, int, const char *)
 	HARD_REGNO_NREGS SECONDARY_MEMORY_NEEDED_MODE			\
 	SECONDARY_MEMORY_NEEDED CANNOT_CHANGE_MODE_CLASS		\
 	TRULY_NOOP_TRUNCATION FUNCTION_ARG_OFFSET CONSTANT_ALIGNMENT	\
-	STARTING_FRAME_OFFSET
+	STARTING_FRAME_OFFSET FLOAT_TYPE_SIZE DOUBLE_TYPE_SIZE		\
+	LONG_DOUBLE_TYPE_SIZE
 
 /* Target macros only used for code built for the target, that have
    moved to libgcc-tm.h or have never been present elsewhere.  */
@@ -1154,54 +1151,6 @@ extern void fancy_abort (const char *, int, const char *)
 #pragma GCC poison ENABLE_CHECKING
 
 #endif /* GCC >= 3.0 */
-
-/* This macro allows casting away const-ness to pass -Wcast-qual
-   warnings.  DO NOT USE THIS UNLESS YOU REALLY HAVE TO!  It should
-   only be used in certain specific cases.  One valid case is where
-   the C standard definitions or prototypes force you to.  E.g. if you
-   need to free a const object, or if you pass a const string to
-   execv, et al.  Another valid use would be in an allocation function
-   that creates const objects that need to be initialized.  In some
-   cases we have non-const functions that return the argument
-   (e.g. next_nonnote_insn).  Rather than create const shadow
-   functions, we can cast away const-ness in calling these interfaces
-   if we're careful to verify that the called function does indeed not
-   modify its argument and the return value is only used in a const
-   context.  (This can be somewhat dangerous as these assumptions can
-   change after the fact).  Beyond these uses, most other cases of
-   using this macro should be viewed with extreme caution.  */
-
-#ifdef __cplusplus
-#define CONST_CAST2(TOTYPE,FROMTYPE,X) (const_cast<TOTYPE> (X))
-#else
-#if defined(__GNUC__) && GCC_VERSION > 4000
-/* GCC 4.0.x has a bug where it may ICE on this expression,
-   so does GCC 3.4.x (PR17436).  */
-#define CONST_CAST2(TOTYPE,FROMTYPE,X) ((__extension__(union {FROMTYPE _q; TOTYPE _nq;})(X))._nq)
-#elif defined(__GNUC__)
-inline char *
-helper_const_non_const_cast (const char *p)
-{
-  union {
-    const char *const_c;
-    char *c;
-  } val;
-  val.const_c = p;
-  return val.c;
-}
-
-#define CONST_CAST2(TOTYPE,FROMTYPE,X) \
-	((TOTYPE) helper_const_non_const_cast ((const char *) (FROMTYPE) (X)))
-#else
-#define CONST_CAST2(TOTYPE,FROMTYPE,X) ((TOTYPE)(FROMTYPE)(X))
-#endif
-#endif
-#define CONST_CAST(TYPE,X) CONST_CAST2 (TYPE, const TYPE, (X))
-#define CONST_CAST_TREE(X) CONST_CAST (union tree_node *, (X))
-#define CONST_CAST_RTX(X) CONST_CAST (struct rtx_def *, (X))
-#define CONST_CAST_RTX_INSN(X) CONST_CAST (struct rtx_insn *, (X))
-#define CONST_CAST_BB(X) CONST_CAST (struct basic_block_def *, (X))
-#define CONST_CAST_GIMPLE(X) CONST_CAST (gimple *, (X))
 
 /* Activate certain diagnostics as warnings (not errors via the
    -Werror flag).  */

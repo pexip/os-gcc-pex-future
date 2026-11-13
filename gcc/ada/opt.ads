@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 S p e c                                  --
 --                                                                          --
---          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2026, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -127,7 +127,7 @@ package Opt is
    --  remains set to Ada_Version_Default). This is used in the rare cases
    --  (notably pragma Obsolescent) where we want the explicit version set.
 
-   Ada_Version_Runtime : Ada_Version_Type := Ada_With_All_Extensions;
+   Ada_Version_Runtime : constant Ada_Version_Type := Ada_With_All_Extensions;
    --  GNAT
    --  Ada version used to compile the runtime. Used to set Ada_Version (but
    --  not Ada_Version_Explicit) when compiling predefined or internal units.
@@ -261,7 +261,9 @@ package Opt is
    --  (switch -B)
 
    CCG_Mode : Boolean := False;
-   --  Set to True when running as CCG (either via -gnatceg or via -emit-c)
+   --  GNAT, GNATBIND
+   --  Set to True when running as CCG (implicitly, via -emit-c, or -G for the
+   --  binder)
 
    Check_Aliasing_Of_Parameters : Boolean := False;
    --  GNAT
@@ -306,6 +308,10 @@ package Opt is
    --  GNATMAKE
    --  Set to True to check readonly files during the make process
 
+   Check_Semantics_Only_Mode : Boolean := False;
+   --  GNATMAKE
+   --  Set to True when -gnatc is present to only perform semantic checking.
+
    Check_Source_Files : Boolean := True;
    --  GNATBIND, GNATMAKE
    --  Set to True to enable consistency checking for any source files that
@@ -332,7 +338,7 @@ package Opt is
    --  True if echoed commands to be written to stdout instead of stderr
 
    Comment_Deleted_Lines : Boolean := False;
-   --  GNATPREP
+   --  GNAT, GNATPREP
    --  True if source lines removed by the preprocessor should be commented
    --  in the output file.
 
@@ -502,6 +508,11 @@ package Opt is
    Elab_Order_Output : Boolean := False;
    --  GNATBIND
    --  Set to True to output chosen elaboration order
+
+   Empty_Comment_Deleted_Lines : Boolean := False;
+   --  GNAT, GNATPREP
+   --  True if source lines removed by the preprocessor are to be replaced
+   --  by empty comment lines ("--!" and no other text) in the output file.
 
    Enable_128bit_Types : Boolean := False;
    --  GNAT
@@ -699,10 +710,10 @@ package Opt is
    --  GNAT
    --  True if generating assembly instead of an object file, via the -S switch
 
-   Generate_C_Code : Boolean := False;
-   --  GNAT, GNATBIND
+   Generate_C_Header : Boolean := False;
+   --  GNAT
    --  If True, the Cprint circuitry to generate C code output is activated.
-   --  Set True by use of -gnateg or -gnatd.V for GNAT, and -G for GNATBIND.
+   --  Set True by use of -gnateg for GNAT.
 
    Generate_CodePeer_Messages : Boolean := False;
    --  GNAT
@@ -740,9 +751,38 @@ package Opt is
    --  Possible legal modes that can be set by aspect/pragma Ghost as well as
    --  value None, which indicates that no such aspect/pragma applies.
 
-   Ghost_Mode : Ghost_Mode_Type := None;
+   type Ghost_Config_Type is record
+      Ghost_Mode : Ghost_Mode_Type := None;
+      --  The current Ghost mode in effect
+
+      Ignored_Ghost_Region : Node_Id := Empty;
+      --  The start of the current ignored Ghost region. This value must always
+      --  reflect the starting node of the outermost ignored Ghost region. If a
+      --  nested ignored Ghost region is entered, the value must remain
+      --  unchanged.
+
+      Ghost_Mode_Assertion_Level : Entity_Id := Empty;
+      --  The Assertion_Level that is applied to the current ghost region.
+      --  It is either:
+      --  * Empty - when there is no ghost region
+      --  * Assertion_Level - if the ghost aspect/pragama had an
+      --    Assertion_Levle associated with it.
+      --  * Standard_Default_Level - if the ghost aspect/pragama did not have
+      --    an Assertion_Level associated to it.
+
+      Current_Region : Node_Id := Empty;
+      --  Latest ghost region
+
+      Is_Inside_Statement_Or_Pragma : Boolean := False;
+      --  A flag to tag whether we are currently in a region that originated
+      --  from a Statement or a pragma. Inside those regions the ghost policy
+      --  in effect for implicitly defined entities is not the policy for Ghost
+      --  but instead the policy for the region (SPARK RM 6.9 (3)).
+   end record;
+
+   Ghost_Config : Ghost_Config_Type;
    --  GNAT
-   --  The current Ghost mode in effect
+   --  All relevant Ghost mode settings
 
    Global_Discard_Names : Boolean := False;
    --  GNAT, GNATBIND
@@ -804,21 +844,11 @@ package Opt is
    --  use of -gnateu, causing subsequent unrecognized switches to result in
    --  a warning rather than an error.
 
-   Ignored_Ghost_Region : Node_Id := Empty;
-   --  GNAT
-   --  The start of the current ignored Ghost region. This value must always
-   --  reflect the starting node of the outermost ignored Ghost region. If a
-   --  nested ignored Ghost region is entered, the value must remain unchanged.
-
    Implicit_Packing : Boolean := False;
    --  GNAT
-   --  If set True, then a Size attribute clause on an array is allowed to
-   --  cause implicit packing instead of generating an error message. Set by
-   --  use of pragma Implicit_Packing.
-
-   Include_Subprogram_In_Messages : Boolean := False;
-   --  GNAT
-   --  Set True to include the enclosing subprogram in compiler messages.
+   --  If set True, then a Size attribute clause on an array or record is
+   --  allowed to cause implicit packing instead of generating an error
+   --  message. Set by use of pragma Implicit_Packing.
 
    Init_Or_Norm_Scalars : Boolean := False;
    --  GNAT, GNATBIND
@@ -941,6 +971,21 @@ package Opt is
 
    --  WARNING: There is a matching C declaration of this variable in fe.h
 
+   List_Representation_Info_Extended : Boolean := False;
+   --  GNAT
+   --  Set true by -gnatRe switch. Causes extended information for record types
+   --  to be included in the representation output information.
+
+   List_Representation_Info_Holes : Boolean := False;
+   --  GNAT
+   --  Set true by -gnatRh switch. Causes information for holes between record
+   --  components to be included in the representation output information.
+
+   List_Representation_Info_Mechanisms : Boolean := False;
+   --  GNAT
+   --  Set true by -gnatRm switch. Causes information on mechanisms to be
+   --  included in the representation output information.
+
    List_Representation_Info_To_File : Boolean := False;
    --  GNAT
    --  Set true by -gnatRs switch. Causes information from -gnatR[1-4]m to be
@@ -952,16 +997,6 @@ package Opt is
    --  GNAT
    --  Set true by -gnatRj switch. Causes information from -gnatR[1-4]m to be
    --  output in the JSON data interchange format.
-
-   List_Representation_Info_Mechanisms : Boolean := False;
-   --  GNAT
-   --  Set true by -gnatRm switch. Causes information on mechanisms to be
-   --  included in the representation output information.
-
-   List_Representation_Info_Extended : Boolean := False;
-   --  GNAT
-   --  Set true by -gnatRe switch. Causes extended information for record types
-   --  to be included in the representation output information.
 
    List_Preprocessing_Symbols : Boolean := False;
    --  GNAT, GNATPREP
@@ -1058,19 +1093,6 @@ package Opt is
    --  GNATMAKE
    --  Set to True if minimal recompilation mode requested
 
-   Minimize_Expression_With_Actions : Boolean := False;
-   --  GNAT
-   --  If True, minimize the use of N_Expression_With_Actions node.
-   --  This can be used in particular on some back-ends where this node is
-   --  difficult to support.
-
-   Modify_Tree_For_C : Boolean := False;
-   --  GNAT
-   --  If this switch is set True (currently it is set only by -gnatd.V), then
-   --  certain meaning-preserving transformations are applied to the tree to
-   --  make it easier to interface with back ends that implement C semantics.
-   --  There is a section in Sinfo which describes the transformations made.
-
    Multiple_Unit_Index : Nat := 0;
    --  GNAT
    --  This is set non-zero if the current unit is being compiled in multiple
@@ -1112,6 +1134,10 @@ package Opt is
    --  GNAT, GNATBIND
    --  This flag is set True if a No_Run_Time pragma is encountered. See spec
    --  of Rtsfind for a full description of handling of this pragma.
+
+   Interrupts_System_By_Default : Boolean := False;
+   --  GNATBIND
+   --  Set True if pragma Interrupts_System_By_Default is seen.
 
    No_Split_Units : Boolean := False;
    --  GPRBUILD
@@ -1351,6 +1377,19 @@ package Opt is
    --  GNATMAKE, GNATLINK
    --  Set to False when no run_path_option should be issued to the linker
 
+   SARIF_File : Boolean := False;
+   --  GNAT
+   --  Output error and warning messages in SARIF format. Set to true when the
+   --  backend option "-fdiagnostics-format=sarif-file" is found on the
+   --  command line. The SARIF file is written to the file named:
+   --  <source_file>.gnat.sarif
+
+   SARIF_Output : Boolean := False;
+   --  GNAT
+   --  Output error and warning messages in SARIF format. Set to true when the
+   --  backend option "-fdiagnostics-format=sarif-stderr" is found on the
+   --  command line.
+
    Search_Directory_Present : Boolean := False;
    --  GNAT
    --  Set to True when argument is -I. Reset to False when next argument, a
@@ -1516,10 +1555,6 @@ package Opt is
    --  used for inconsistency error messages. A value of System_Location is
    --  used if the policy is set in package System.
 
-   Tasking_Used : Boolean := False;
-   --  Set True if any tasking construct is encountered. Used to activate the
-   --  output of the Q, L and T lines in ALI files.
-
    Time_Slice_Set : Boolean := False;
    --  GNATBIND
    --  Set True if a pragma Time_Slice is processed in the main unit, or
@@ -1537,12 +1572,6 @@ package Opt is
    --  GNATBIND
    --  Tolerate time stamp and other consistency errors. If this flag is set to
    --  True (-t), then inconsistencies result in warnings rather than errors.
-
-   Transform_Function_Array : Boolean := False;
-   --  GNAT
-   --  If this switch is set True, then functions returning constrained arrays
-   --  are transformed into a procedure with an out parameter, and all calls
-   --  are updated accordingly.
 
    Treat_Categorization_Errors_As_Warnings : Boolean := False;
    --  Normally categorization errors are true illegalities. If this switch
@@ -1670,6 +1699,11 @@ package Opt is
    --  ignored (except for legality checks), unless we are in GNATprove_Mode,
    --  which requires pragma Warnings to be stored for the formal verification
    --  backend.
+
+   Info_Suppressed : Boolean := False;
+   --  GNAT
+   --  Controls whether informational messages are suppressed. Set True by
+   --  -gnatis. If True, informational messages will not be printed.
 
    Wide_Character_Encoding_Method : WC_Encoding_Method := WCEM_Brackets;
    --  GNAT, GNATBIND

@@ -13,10 +13,10 @@ msoft-mul
 UrlSuffix(gcc/OpenRISC-Options.html#index-msoft-mul)
 
 msoft-float
-UrlSuffix(gcc/OpenRISC-Options.html#index-msoft-float-9)
+UrlSuffix(gcc/OpenRISC-Options.html#index-msoft-float-8)
 
 mhard-float
-UrlSuffix(gcc/OpenRISC-Options.html#index-mhard-float-5)
+UrlSuffix(gcc/OpenRISC-Options.html#index-mhard-float-4)
 
 mdouble-float
 UrlSuffix(gcc/OpenRISC-Options.html#index-mdouble-float-3)
@@ -24,7 +24,8 @@ UrlSuffix(gcc/OpenRISC-Options.html#index-mdouble-float-3)
 munordered-float
 UrlSuffix(gcc/OpenRISC-Options.html#index-munordered-float)
 
-; skipping UrlSuffix for 'mcmodel=' due to finding no URLs
+mcmodel=
+UrlSuffix(gcc/OpenRISC-Options.html#index-mcmodel_003d-3)
 
 mcmov
 UrlSuffix(gcc/OpenRISC-Options.html#index-mcmov-1)

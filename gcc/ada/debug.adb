@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2026, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -67,14 +67,14 @@ package body Debug is
    --  dG   Generate all warnings including those normally suppressed
    --  dH   Hold (kill) call to gigi
    --  dI   Inhibit internal name numbering in gnatG listing
-   --  dJ   Prepend subprogram name in messages
+   --  dJ
    --  dK   Kill all error messages
    --  dL   Ignore external calls from instances for elaboration
    --  dM   Assume all variables are modified (no current values)
    --  dN   No file name information in exception messages
    --  dO   Output immediate error messages
    --  dP   Do not check for controlled objects in preelaborable packages
-   --  dQ
+   --  dQ   Do not generate cleanups for qualified expressions of allocators
    --  dR   Bypass check for correct version of s-rpc
    --  dS   Never convert numbers to machine numbers in Sem_Eval
    --  dT   Convert to machine numbers only for constant declarations
@@ -105,7 +105,7 @@ package body Debug is
    --  d.r  Disable reordering of components in record types
    --  d.s  Strict secondary stack management
    --  d.t  Disable static allocation of library level dispatch tables
-   --  d.u  Enable Modify_Tree_For_C (update tree for c)
+   --  d.u
    --  d.v  Enforce SPARK elaboration rules in SPARK code
    --  d.w  Do not check for infinite loops
    --  d.x  No exception handlers
@@ -148,19 +148,19 @@ package body Debug is
    --  d_h  Disable the use of (perfect) hash functions for enumeration Value
    --  d_i  Ignore activations and calls to instances for elaboration
    --  d_j  Read JSON files and populate Repinfo tables (opposite of -gnatRjs)
-   --  d_k
-   --  d_l
-   --  d_m
+   --  d_k  In CodePeer mode disable expansion of assertion checks
+   --  d_l  Disable strict alignment of array types with aliased component
+   --  d_m  Run adareducer on crash
    --  d_n
-   --  d_o
+   --  d_o  Disable Backend_Overflow_Checks_On_Target; used for testing.
    --  d_p  Ignore assertion pragmas for elaboration
-   --  d_q
+   --  d_q  Do not enforce freezing for equality operator of boolean subtype
    --  d_r  Disable the use of the return slot in functions
    --  d_s  Stop elaboration checks on synchronous suspension
    --  d_t  In LLVM-based CCG, dump LLVM IR after transformations are done
    --  d_u  In LLVM-based CCG, dump flows
    --  d_v  Enable additional checks and debug printouts in Atree
-   --  d_w
+   --  d_w  In LLVM-based CCG, don't send front end data to CCG
    --  d_x  Disable inline expansion of Image attribute for enumeration types
    --  d_y
    --  d_z
@@ -173,22 +173,22 @@ package body Debug is
    --  d_F  Encode full invocation paths in ALI files
    --  d_G
    --  d_H
-   --  d_I
+   --  d_I  Note generic formal type inference
    --  d_J
    --  d_K  (Reserved) Enable reporting a warning on known-problem issues
    --  d_L  Output trace information on elaboration checking
-   --  d_M
+   --  d_M  Ignore Source_File_Name and Source_File_Name_Project pragmas
    --  d_N
    --  d_O
-   --  d_P
+   --  d_P  Disable runtime check for null prefix of prefixed subprogram call
    --  d_Q
    --  d_R  For LLVM, dump the representation of records
    --  d_S
    --  d_T  Output trace information on invocation path recording
    --  d_U  Disable prepending messages with "error:".
-   --  d_V  Enable verifications on the expanded tree
-   --  d_W
-   --  d_X  Disable assertions to check matching of extra formals
+   --  d_V  Enable VAST (verifications on the expanded tree)
+   --  d_W  Enable VAST in verbose mode
+   --  d_X
    --  d_Y
    --  d_Z
 
@@ -207,7 +207,7 @@ package body Debug is
    --  d.3  Output debugging information from Exp_Unst
    --  d.4  Do not delete generated C file in case of errors
    --  d.5  Do not generate imported subprogram definitions in C code
-   --  d.6  Do not avoid declaring unreferenced types in C code
+   --  d.6
    --  d.7  Disable unsound heuristics in gnat2scil (for CP as SPARK prover)
    --  d.8  Disable unconditional inlining of expression functions
    --  d.9
@@ -615,11 +615,6 @@ package body Debug is
    --       is used in the fixed bugs run to minimize system and version
    --       dependency in filed -gnatD or -gnatG output.
 
-   --  dJ   Prepend the name of the enclosing subprogram in compiler messages
-   --       (errors, warnings, style checks). This is useful in particular to
-   --       integrate compiler warnings in static analysis tools such as
-   --       CodePeer.
-
    --  dK   Kill all error messages. This debug flag suppresses the output
    --       of all error messages. It is used in regression tests where the
    --       error messages are target dependent and irrelevant.
@@ -644,6 +639,9 @@ package body Debug is
    --       RM 10.2.1(9) forbids the use of library level controlled objects
    --       in preelaborable packages, but this restriction is a huge pain,
    --       especially in the predefined library units.
+
+   --  dQ   Do not generate cleanups to deallocate the memory in case qualified
+   --       expressions of allocators raise an exception.
 
    --  dR   Bypass the check for a proper version of s-rpc being present
    --       to use the -gnatz? switch. This allows debugging of the use
@@ -802,8 +800,7 @@ package body Debug is
    --       previous dynamic construction of tables. It is there as a possible
    --       work around if we run into trouble with the new implementation.
 
-   --  d.u  Sets Modify_Tree_For_C mode in which tree is modified to make it
-   --       easier to generate code using a C compiler.
+   --  d.u
 
    --  d.v  This flag enforces the elaboration rules defined in the SPARK
    --       Reference Manual, chapter 7.7, to all SPARK code within a unit. As
@@ -990,9 +987,24 @@ package body Debug is
    --       compilation session if -gnatRjs was passed, in order to populate
    --       the internal tables of the Repinfo unit from them.
 
+   --  d_k  In CodePeer mode assertion expressions are expanded by default
+   --       (regardless of the -gnata compiler switch); when this switch is
+   --       enabled, expansion of assertion expressions is controlled by
+   --       pragma Assertion_Policy.
+
+   --  d_l  The compiler does not enforce the strict alignment of array types
+   --       that are declared with an aliased component.
+
+   --  d_o  The compiler disables Backend_Overflow_Checks_On_Target; used to
+   --       test the frontend support on targets without overflow checks.
+
    --  d_p  The compiler ignores calls to subprograms which verify the run-time
    --       semantics of invariants and postconditions in both the static and
    --       dynamic elaboration models.
+
+   --  d_q  The compiler does not enforce the new freezing rule introduced for
+   --       primitive equality operators in Ada 2012 when the operator returns
+   --       a subtype of Boolean.
 
    --  d_r  The compiler does not make use of the return slot in the expansion
    --       of functions returning a by-reference type. If this use is required
@@ -1012,6 +1024,8 @@ package body Debug is
 
    --  d_v  Enable additional checks and debug printouts in Atree
 
+   --  d_w  In LLVM-based CCG, don't send front end data to CCG
+
    --  d_x  The compiler does not expand in line the Image attribute for user-
    --       defined enumeration types and the standard boolean type.
 
@@ -1025,6 +1039,9 @@ package body Debug is
    --       an external target, offering additional information to GNATBIND for
    --       purposes of error diagnostics.
 
+   --  d_I  Generic formal type inference: print a "note:" message for each
+   --       actual type that is inferred, or could be inferred.
+
    --  d_K  (Reserved) Enable reporting a warning on known-problem issues of
    --       previous releases. No action performed in the wavefront.
 
@@ -1032,6 +1049,15 @@ package body Debug is
    --       causes output to be generated showing each call or instantiation as
    --       it is checked, and the progress of the recursive trace through
    --       elaboration calls at compile time.
+
+   --  d_P  For prefixed subprogram calls with an access-type prefix, disable
+   --       the generation of a null-excluding runtime check on the prefix,
+   --       even when the called subprogram has a first access parameter that
+   --       does not exclude null (that is the case only for class-wide
+   --       parameter, as controlling parameters are automatically null-
+   --       excluding). In such a case, P.Proc is equivalent to the call
+   --       Proc(P.all'Access); see RM 6.4(9.1/5). This includes a dereference,
+   --       and thus a null check.
 
    --  d_R  In the LLVM backend, output the internal representation of
    --       each record
@@ -1042,12 +1068,11 @@ package body Debug is
    --  d_U  Disable prepending 'error:' to error messages. This used to be the
    --       default and can be seen as the opposite of -gnatU.
 
-   --  d_V  Enable verification of the expanded code before calling the backend
-   --       and generate error messages on each inconsistency found.
+   --  d_V  Enable VAST (Verifier for the Ada Semantic Tree). This does
+   --       verification of the expanded code before calling the backend.
 
-   --  d_X  Disable assertions to check matching of extra formals; switch added
-   --       temporarily to disable these checks until this work is complete if
-   --       they cause unexpected assertion failures.
+   --  d_W  Same as d_V, but also prints lots of tracing/debugging output
+   --       as it walks the tree.
 
    --  d1   Error messages have node numbers where possible. Normally error
    --       messages have only source locations. This option is useful when
@@ -1112,10 +1137,6 @@ package body Debug is
    --  d.5  By default a subprogram imported generates a subprogram profile.
    --       This debug flag disables this generation when generating C code,
    --       assuming a proper #include will be used instead.
-
-   --  d.6  By default the C back-end avoids declaring types that are not
-   --       referenced by the generated C code. This debug flag restores the
-   --       output of all the types.
 
    --  d.7  Indicates (to gnat2scil) that CodePeer is being invoked as a
    --       prover by the SPARK tools and that therefore gnat2scil should
@@ -1266,15 +1287,15 @@ package body Debug is
    --      display the source file name, the time stamp expected and
    --      the time stamp found.
 
+   subtype Dig  is Character range '1' .. '9';
+   subtype LLet is Character range 'a' .. 'z';
+   subtype ULet is Character range 'A' .. 'Z';
+
    --------------------
    -- Set_Debug_Flag --
    --------------------
 
    procedure Set_Debug_Flag (C : Character; Val : Boolean := True) is
-      subtype Dig  is Character range '1' .. '9';
-      subtype LLet is Character range 'a' .. 'z';
-      subtype ULet is Character range 'A' .. 'Z';
-
    begin
       if C in Dig then
          case Dig (C) is
@@ -1417,10 +1438,6 @@ package body Debug is
    ---------------------------
 
    procedure Set_Dotted_Debug_Flag (C : Character; Val : Boolean := True) is
-      subtype Dig  is Character range '1' .. '9';
-      subtype LLet is Character range 'a' .. 'z';
-      subtype ULet is Character range 'A' .. 'Z';
-
    begin
       if C in Dig then
          case Dig (C) is
@@ -1566,10 +1583,6 @@ package body Debug is
      (C   : Character;
       Val : Boolean := True)
    is
-      subtype Dig  is Character range '1' .. '9';
-      subtype LLet is Character range 'a' .. 'z';
-      subtype ULet is Character range 'A' .. 'Z';
-
    begin
       if C in Dig then
          case Dig (C) is

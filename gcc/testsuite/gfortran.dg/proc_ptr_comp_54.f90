@@ -1,6 +1,6 @@
 !{ dg-do run }
 
-! Check that components of procedure pointer aren't freeed.
+! Do not free procedure pointer components.
 ! Contributed by Damian Rouson  <damian@archaeologic.codes>
 
   implicit none

@@ -1,4 +1,4 @@
-// { dg-options "-O3 -Werror=array-bounds" }
+// { dg-options "-O3 -Werror=array-bounds -fno-assume-sane-operators-new-delete" }
 // { dg-do compile }
 
 // Bug libstdc++/110498

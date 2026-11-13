@@ -1,4 +1,5 @@
 /* { dg-require-effective-target vect_int } */
+/* { dg-additional-options "-fno-tree-scev-cprop" } */
 
 #include <stdarg.h>
 #include "tree-vect.h"
@@ -53,6 +54,7 @@ int main (void)
   return 0;
 }
 
+/* We cannot handle grouped accesses in outer loops.  */
+/* { dg-final { scan-tree-dump-not "OUTER LOOP VECTORIZED" "vect" } } */
 /* { dg-final { scan-tree-dump-times "vectorized 1 loops" 1 "vect"  } } */
-/* { dg-final { scan-tree-dump-times "vectorizing stmts using SLP" 0 "vect"  } } */
-  
+/* { dg-final { scan-tree-dump-times "vectorizing stmts using SLP" 1 "vect"  } } */

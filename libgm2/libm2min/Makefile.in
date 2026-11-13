@@ -108,15 +108,17 @@ target_triplet = @target@
 @ENABLE_DARWIN_AT_RPATH_TRUE@am__append_1 = -nodefaultrpaths -Wl,-rpath,@loader_path/
 subdir = libm2min
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
-am__aclocal_m4_deps = $(top_srcdir)/../libtool.m4 \
-	$(top_srcdir)/../ltoptions.m4 $(top_srcdir)/../ltsugar.m4 \
-	$(top_srcdir)/../ltversion.m4 $(top_srcdir)/../lt~obsolete.m4 \
-	$(top_srcdir)/../config/acx.m4 \
+am__aclocal_m4_deps = $(top_srcdir)/../config/acx.m4 \
+	$(top_srcdir)/../config/clang-plugin.m4 \
 	$(top_srcdir)/../config/depstand.m4 \
+	$(top_srcdir)/../config/gcc-plugin.m4 \
 	$(top_srcdir)/../config/lead-dot.m4 \
 	$(top_srcdir)/../config/multi.m4 \
 	$(top_srcdir)/../config/no-executables.m4 \
-	$(top_srcdir)/../config/override.m4 $(top_srcdir)/acinclude.m4 \
+	$(top_srcdir)/../config/override.m4 \
+	$(top_srcdir)/../libtool.m4 $(top_srcdir)/../ltoptions.m4 \
+	$(top_srcdir)/../ltsugar.m4 $(top_srcdir)/../ltversion.m4 \
+	$(top_srcdir)/../lt~obsolete.m4 $(top_srcdir)/acinclude.m4 \
 	$(top_srcdir)/../config/gc++filt.m4 \
 	$(top_srcdir)/../config/tls.m4 $(top_srcdir)/../config/gthr.m4 \
 	$(top_srcdir)/../config/cet.m4 $(top_srcdir)/configure.ac
@@ -271,6 +273,7 @@ LIBOBJS = @LIBOBJS@
 LIBS = @LIBS@
 LIBTOOL = @LIBTOOL@
 LIPO = @LIPO@
+LLVM_CONFIG = @LLVM_CONFIG@
 LN_S = @LN_S@
 LTLIBOBJS = @LTLIBOBJS@
 MAINT = @MAINT@
@@ -449,6 +452,7 @@ libm2min_la_CFLAGS = -I. -I$(GM2_SRC)/gm2-libs-min -I$(GM2_SRC)/gm2-libs
 libm2min_la_M2FLAGS = \
    -fm2-pathname=m2min -I. -I$(GM2_SRC)/gm2-libs-min \
    -fm2-pathname=m2pim -I$(GM2_SRC)/gm2-libs -fno-exceptions \
+   -Wall \
    -fno-m2-plugin -fno-scaffold-dynamic -fno-scaffold-main -fm2-prefix=m2min
 
 @TARGET_DARWIN_FALSE@libm2min_la_link_flags = $(am__append_1)

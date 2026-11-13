@@ -1,3 +1,4 @@
+! { dg-additional-options "-Wno-deprecated-openmp" }
 module my_omp_lib
   use iso_c_binding, only: c_intptr_t
   !use omp_lib
@@ -30,9 +31,9 @@ module my_omp_lib
 end module my_omp_lib
 
 subroutine zero()
-  !$omp assumes absent (allocate)  ! { dg-error "Invalid 'ALLOCATE' directive at .1. in ABSENT clause: declarative, informational and meta directives not permitted" }
+  !$omp assumes absent (allocate)  ! { dg-error "Invalid 'ALLOCATE' directive at .1. in ABSENT clause: declarative, informational, and meta directives not permitted" }
 
-  !$omp assume absent (allocate)  ! { dg-error "Invalid 'ALLOCATE' directive at .1. in ABSENT clause: declarative, informational and meta directives not permitted" }
+  !$omp assume absent (allocate)  ! { dg-error "Invalid 'ALLOCATE' directive at .1. in ABSENT clause: declarative, informational, and meta directives not permitted" }
   !!$omp end assume
 end
 
