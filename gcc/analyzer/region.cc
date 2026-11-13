@@ -1,5 +1,5 @@
 /* Regions of memory.
-   Copyright (C) 2019-2024 Free Software Foundation, Inc.
+   Copyright (C) 2019-2026 Free Software Foundation, Inc.
    Contributed by David Malcolm <dmalcolm@redhat.com>.
 
 This file is part of GCC.
@@ -18,38 +18,19 @@ You should have received a copy of the GNU General Public License
 along with GCC; see the file COPYING3.  If not see
 <http://www.gnu.org/licenses/>.  */
 
-#include "config.h"
-#define INCLUDE_MEMORY
-#include "system.h"
-#include "coretypes.h"
-#include "tree.h"
-#include "diagnostic-core.h"
-#include "gimple-pretty-print.h"
-#include "function.h"
-#include "basic-block.h"
-#include "gimple.h"
-#include "gimple-iterator.h"
-#include "diagnostic-core.h"
-#include "graphviz.h"
-#include "options.h"
-#include "cgraph.h"
-#include "tree-dfa.h"
-#include "stringpool.h"
-#include "convert.h"
-#include "target.h"
-#include "fold-const.h"
-#include "tree-pretty-print.h"
-#include "diagnostic-color.h"
-#include "bitmap.h"
-#include "analyzer/analyzer.h"
-#include "analyzer/analyzer-logging.h"
+#include "analyzer/common.h"
+
 #include "ordered-hash-map.h"
 #include "options.h"
 #include "cgraph.h"
 #include "cfg.h"
 #include "digraph.h"
-#include "analyzer/supergraph.h"
 #include "sbitmap.h"
+#include "fold-const.h"
+#include "tree-ssa.h"
+
+#include "analyzer/analyzer-logging.h"
+#include "analyzer/supergraph.h"
 #include "analyzer/call-string.h"
 #include "analyzer/program-point.h"
 #include "analyzer/store.h"
@@ -57,6 +38,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "analyzer/region-model.h"
 #include "analyzer/sm.h"
 #include "analyzer/program-state.h"
+#include "text-art/dump.h"
 
 #if ENABLE_ANALYZER
 
@@ -136,17 +118,13 @@ region_offset::dump_to_pp (pretty_printer *pp, bool simple) const
 DEBUG_FUNCTION void
 region_offset::dump (bool simple) const
 {
-  pretty_printer pp;
-  pp_format_decoder (&pp) = default_tree_printer;
-  pp_show_color (&pp) = pp_show_color (global_dc->printer);
-  pp.buffer->stream = stderr;
+  tree_dump_pretty_printer pp (stderr);
   dump_to_pp (&pp, simple);
   pp_newline (&pp);
-  pp_flush (&pp);
 }
 
 /* An svalue that matches the pattern (BASE * FACTOR) + OFFSET
-   where FACTOR or OFFSET could be the identity (represented as NULL).  */
+   where FACTOR or OFFSET could be the identity (represented as nullptr).  */
 
 struct linear_op
 {
@@ -253,7 +231,7 @@ struct linear_op
 	    {
 	      *out = linear_op (binop_sval.get_arg0 (),
 				binop_sval.get_arg1 (),
-				NULL);
+				nullptr);
 	      return true;
 	    }
 	  else if (binop_sval.get_op () == PLUS_EXPR)
@@ -272,7 +250,7 @@ struct linear_op
 		}
 
 	      *out = linear_op (binop_sval.get_arg0 (),
-				NULL,
+				nullptr,
 				binop_sval.get_arg1 ());
 	      return true;
 	    }
@@ -298,8 +276,8 @@ operator< (const region_offset &a, const region_offset &b)
 	  const svalue &a_sval = *a.get_symbolic_byte_offset ();
 	  const svalue &b_sval = *b.get_symbolic_byte_offset ();
 
-	  linear_op op_a (NULL, NULL, NULL);
-	  linear_op op_b (NULL, NULL, NULL);
+	  linear_op op_a (nullptr, nullptr, nullptr);
+	  linear_op op_b (nullptr, nullptr, nullptr);
 	  if (linear_op::from_svalue (a_sval, &op_a)
 	      && linear_op::from_svalue (b_sval, &op_b))
 	    {
@@ -340,8 +318,8 @@ operator<= (const region_offset &a, const region_offset &b)
 	  const svalue &a_sval = *a.get_symbolic_byte_offset ();
 	  const svalue &b_sval = *b.get_symbolic_byte_offset ();
 
-	  linear_op op_a (NULL, NULL, NULL);
-	  linear_op op_b (NULL, NULL, NULL);
+	  linear_op op_a (nullptr, nullptr, nullptr);
+	  linear_op op_b (nullptr, nullptr, nullptr);
 	  if (linear_op::from_svalue (a_sval, &op_a)
 	      && linear_op::from_svalue (b_sval, &op_b))
 	    {
@@ -423,10 +401,8 @@ region::get_base_region () const
 	case RK_OFFSET:
 	case RK_SIZED:
 	case RK_BIT_RANGE:
-	  iter = iter->get_parent_region ();
-	  continue;
 	case RK_CAST:
-	  iter = iter->dyn_cast_cast_region ()->get_original_region ();
+	  iter = iter->get_parent_region ();
 	  continue;
 	default:
 	  return iter;
@@ -466,16 +442,13 @@ region::descendent_of_p (const region *elder) const
     {
       if (iter == elder)
 	return true;
-      if (iter->get_kind () == RK_CAST)
-	iter = iter->dyn_cast_cast_region ()->get_original_region ();
-      else
-	iter = iter->get_parent_region ();
+      iter = iter->get_parent_region ();
     }
   return false;
 }
 
 /* If this region is a frame_region, or a descendent of one, return it.
-   Otherwise return NULL.  */
+   Otherwise return nullptr.  */
 
 const frame_region *
 region::maybe_get_frame_region () const
@@ -485,12 +458,9 @@ region::maybe_get_frame_region () const
     {
       if (const frame_region *frame_reg = iter->dyn_cast_frame_region ())
 	return frame_reg;
-      if (iter->get_kind () == RK_CAST)
-	iter = iter->dyn_cast_cast_region ()->get_original_region ();
-      else
-	iter = iter->get_parent_region ();
+      iter = iter->get_parent_region ();
     }
-  return NULL;
+  return nullptr;
 }
 
 /* Get the memory space of this region.  */
@@ -523,10 +493,7 @@ region::get_memory_space () const
 	case RK_PRIVATE:
 	  return MEMSPACE_PRIVATE;
 	}
-      if (iter->get_kind () == RK_CAST)
-	iter = iter->dyn_cast_cast_region ()->get_original_region ();
-      else
-	iter = iter->get_parent_region ();
+      iter = iter->get_parent_region ();
     }
   return MEMSPACE_UNKNOWN;
 }
@@ -580,15 +547,12 @@ region::can_have_initial_svalue_p () const
 
 	    case SSA_NAME:
 	      {
+		/* Some SSA names have an implicit default defined value.  */
 		tree ssa_name = decl;
-		/* SSA names that are the default defn of a PARM_DECL
-		   have initial_svalues; other SSA names don't.  */
-		if (SSA_NAME_IS_DEFAULT_DEF (ssa_name)
-		    && SSA_NAME_VAR (ssa_name)
-		    && TREE_CODE (SSA_NAME_VAR (ssa_name)) == PARM_DECL)
-		  return true;
-		else
-		  return false;
+		if (SSA_NAME_IS_DEFAULT_DEF (ssa_name))
+		  return ssa_defined_default_def_p (ssa_name);
+		/* Others don't.  */
+		return false;
 	      }
 	    }
 	}
@@ -627,7 +591,7 @@ region::calc_initial_value_at_main (region_model_manager *mgr) const
       else
 	{
 	  /* Get the value for REG within base_reg_init.  */
-	  binding_cluster c (base_reg);
+	  binding_cluster c (*mgr->get_store_manager (), base_reg);
 	  c.bind (mgr->get_store_manager (), base_reg, base_reg_init);
 	  const svalue *sval
 	    = c.get_any_binding (mgr->get_store_manager (), this);
@@ -645,7 +609,7 @@ region::calc_initial_value_at_main (region_model_manager *mgr) const
 }
 
 /* If this region is a decl_region, return the decl.
-   Otherwise return NULL.  */
+   Otherwise return NULL_TREE.  */
 
 tree
 region::maybe_get_decl () const
@@ -805,7 +769,7 @@ get_field_at_bit_offset (tree record_type, bit_offset_t bit_offset)
 {
   gcc_assert (TREE_CODE (record_type) == RECORD_TYPE);
   if (bit_offset < 0)
-    return NULL;
+    return nullptr;
 
   /* Find the first field that has an offset > BIT_OFFSET,
      then return the one preceding it.
@@ -915,7 +879,7 @@ region::calc_offset (region_model_manager *mgr) const
 {
   const region *iter_region = this;
   bit_offset_t accum_bit_offset = 0;
-  const svalue *accum_byte_sval = NULL;
+  const svalue *accum_byte_sval = nullptr;
 
   while (iter_region)
     {
@@ -956,15 +920,8 @@ region::calc_offset (region_model_manager *mgr) const
 	    }
 	  continue;
 	case RK_SIZED:
-	  iter_region = iter_region->get_parent_region ();
-	  continue;
-
 	case RK_CAST:
-	  {
-	    const cast_region *cast_reg
-	      = as_a <const cast_region *> (iter_region);
-	    iter_region = cast_reg->get_original_region ();
-	  }
+	  iter_region = iter_region->get_parent_region ();
 	  continue;
 
 	default:
@@ -1031,22 +988,35 @@ region::get_relative_concrete_byte_range (byte_range *out) const
 DEBUG_FUNCTION void
 region::dump (bool simple) const
 {
-  pretty_printer pp;
-  pp_format_decoder (&pp) = default_tree_printer;
-  pp_show_color (&pp) = pp_show_color (global_dc->printer);
-  pp.buffer->stream = stderr;
+  tree_dump_pretty_printer pp (stderr);
   dump_to_pp (&pp, simple);
   pp_newline (&pp);
-  pp_flush (&pp);
+}
+
+/* Dump a tree-like representation of this region and its constituent symbols
+   to stderr, using global_dc's colorization and theming options.
+
+   For example:
+   . (gdb) call reg->dump()
+   . (26): ‘int’: decl_region(‘x_10(D)’)
+   . ╰─ parent: (9): frame_region(‘test_bitmask_2’, index: 0, depth: 1)
+   .    ╰─ parent: (1): stack region
+   .       ╰─ parent: (0): root region
+  */
+
+DEBUG_FUNCTION void
+region::dump () const
+{
+  text_art::dump (*this);
 }
 
 /* Return a new json::string describing the region.  */
 
-json::value *
+std::unique_ptr<json::value>
 region::to_json () const
 {
   label_text desc = get_desc (true);
-  json::value *reg_js = new json::string (desc.get ());
+  auto reg_js = std::make_unique<json::string> (desc.get ());
   return reg_js;
 }
 
@@ -1070,6 +1040,44 @@ region::maybe_print_for_user (pretty_printer *pp,
     }
 
   return false;
+}
+
+/* Use DWI to create a text_art::widget describing this region in
+   a tree-like form, using PREFIX as a prefix (e.g. for field names).  */
+
+std::unique_ptr<text_art::tree_widget>
+region::make_dump_widget (const text_art::dump_widget_info &dwi,
+			  const char *prefix) const
+{
+  pretty_printer pp;
+  pp_format_decoder (&pp) = default_tree_printer;
+  pp_show_color (&pp) = true;
+
+  if (prefix)
+    pp_printf (&pp, "%s: ", prefix);
+
+  pp_printf (&pp, "(%i): ", get_id ());
+  if (get_type ())
+    pp_printf (&pp, "%qT: ", get_type ());
+
+  print_dump_widget_label (&pp);
+
+  std::unique_ptr<text_art::tree_widget> w
+    (text_art::tree_widget::make (dwi, &pp));
+
+  add_dump_widget_children (*w, dwi);
+
+  if (m_parent)
+    w->add_child (m_parent->make_dump_widget (dwi, "parent"));
+
+  return w;
+}
+
+void
+region::add_dump_widget_children (text_art::tree_widget &,
+				  const text_art::dump_widget_info &) const
+{
+  /* By default, add nothing (parent is added in make_dump_widget).  */
 }
 
 /* Generate a description of this region.  */
@@ -1147,7 +1155,7 @@ region::is_named_decl_p (const char *decl_name) const
 region::region (complexity c, symbol::id_t id, const region *parent, tree type)
 : symbol (c, id),
   m_parent (parent), m_type (type),
-  m_cached_offset (NULL), m_cached_init_sval_at_main (NULL)
+  m_cached_offset (nullptr), m_cached_init_sval_at_main (nullptr)
 {
   gcc_assert (type == NULL_TREE || TYPE_P (type));
 }
@@ -1341,6 +1349,13 @@ frame_region::dump_to_pp (pretty_printer *pp, bool simple) const
 	       function_name (&m_fun), m_index, get_stack_depth ());
 }
 
+void
+frame_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "frame_region(%qs, index: %i, depth: %i)",
+	     function_name (&m_fun), m_index, get_stack_depth ());
+}
+
 const decl_region *
 frame_region::get_region_for_local (region_model_manager *mgr,
 				    tree expr,
@@ -1378,9 +1393,12 @@ frame_region::get_region_for_local (region_model_manager *mgr,
 		    = ext_state->get_engine ()->get_supergraph ())
 		  {
 		    const gimple *def_stmt = SSA_NAME_DEF_STMT (expr);
-		    const supernode *snode
-		      = sg->get_supernode_for_stmt (def_stmt);
-		    gcc_assert (snode->get_function () == &m_fun);
+		    if (gimple_code (def_stmt) != GIMPLE_PHI)
+		      {
+			const supernode *snode
+			  = sg->get_supernode_for_stmt (def_stmt);
+			gcc_assert (snode->get_function () == &m_fun);
+		      }
 		  }
 	  }
 	  break;
@@ -1411,6 +1429,12 @@ globals_region::dump_to_pp (pretty_printer *pp, bool simple) const
     pp_string (pp, "globals");
 }
 
+void
+globals_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_string (pp, "globals");
+}
+
 /* class code_region : public map_region.  */
 
 /* Implementation of region::dump_to_pp vfunc for code_region.  */
@@ -1422,6 +1446,12 @@ code_region::dump_to_pp (pretty_printer *pp, bool simple) const
     pp_string (pp, "code region");
   else
     pp_string (pp, "code_region()");
+}
+
+void
+code_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_string (pp, "code region");
 }
 
 /* class function_region : public region.  */
@@ -1443,6 +1473,14 @@ function_region::dump_to_pp (pretty_printer *pp, bool simple) const
     }
 }
 
+void
+function_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_string (pp, "function_region(");
+  dump_quoted_tree (pp, m_fndecl);
+  pp_string (pp, ")");
+}
+
 /* class label_region : public region.  */
 
 /* Implementation of region::dump_to_pp vfunc for label_region.  */
@@ -1462,6 +1500,14 @@ label_region::dump_to_pp (pretty_printer *pp, bool simple) const
     }
 }
 
+void
+label_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_string (pp, "label_region(");
+  dump_quoted_tree (pp, m_label);
+  pp_string (pp, ")");
+}
+
 /* class stack_region : public region.  */
 
 /* Implementation of region::dump_to_pp vfunc for stack_region.  */
@@ -1473,6 +1519,12 @@ stack_region::dump_to_pp (pretty_printer *pp, bool simple) const
     pp_string (pp, "stack region");
   else
     pp_string (pp, "stack_region()");
+}
+
+void
+stack_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_string (pp, "stack region");
 }
 
 /* class heap_region : public region.  */
@@ -1488,12 +1540,18 @@ heap_region::dump_to_pp (pretty_printer *pp, bool simple) const
     pp_string (pp, "heap_region()");
 }
 
+void
+heap_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_string (pp, "heap_region");
+}
+
 /* class root_region : public region.  */
 
 /* root_region's ctor.  */
 
 root_region::root_region (symbol::id_t id)
-: region (complexity (1, 1), id, NULL, NULL_TREE)
+: region (complexity (1, 1), id, nullptr, NULL_TREE)
 {
 }
 
@@ -1508,6 +1566,12 @@ root_region::dump_to_pp (pretty_printer *pp, bool simple) const
     pp_string (pp, "root_region()");
 }
 
+void
+root_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_string (pp, "root region");
+}
+
 /* class thread_local_region : public space_region.  */
 
 void
@@ -1517,6 +1581,12 @@ thread_local_region::dump_to_pp (pretty_printer *pp, bool simple) const
     pp_string (pp, "thread_local_region");
   else
     pp_string (pp, "thread_local_region()");
+}
+
+void
+thread_local_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_string (pp, "thread_local_region");
 }
 
 /* class symbolic_region : public map_region.  */
@@ -1568,6 +1638,20 @@ symbolic_region::dump_to_pp (pretty_printer *pp, bool simple) const
     }
 }
 
+void
+symbolic_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_string (pp, "symbolic_region: %<*%>");
+}
+
+void
+symbolic_region::
+add_dump_widget_children (text_art::tree_widget &w,
+			  const text_art::dump_widget_info &dwi) const
+{
+  w.add_child (m_sval_ptr->make_dump_widget (dwi, "m_sval_ptr"));
+}
+
 /* class decl_region : public region.  */
 
 /* Implementation of region::dump_to_pp vfunc for decl_region.  */
@@ -1587,13 +1671,19 @@ decl_region::dump_to_pp (pretty_printer *pp, bool simple) const
     }
 }
 
+void
+decl_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "decl_region(%qE)", m_decl);
+}
+
 /* Get the stack depth for the frame containing this decl, or 0
    for a global.  */
 
 int
 decl_region::get_stack_depth () const
 {
-  if (get_parent_region () == NULL)
+  if (get_parent_region () == nullptr)
     return 0;
   if (const frame_region *frame_reg
 	= get_parent_region ()->dyn_cast_frame_region ())
@@ -1603,7 +1693,7 @@ decl_region::get_stack_depth () const
 
 /* If the underlying decl is in the global constant pool,
    return an svalue representing the constant value.
-   Otherwise return NULL.  */
+   Otherwise return nullptr.  */
 
 const svalue *
 decl_region::maybe_get_constant_value (region_model_manager *mgr) const
@@ -1613,7 +1703,7 @@ decl_region::maybe_get_constant_value (region_model_manager *mgr) const
       && DECL_INITIAL (m_decl)
       && TREE_CODE (DECL_INITIAL (m_decl)) == CONSTRUCTOR)
     return get_svalue_for_constructor (DECL_INITIAL (m_decl), mgr);
-  return NULL;
+  return nullptr;
 }
 
 /* Implementation of decl_region::get_svalue_for_constructor
@@ -1626,7 +1716,7 @@ decl_region::calc_svalue_for_constructor (tree ctor,
   /* Create a binding map, applying ctor to it, using this
      decl_region as the base region when building child regions
      for offset calculations.  */
-  binding_map map;
+  binding_map map (*mgr->get_store_manager ());
   if (!map.apply_ctor_to_region (this, ctor, mgr))
     return mgr->get_or_create_unknown_svalue (get_type ());
 
@@ -1655,7 +1745,7 @@ decl_region::get_svalue_for_constructor (tree ctor,
    "main" (either based on DECL_INITIAL, or implicit initialization to
    zero.
 
-   Return NULL if there is a problem.  */
+   Return nullptr if there is a problem.  */
 
 const svalue *
 decl_region::get_svalue_for_initializer (region_model_manager *mgr) const
@@ -1666,10 +1756,10 @@ decl_region::get_svalue_for_initializer (region_model_manager *mgr) const
       /* If we have an "extern" decl then there may be an initializer in
 	 another TU.  */
       if (DECL_EXTERNAL (m_decl))
-	return NULL;
+	return nullptr;
 
       if (empty_p ())
-	return NULL;
+	return nullptr;
 
       /* Implicit initialization to zero; use a compound_svalue for it.
 	 Doing so requires that we have a concrete binding for this region,
@@ -1678,14 +1768,14 @@ decl_region::get_svalue_for_initializer (region_model_manager *mgr) const
       const binding_key *binding
 	= binding_key::make (mgr->get_store_manager (), this);
       if (binding->symbolic_p ())
-	return NULL;
+	return nullptr;
 
       /* If we don't care about tracking the content of this region, then
 	 it's unused, and the value doesn't matter.  */
       if (!tracked_p ())
-	return NULL;
+	return nullptr;
 
-      binding_cluster c (this);
+      binding_cluster c (*mgr->get_store_manager (), this);
       c.zero_fill_region (mgr->get_store_manager (), this);
       return mgr->get_or_create_compound_svalue (TREE_TYPE (m_decl),
 						 c.get_map ());
@@ -1694,14 +1784,14 @@ decl_region::get_svalue_for_initializer (region_model_manager *mgr) const
   /* LTO can write out error_mark_node as the DECL_INITIAL for simple scalar
      values (to avoid writing out an extra section).  */
   if (init == error_mark_node)
-    return NULL;
+    return nullptr;
 
   if (TREE_CODE (init) == CONSTRUCTOR)
     return get_svalue_for_constructor (init, mgr);
 
   /* Reuse the get_rvalue logic from region_model.  */
   region_model m (mgr);
-  return m.get_rvalue (path_var (init, 0), NULL);
+  return m.get_rvalue (path_var (init, 0), nullptr);
 }
 
 /* Subroutine of symnode_requires_tracking_p; return true if REF
@@ -1715,7 +1805,7 @@ ipa_ref_requires_tracking (ipa_ref *ref)
   if (ref->use != IPA_REF_ADDR)
     return true;
 
-  if (ref->stmt == NULL)
+  if (ref->stmt == nullptr)
     return true;
 
   switch (ref->stmt->code)
@@ -1725,12 +1815,12 @@ ipa_ref_requires_tracking (ipa_ref *ref)
     case GIMPLE_CALL:
       {
 	cgraph_node *caller_cnode = dyn_cast <cgraph_node *> (ref->referring);
-	if (caller_cnode == NULL)
+	if (caller_cnode == nullptr)
 	  return true;
 	cgraph_edge *edge = caller_cnode->get_edge (ref->stmt);
 	if (!edge)
 	  return true;
-	if (edge->callee == NULL)
+	if (edge->callee == nullptr)
 	  return true; /* e.g. call through function ptr.  */
 	if (edge->callee->definition)
 	  return true;
@@ -1765,7 +1855,7 @@ symnode_requires_tracking_p (symtab_node *symnode)
   if (symnode->externally_visible)
     return true;
   tree context_fndecl = DECL_CONTEXT (symnode->decl);
-  if (context_fndecl == NULL)
+  if (context_fndecl == nullptr)
     return true;
   if (TREE_CODE (context_fndecl) != FUNCTION_DECL)
     return true;
@@ -1814,6 +1904,12 @@ field_region::dump_to_pp (pretty_printer *pp, bool simple) const
       print_quoted_type (pp, get_type ());
       pp_printf (pp, ", %qE)", m_field);
     }
+}
+
+void
+field_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "field_region(%qE)", m_field);
 }
 
 /* Implementation of region::get_relative_concrete_offset vfunc
@@ -1890,6 +1986,20 @@ element_region::dump_to_pp (pretty_printer *pp, bool simple) const
       m_index->dump_to_pp (pp, simple);
       pp_printf (pp, ")");
     }
+}
+
+void
+element_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "element_region: %<[]%>");
+}
+
+void
+element_region::
+add_dump_widget_children (text_art::tree_widget &w,
+			  const text_art::dump_widget_info &dwi) const
+{
+  w.add_child (m_index->make_dump_widget (dwi, "m_index"));
 }
 
 /* Implementation of region::get_relative_concrete_offset vfunc
@@ -1980,6 +2090,20 @@ offset_region::dump_to_pp (pretty_printer *pp, bool simple) const
     }
 }
 
+void
+offset_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "offset_region");
+}
+
+void
+offset_region::
+add_dump_widget_children (text_art::tree_widget &w,
+			  const text_art::dump_widget_info &dwi) const
+{
+  w.add_child (m_byte_offset->make_dump_widget (dwi, "m_byte_offset"));
+}
+
 const svalue *
 offset_region::get_bit_offset (region_model_manager *mgr) const
 {
@@ -2053,6 +2177,20 @@ sized_region::dump_to_pp (pretty_printer *pp, bool simple) const
     }
 }
 
+void
+sized_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "sized_region");
+}
+
+void
+sized_region::
+add_dump_widget_children (text_art::tree_widget &w,
+			  const text_art::dump_widget_info &dwi) const
+{
+  w.add_child (m_byte_size_sval->make_dump_widget (dwi, "m_byte_size_sval"));
+}
+
 /* Implementation of region::get_byte_size vfunc for sized_region.  */
 
 bool
@@ -2092,15 +2230,6 @@ sized_region::get_bit_size_sval (region_model_manager *mgr) const
 
 /* class cast_region : public region.  */
 
-/* Implementation of region::accept vfunc for cast_region.  */
-
-void
-cast_region::accept (visitor *v) const
-{
-  region::accept (v);
-  m_original_region->accept (v);
-}
-
 /* Implementation of region::dump_to_pp vfunc for cast_region.  */
 
 void
@@ -2111,17 +2240,23 @@ cast_region::dump_to_pp (pretty_printer *pp, bool simple) const
       pp_string (pp, "CAST_REG(");
       print_quoted_type (pp, get_type ());
       pp_string (pp, ", ");
-      m_original_region->dump_to_pp (pp, simple);
+      get_parent_region ()->dump_to_pp (pp, simple);
       pp_string (pp, ")");
     }
   else
     {
       pp_string (pp, "cast_region(");
-      m_original_region->dump_to_pp (pp, simple);
+      get_parent_region ()->dump_to_pp (pp, simple);
       pp_string (pp, ", ");
       print_quoted_type (pp, get_type ());
       pp_printf (pp, ")");
     }
+}
+
+void
+cast_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "cast_region");
 }
 
 /* Implementation of region::get_relative_concrete_offset vfunc
@@ -2147,6 +2282,12 @@ heap_allocated_region::dump_to_pp (pretty_printer *pp, bool simple) const
     pp_printf (pp, "heap_allocated_region(%i)", get_id ());
 }
 
+void
+heap_allocated_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "heap_allocated_region");
+}
+
 /* class alloca_region : public region.  */
 
 /* Implementation of region::dump_to_pp vfunc for alloca_region.  */
@@ -2158,6 +2299,12 @@ alloca_region::dump_to_pp (pretty_printer *pp, bool simple) const
     pp_printf (pp, "ALLOCA_REGION(%i)", get_id ());
   else
     pp_printf (pp, "alloca_region(%i)", get_id ());
+}
+
+void
+alloca_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "alloca_region");
 }
 
 /* class string_region : public region.  */
@@ -2180,6 +2327,14 @@ string_region::dump_to_pp (pretty_printer *pp, bool simple) const
 	  pp_string (pp, "))");
 	}
     }
+}
+
+void
+string_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_string (pp, "string_region(");
+  dump_tree (pp, m_string_cst);
+  pp_string (pp, ")");
 }
 
 /* class bit_range_region : public region.  */
@@ -2205,6 +2360,14 @@ bit_range_region::dump_to_pp (pretty_printer *pp, bool simple) const
       m_bits.dump_to_pp (pp);
       pp_printf (pp, ")");
     }
+}
+
+void
+bit_range_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "bit_range_region(m_bits: ");
+  m_bits.dump_to_pp (pp);
+  pp_string (pp, ")");
 }
 
 /* Implementation of region::get_byte_size vfunc for bit_range_region.  */
@@ -2293,6 +2456,12 @@ var_arg_region::dump_to_pp (pretty_printer *pp, bool simple) const
     }
 }
 
+void
+var_arg_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "var_arg_region(arg_idx: %i)", m_idx);
+}
+
 /* Get the frame_region for this var_arg_region.  */
 
 const frame_region *
@@ -2313,6 +2482,12 @@ errno_region::dump_to_pp (pretty_printer *pp, bool simple) const
     pp_string (pp, "errno_region()");
 }
 
+void
+errno_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "errno_region");
+}
+
 /* class private_region : public region.  */
 
 void
@@ -2324,6 +2499,12 @@ private_region::dump_to_pp (pretty_printer *pp, bool simple) const
     pp_printf (pp, "private_region(%qs)", m_desc);
 }
 
+void
+private_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "private_region(%qs)", m_desc);
+}
+
 /* class unknown_region : public region.  */
 
 /* Implementation of region::dump_to_pp vfunc for unknown_region.  */
@@ -2332,6 +2513,12 @@ void
 unknown_region::dump_to_pp (pretty_printer *pp, bool /*simple*/) const
 {
   pp_string (pp, "UNKNOWN_REGION");
+}
+
+void
+unknown_region::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "unknown_region");
 }
 
 } // namespace ana

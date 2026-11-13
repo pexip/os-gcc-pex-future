@@ -1,5 +1,5 @@
 /* Language-dependent hooks for C++.
-   Copyright (C) 2001-2024 Free Software Foundation, Inc.
+   Copyright (C) 2001-2026 Free Software Foundation, Inc.
    Contributed by Alexandre Oliva  <aoliva@redhat.com>
 
 This file is part of GCC.
@@ -186,7 +186,7 @@ template_arg_needs_folding (const_tree t)
 static tree
 fold_cplus_constants (const_tree c)
 {
-  tree folded_elems, elems = CONST_CAST_TREE (c);
+  tree folded_elems, elems = const_cast<tree> (c);
   int vec_len, i;
 
   if (elems == NULL_TREE || elems == error_mark_node)
@@ -211,7 +211,7 @@ fold_cplus_constants (const_tree c)
   for (i = 0; i < vec_len; ++i)
     {
       tree elem = TREE_VEC_ELT (elems, i);
-      TREE_VEC_ELT (folded_elems, i) =  
+      TREE_VEC_ELT (folded_elems, i) =
 	(elem && !TYPE_P (elem)) ? cplus_expand_constant (elem) : elem;
 
     }

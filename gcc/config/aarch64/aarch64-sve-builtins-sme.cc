@@ -1,5 +1,5 @@
 /* ACLE support for AArch64 SME.
-   Copyright (C) 2023-2024 Free Software Foundation, Inc.
+   Copyright (C) 2023-2026 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -112,7 +112,7 @@ add_load_store_slice_operand (function_expander &e, insn_code icode,
   rtx base = e.args[argno];
   if (e.mode_suffix_id == MODE_vnum)
     {
-      rtx vnum = lowpart_subreg (SImode, e.args[vnum_argno], DImode);
+      rtx vnum = force_lowpart_subreg (SImode, e.args[vnum_argno], DImode);
       base = simplify_gen_binary (PLUS, SImode, base, vnum);
     }
   e.add_input_operand (icode, base);
@@ -352,26 +352,54 @@ public:
   unsigned int m_bits;
 };
 
-class svread_za_impl : public function_base
+/* LUTI4 (four registers, 8-bit)
+   Variants are also available for: _u8
+   svint8x4_t svluti4_zt_s8_x4 (uint64_t zt0, svuint8x2_t zn)
+	      __arm_streaming __arm_in ("zt0");  */
+class svluti_zt_impl : public read_zt0<function_base>
 {
 public:
-  unsigned int
-  call_properties (const function_instance &) const override
+  CONSTEXPR svluti_zt_impl (unsigned int bits) : m_bits (bits) {}
+
+  unsigned int call_properties (const function_instance &) const override
   {
-    return CP_READ_ZA;
+    return CP_READ_ZT0;
   }
 
+  rtx expand (function_expander &e) const override
+  {
+    // Remove `zt0` argument, since it is ignored.
+    e.args.ordered_remove (0);
+    return e.use_exact_insn (CODE_FOR_aarch64_sme_lut_zt);
+  }
+
+  unsigned int m_bits;
+};
+
+template<insn_code (*CODE) (machine_mode)>
+class svread_za_slice_base : public function_base
+{
+public:
   rtx
   expand (function_expander &e) const override
   {
     machine_mode mode = e.vectors_per_tuple () == 4 ? VNx8DImode : VNx4DImode;
-    rtx res = e.use_exact_insn (code_for_aarch64_sme_read (mode));
+    rtx res = e.use_exact_insn (CODE (mode));
     return aarch64_sve_reinterpret (e.result_mode (), res);
   }
 };
 
+using svread_za_impl = add_call_properties
+  <svread_za_slice_base<code_for_aarch64_sme_read>, CP_READ_ZA>;
+
 using svread_za_tile_impl = add_call_properties<read_write_za_base,
 						CP_READ_ZA>;
+
+using svreadz_za_impl = add_call_properties
+  <svread_za_slice_base<code_for_aarch64_sme_readz>, CP_READ_ZA | CP_WRITE_ZA>;
+
+using svreadz_za_tile_impl = add_call_properties<read_write_za_base,
+						 CP_READ_ZA | CP_WRITE_ZA>;
 
 class svst1_za_impl : public store_za_base
 {
@@ -463,6 +491,51 @@ public:
   }
 };
 
+/* MOVT (vector to table)
+   Variants are also available for:
+   [_s8], [_u16], [_s16], [_u32], [_s32], [_u64], [_s64]
+   [_bf16], [_f16], [_f32], [_f64]
+   void svwrite_lane_zt[_u8] (uint64_t zt0, svuint8_t zt, uint64_t idx)
+	__arm_streaming __arm_out ("zt0");  */
+class svwrite_lane_zt_impl : public function_base
+{
+public:
+  unsigned int call_properties (const function_instance &) const override
+  {
+    return CP_WRITE_ZT0;
+  }
+
+  rtx expand (function_expander &e) const override
+  {
+    // Remove `zt0` argument, since it is ignored.
+    e.args.ordered_remove (0);
+    auto mode = e.args[0]->mode;
+    return e.use_exact_insn (code_for_aarch64_sme_write_zt (mode));
+  }
+};
+
+/* MOVT (vector to table)
+   Variants are also available for:
+   [_s8], [_u16], [_s16], [_u32], [_s32], [_u64], [_s64]
+   [_bf16], [_f16], [_f32], [_f64]
+   void svwrite_zt[_u8] (uint64_t zt0, svuint8_t zt)
+	__arm_streaming __arm_out ("zt0");  */
+class svwrite_zt_impl : public function_base
+{
+public:
+  unsigned int call_properties (const function_instance &) const override
+  {
+    return CP_WRITE_ZT0;
+  }
+
+  rtx expand (function_expander &e) const override
+  {
+    // svwrite_zt (zt0, zt) == svwrite_lane_zt (zt0, zt, 0)
+    e.args.safe_push (const0_rtx);
+    return svwrite_lane_zt_impl ().expand (e);
+  }
+};
+
 using svwrite_za_tile_impl = add_call_properties<read_write_za_base,
 						 CP_READ_ZA | CP_WRITE_ZA>;
 
@@ -476,12 +549,48 @@ public:
   }
 };
 
+/* Return the mode iterator value that is used to represent a zeroing
+   of the ZA vectors described by GROUP.  */
+static machine_mode
+zero_slices_mode (group_suffix_index group)
+{
+  switch (group)
+    {
+    case GROUP_vg1x2:
+      return VNx8SImode;
+    case GROUP_vg1x4:
+      return VNx16SImode;
+
+    case GROUP_vg2x1:
+      return VNx8HImode;
+    case GROUP_vg2x2:
+      return VNx16HImode;
+    case GROUP_vg2x4:
+      return VNx32HImode;
+
+    case GROUP_vg4x1:
+      return VNx16QImode;
+    case GROUP_vg4x2:
+      return VNx32QImode;
+    case GROUP_vg4x4:
+      return VNx64QImode;
+
+    default:
+      gcc_unreachable ();
+    }
+}
+
 class svzero_za_impl : public write_za<function_base>
 {
 public:
   rtx
-  expand (function_expander &) const override
+  expand (function_expander &e) const override
   {
+    if (e.args.length () == 1)
+      {
+	auto mode = zero_slices_mode (e.group_suffix_id);
+	return e.use_exact_insn (code_for_aarch64_sme_zero_za_slices (mode));
+      }
     emit_insn (gen_aarch64_sme_zero_za (gen_int_mode (0xff, SImode)));
     return const0_rtx;
   }
@@ -519,33 +628,40 @@ FUNCTION (svcntsd, svcnts_bhwd_impl, (VNx2DImode))
 FUNCTION (svcntsh, svcnts_bhwd_impl, (VNx8HImode))
 FUNCTION (svcntsw, svcnts_bhwd_impl, (VNx4SImode))
 FUNCTION (svdot_za, sme_2mode_function, (UNSPEC_SME_SDOT, UNSPEC_SME_UDOT,
-					 UNSPEC_SME_FDOT))
+					 UNSPEC_SME_FDOT,
+					 UNSPEC_SME_FDOT_FP8))
 FUNCTION (svdot_lane_za, sme_2mode_lane_function, (UNSPEC_SME_SDOT,
 						   UNSPEC_SME_UDOT,
-						   UNSPEC_SME_FDOT))
+						   UNSPEC_SME_FDOT,
+						   UNSPEC_SME_FDOT_FP8))
 FUNCTION (svld1_hor_za, svld1_za_impl, (UNSPEC_SME_LD1_HOR))
 FUNCTION (svld1_ver_za, svld1_za_impl, (UNSPEC_SME_LD1_VER))
 FUNCTION (svldr_za, svldr_za_impl, )
 FUNCTION (svldr_zt, svldr_zt_impl, )
 FUNCTION (svluti2_lane_zt, svluti_lane_zt_impl, (2))
 FUNCTION (svluti4_lane_zt, svluti_lane_zt_impl, (4))
+FUNCTION (svluti4_zt, svluti_zt_impl, (4))
 FUNCTION (svmla_za, sme_2mode_function, (UNSPEC_SME_SMLA, UNSPEC_SME_UMLA,
-					 UNSPEC_SME_FMLA))
+					 UNSPEC_SME_FMLA, UNSPEC_SME_FMLAL))
 FUNCTION (svmla_lane_za, sme_2mode_lane_function, (UNSPEC_SME_SMLA,
 						   UNSPEC_SME_UMLA,
-						   UNSPEC_SME_FMLA))
+						   UNSPEC_SME_FMLA,
+						   UNSPEC_SME_FMLAL))
 FUNCTION (svmls_za, sme_2mode_function, (UNSPEC_SME_SMLS, UNSPEC_SME_UMLS,
 					 UNSPEC_SME_FMLS))
 FUNCTION (svmls_lane_za, sme_2mode_lane_function, (UNSPEC_SME_SMLS,
 						   UNSPEC_SME_UMLS,
 						   UNSPEC_SME_FMLS))
 FUNCTION (svmopa_za, sme_2mode_function, (UNSPEC_SME_SMOPA, UNSPEC_SME_UMOPA,
-					  UNSPEC_SME_FMOPA))
+					  UNSPEC_SME_FMOPA, UNSPEC_SME_FMOPA))
 FUNCTION (svmops_za, sme_2mode_function, (UNSPEC_SME_SMOPS, UNSPEC_SME_UMOPS,
 					  UNSPEC_SME_FMOPS))
 FUNCTION (svread_za, svread_za_impl,)
 FUNCTION (svread_hor_za, svread_za_tile_impl, (UNSPEC_SME_READ_HOR))
 FUNCTION (svread_ver_za, svread_za_tile_impl, (UNSPEC_SME_READ_VER))
+FUNCTION (svreadz_za, svreadz_za_impl,)
+FUNCTION (svreadz_hor_za, svreadz_za_tile_impl, (UNSPEC_SME_READZ_HOR))
+FUNCTION (svreadz_ver_za, svreadz_za_tile_impl, (UNSPEC_SME_READZ_VER))
 FUNCTION (svst1_hor_za, svst1_za_impl, (UNSPEC_SME_ST1_HOR))
 FUNCTION (svst1_ver_za, svst1_za_impl, (UNSPEC_SME_ST1_VER))
 FUNCTION (svstr_za, svstr_za_impl, )
@@ -569,10 +685,17 @@ FUNCTION (svusmopa_za, sme_2mode_function, (-1, UNSPEC_SME_USMOPA, -1))
 FUNCTION (svusmops_za, sme_2mode_function, (-1, UNSPEC_SME_USMOPS, -1))
 FUNCTION (svvdot_lane_za, sme_2mode_lane_function, (UNSPEC_SME_SVDOT,
 						    UNSPEC_SME_UVDOT,
-						    UNSPEC_SME_FVDOT))
+						    UNSPEC_SME_FVDOT,
+						    UNSPEC_SME_FVDOT_FP8))
+FUNCTION (svvdotb_lane_za, svvdot_half_impl,
+	  (-1, -1, -1, UNSPEC_SME_FVDOTB_FP8))
+FUNCTION (svvdott_lane_za, svvdot_half_impl,
+	  (-1, -1, -1, UNSPEC_SME_FVDOTT_FP8))
 FUNCTION (svwrite_za, svwrite_za_impl,)
 FUNCTION (svwrite_hor_za, svwrite_za_tile_impl, (UNSPEC_SME_WRITE_HOR))
 FUNCTION (svwrite_ver_za, svwrite_za_tile_impl, (UNSPEC_SME_WRITE_VER))
+FUNCTION (svwrite_zt,      svwrite_zt_impl,)
+FUNCTION (svwrite_lane_zt, svwrite_lane_zt_impl,)
 FUNCTION (svzero_mask_za, svzero_mask_za_impl, )
 FUNCTION (svzero_za, svzero_za_impl, )
 FUNCTION (svzero_zt, svzero_zt_impl, )

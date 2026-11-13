@@ -4,15 +4,20 @@
  * Functions and objects dedicated to file I/O and management. TODO: Move here artifacts
  * from places such as root/ so both the frontend and the backend have access to them.
  *
- * Copyright: Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
+ * Copyright: Copyright (C) 1999-2026 by The D Language Foundation, All Rights Reserved
  * Authors:   Walter Bright, https://www.digitalmars.com
  * License:   $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
- * Source:    $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/common/file.d, common/_file.d)
+ * Source:    $(LINK2 https://github.com/dlang/dmd/blob/master/compiler/src/dmd/common/file.d, common/_file.d)
  * Documentation: https://dlang.org/phobos/dmd_common_file.html
- * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/src/dmd/common/file.d
+ * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/compiler/src/dmd/common/file.d
  */
 
 module dmd.common.file;
+
+import core.stdc.stdio;
+import core.stdc.stdlib;
+import core.stdc.string;
+import core.stdc.limits;
 
 import core.stdc.errno : errno;
 import core.stdc.stdio : fprintf, remove, rename, stderr;
@@ -20,18 +25,22 @@ import core.stdc.stdlib;
 import core.stdc.string : strerror, strlen, memcpy;
 
 import dmd.common.smallbuffer;
+import dmd.root.filename;
+import dmd.root.rmem;
 
 version (Windows)
 {
+    import core.stdc.wchar_;
     import core.sys.windows.winbase;
-    import core.sys.windows.winnls : CP_ACP;
+    import core.sys.windows.winnls : CP_UTF8;
     import core.sys.windows.winnt;
 
-    enum CodePage = CP_ACP; // assume filenames encoded in system default Windows ANSI code page
+    enum CodePage = CP_UTF8; // assume filenames already gone through Windows ANSI code page -> UTF8 conversion
     enum invalidHandle = INVALID_HANDLE_VALUE;
 }
 else version (Posix)
 {
+    import core.sys.posix.dirent;
     import core.sys.posix.fcntl;
     import core.sys.posix.sys.mman;
     import core.sys.posix.sys.stat;
@@ -42,7 +51,6 @@ else version (Posix)
 }
 else
     static assert(0);
-
 
 
 
@@ -113,7 +121,7 @@ struct FileMapping(Datum)
 
             if (size > 0 && size != ulong.max && size <= size_t.max)
             {
-                auto p = mmap(null, cast(size_t) size, is(Datum == const) ? PROT_READ : PROT_WRITE, MAP_SHARED, handle, 0);
+                auto p = mmap(null, cast(size_t) size, is(Datum == const) ? PROT_READ : (PROT_READ | PROT_WRITE), MAP_SHARED, handle, 0);
                 if (p == MAP_FAILED)
                 {
                     fprintf(stderr, "mmap(null, %zu) for \"%s\" failed: %s\n", cast(size_t) size, filename, strerror(errno));
@@ -374,8 +382,8 @@ struct FileMapping(Datum)
                 }
                 if (size > 0)
                 {
-                    auto p = mmap(null, size, PROT_WRITE, MAP_SHARED, handle, 0);
-                    if (cast(ssize_t) p == -1)
+                    auto p = mmap(null, size, PROT_READ | PROT_WRITE, MAP_SHARED, handle, 0);
+                    if (p == MAP_FAILED)
                     {
                         fprintf(stderr, "mmap() failed for \"%s\": %s\n", filename, strerror(errno));
                         exit(1);
@@ -463,21 +471,19 @@ extern(D) static bool writeFile(const(char)* name, const void[] data) nothrow
     {
         int fd = open(name, O_CREAT | O_WRONLY | O_TRUNC, (6 << 6) | (4 << 3) | 4);
         if (fd == -1)
-            goto err;
+            return false;
         if (.write(fd, data.ptr, data.length) != data.length)
-            goto err2;
+        {
+            close(fd);
+            .remove(name);
+            return false;
+        }
         if (close(fd) == -1)
-            goto err;
+            return false;
         return true;
-    err2:
-        close(fd);
-        .remove(name);
-    err:
-        return false;
     }
     else version (Windows)
     {
-        DWORD numwritten; // here because of the gotos
         const nameStr = name[0 .. strlen(name)];
         // work around Windows file path length limitation
         // (see documentation for extendedPathThen).
@@ -490,20 +496,21 @@ extern(D) static bool writeFile(const(char)* name, const void[] data) nothrow
                                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
                                 null));
         if (h == INVALID_HANDLE_VALUE)
-            goto err;
-
+            return false;
+        bool errorRet()
+        {
+            CloseHandle(h);
+            nameStr.extendedPathThen!(p => DeleteFileW(p.ptr));
+            return false;
+        }
+        DWORD numwritten;
         if (WriteFile(h, data.ptr, cast(DWORD)data.length, &numwritten, null) != TRUE)
-            goto err2;
+            return errorRet();
         if (numwritten != data.length)
-            goto err2;
+            return errorRet();
         if (!CloseHandle(h))
-            goto err;
+            return false;
         return true;
-    err2:
-        CloseHandle(h);
-        nameStr.extendedPathThen!(p => DeleteFileW(p.ptr));
-    err:
-        return false;
     }
     else
     {
@@ -566,7 +573,7 @@ else version (Windows)
     private ulong fileSize(HANDLE fd)
     {
         ulong result;
-        if (GetFileSizeEx(fd, cast(LARGE_INTEGER*) &result) == 0)
+        if (GetFileSizeEx(fd, cast(LARGE_INTEGER*) &result))
             return result;
         return ulong.max;
     }
@@ -586,4 +593,164 @@ private auto ref fakePure(F)(scope F fun) pure
 {
     mixin("alias PureFun = " ~ F.stringof ~ " pure;");
     return (cast(PureFun) fun)();
+}
+
+/***********************************
+ * Recursively search all the directories and files under dir_path
+ * for files that match one of the extensions in exts[].
+ * Pass the matches to sink.
+ * Params:
+ *      dir_path = root of directories to search
+ *      exts = array of filename extensions to match
+ *      recurse = go into subdirectories
+ *      filenameSink = accepts the resulting matches
+ * Returns:
+ *      true for failed to open the directory
+ */
+bool findFiles(const char* dir_path, const char[][] exts, bool recurse, void delegate(const(char)[]) nothrow filenameSink)
+{
+    enum log = false;
+    if (log) printf("findFiles() dir_path: %s\n", dir_path);
+    version (Windows)
+    {
+        debug
+            enum BufLength = 10;        // trigger any reallocation bugs
+        else
+            enum BufLength = 100;
+        char[BufLength + 1] buf = void;
+        char* fullPath = buf.ptr;
+        size_t fullPathLength = BufLength;
+
+        // fullPath = dir_path \ *.*
+        const dir_pathLength = strlen(dir_path);
+        auto count = dir_pathLength + 1 + 3;
+        if (count > fullPathLength)
+        {
+            fullPathLength = count;
+            fullPath = cast(char*)Mem.xrealloc_noscan(fullPath == buf.ptr ? null : fullPath, fullPathLength + 1);
+        }
+        memcpy(fullPath, dir_path, dir_pathLength);
+        strcpy(fullPath + dir_pathLength, "\\*.*".ptr);
+
+        if (log) printf("fullPath: %s\n", fullPath);
+
+        WIN32_FIND_DATAW ffd = void;
+        HANDLE hFind = fullPath[0 .. strlen(fullPath)].extendedPathThen!(p => FindFirstFileW(p.ptr, &ffd));
+        if (hFind == INVALID_HANDLE_VALUE)
+            return true;
+
+        do
+        {
+            if (log) wprintf("ffd.cFileName: %s\n", ffd.cFileName.ptr);
+            if (ffd.cFileName[0] == 0)
+                continue; // ignore
+
+            if (ffd.cFileName[0] == '.')
+                continue;           // ignore files that start with a ., also ignore . and .. directories
+
+            const(char)[] name = toNarrowStringz(ffd.cFileName[0 .. wcslen(ffd.cFileName.ptr)], null);
+            if (log) printf("name: %s\n", name.ptr);
+
+            // fullPath = dir_path \ name.ptr
+            count = dir_pathLength + 1 + name.length;
+            if (count > fullPathLength)
+            {
+                fullPathLength = count;
+                fullPath = cast(char*)Mem.xrealloc_noscan(fullPath == buf.ptr ? null : fullPath, fullPathLength + 1);
+            }
+            strcpy(fullPath + dir_pathLength + 1, name.ptr);
+
+            if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            {
+                if (recurse)
+                    findFiles(fullPath, exts, recurse, filenameSink);
+            }
+            else
+            {
+                const(char)[] nameExt = FileName.ext(name);
+                foreach (ext; exts[])
+                {
+                    if (nameExt == ext)
+                    {
+                        if (log) printf("adding %s\n", fullPath);
+                        filenameSink(fullPath[0 .. count]);
+                    }
+                }
+            }
+            mem.xfree(cast(void*)name.ptr);
+
+        } while (FindNextFileW(hFind, &ffd) != 0);
+
+        if (fullPath != buf.ptr)
+            mem.xfree(fullPath);
+        FindClose(hFind);
+        if (log) printf("findFiles() exit\n");
+        return false;
+    }
+    else version (Posix)
+    {
+        DIR* dir = opendir(dir_path);
+        if (!dir)
+            return true;
+
+        debug
+            enum BufLength = 10;        // trigger any reallocation bugs
+        else
+            enum BufLength = 100;
+        char[BufLength + 1] buf = void;
+        char* fullPath = buf.ptr;
+        size_t fullPathLength = BufLength;
+
+        dirent* entry;
+        while ((entry = readdir(dir)) != null)
+        {
+            //printf("entry: %s\n", entry.d_name.ptr);
+            if (entry.d_name[0] == '.')
+                continue;           // ignore files that start with a .
+
+            // fullPath = dir_path / entry.d_name.ptr
+            const dir_pathLength = strlen(dir_path);
+            const count = dir_pathLength + 1 + strlen(entry.d_name.ptr);
+            if (count > fullPathLength)
+            {
+                fullPathLength = count;
+                fullPath = cast(char*)Mem.xrealloc_noscan(fullPath == buf.ptr ? null : fullPath, fullPathLength + 1);
+            }
+            memcpy(fullPath, dir_path, dir_pathLength);
+            fullPath[dir_pathLength] = '/';
+            strcpy(fullPath + dir_pathLength + 1, entry.d_name.ptr);
+
+            stat_t statbuf;
+            if (lstat(fullPath, &statbuf) == -1)
+                continue;
+
+            const(char)[] name = entry.d_name.ptr[0 .. strlen(entry.d_name.ptr)]; // convert to D string
+            if (!name.length)
+                continue; // ignore
+
+            if (S_ISDIR(statbuf.st_mode))
+            {
+                if (recurse && !(name == "." || name == ".."))
+                    findFiles(fullPath, exts, recurse, filenameSink);
+            }
+            else if (S_ISREG(statbuf.st_mode))
+            {
+                foreach (ext; exts)
+                {
+                    if (FileName.ext(name) == ext)
+                    {
+                        //printf("%s\n", fullPath);
+                        filenameSink(fullPath[0 .. count]);
+                    }
+                }
+            }
+        }
+
+        if (fullPath != buf.ptr)
+            mem.xfree(fullPath);
+        closedir(dir);
+        return false;
+    }
+    else
+        static assert(0);
 }

@@ -1,5 +1,5 @@
 /* { dg-do compile } */
-/* { dg-options "-O2 -fsplit-paths -fno-tree-cselim -fdump-tree-split-paths-details -fno-finite-loops -fno-tree-dominator-opts -fno-tree-vrp -w" } */
+/* { dg-options "-O2 -fsplit-paths -fno-tree-cselim -fno-ssa-phiopt -fdump-tree-split-paths-details -fno-finite-loops -fno-tree-dominator-opts -fno-tree-vrp -w" } */
 
 struct __sFILE
 {
@@ -57,6 +57,8 @@ oof (void)
     }
 }
 
+
+/* lookharder becomes an ifcvt'd/cmov. */
 void
 lookharder (char *string)
 {
@@ -73,4 +75,4 @@ lookharder (char *string)
     }
 }
 
-/* { dg-final { scan-tree-dump-times "Duplicating join block" 3 "split-paths" } } */
+/* { dg-final { scan-tree-dump-times "Duplicating join block" 2 "split-paths" } } */

@@ -1,5 +1,5 @@
 /* Target Definitions for OpenRISC.
-   Copyright (C) 2018-2024 Free Software Foundation, Inc.
+   Copyright (C) 2018-2026 Free Software Foundation, Inc.
    Contributed by Stafford Horne.
 
    This file is part of GCC.
@@ -67,9 +67,6 @@
 #define SHORT_TYPE_SIZE 16
 #define LONG_TYPE_SIZE 32
 #define LONG_LONG_TYPE_SIZE 64
-#define FLOAT_TYPE_SIZE 32
-#define DOUBLE_TYPE_SIZE 64
-#define LONG_DOUBLE_TYPE_SIZE 64
 #define WCHAR_TYPE_SIZE 32
 
 #undef SIZE_TYPE
@@ -396,6 +393,9 @@ do {                                                    \
 
 /* All the work is done in PROFILE_HOOK, but this is still required.  */
 #define FUNCTION_PROFILER(STREAM, LABELNO) do { } while (0)
+
+/* Shift instructions ignore all but the low-order few bits.  */
+#define SHIFT_COUNT_TRUNCATED 1
 
 /* Dwarf 2 Support */
 #define DWARF2_DEBUGGING_INFO 1

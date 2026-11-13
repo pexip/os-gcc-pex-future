@@ -1,7 +1,7 @@
 /* This file contains routines to construct OpenACC and OpenMP constructs,
    called from parsing in the C and C++ front ends.
 
-   Copyright (C) 2005-2024 Free Software Foundation, Inc.
+   Copyright (C) 2005-2026 Free Software Foundation, Inc.
    Contributed by Richard Henderson <rth@redhat.com>,
 		  Diego Novillo <dnovillo@redhat.com>.
 
@@ -52,8 +52,8 @@ c_finish_oacc_wait (location_t loc, tree parms, tree clauses)
   vec_alloc (args, nparms + 2);
   stmt = builtin_decl_explicit (BUILT_IN_GOACC_WAIT);
 
-  if (omp_find_clause (clauses, OMP_CLAUSE_ASYNC))
-    t = OMP_CLAUSE_ASYNC_EXPR (clauses);
+  if ((t = omp_find_clause (clauses, OMP_CLAUSE_ASYNC)))
+    t = OMP_CLAUSE_ASYNC_EXPR (t);
   else
     t = build_int_cst (integer_type_node, GOMP_ASYNC_SYNC);
 
@@ -70,6 +70,11 @@ c_finish_oacc_wait (location_t loc, tree parms, tree clauses)
     }
 
   stmt = build_call_expr_loc_vec (loc, stmt, args);
+
+  t = omp_find_clause (clauses, OMP_CLAUSE_IF);
+  if (t)
+    stmt = build3_loc (input_location, COND_EXPR, void_type_node,
+		       OMP_CLAUSE_IF_EXPR (t), stmt, NULL_TREE);
 
   vec_free (args);
 
@@ -204,7 +209,7 @@ c_finish_omp_taskyield (location_t loc)
 
 
 /* Complete a #pragma omp atomic construct.  For CODE OMP_ATOMIC
-   the expression to be implemented atomically is LHS opcode= RHS. 
+   the expression to be implemented atomically is LHS opcode= RHS.
    For OMP_ATOMIC_READ V = LHS, for OMP_ATOMIC_CAPTURE_{NEW,OLD} LHS
    opcode= RHS with the new or old content of LHS returned.
    LOC is the location of the atomic statement.  The value returned
@@ -664,6 +669,26 @@ c_finish_omp_atomic (location_t loc, enum tree_code code,
 }
 
 
+/* Return true if TYPE is the implementation's omp_interop_t.  */
+
+bool
+c_omp_interop_t_p (tree type)
+{
+  if (type == error_mark_node)
+    return false;
+  type = TYPE_MAIN_VARIANT (type);
+  return (TREE_CODE (type) == ENUMERAL_TYPE
+	  && TYPE_NAME (type)
+	  && ((TREE_CODE (TYPE_NAME (type)) == TYPE_DECL
+	       ? DECL_NAME (TYPE_NAME (type)) : TYPE_NAME (type))
+	      == get_identifier ("omp_interop_t"))
+	  && TYPE_FILE_SCOPE_P (type)
+	  && COMPLETE_TYPE_P (type)
+	  && TREE_CODE (TYPE_SIZE (type)) == INTEGER_CST
+	  && !compare_tree_int (TYPE_SIZE (type),
+				tree_to_uhwi (TYPE_SIZE (ptr_type_node))));
+}
+
 /* Return true if TYPE is the implementation's omp_depend_t.  */
 
 bool
@@ -744,9 +769,7 @@ c_finish_omp_depobj (location_t loc, tree depobj,
 	  kind = OMP_CLAUSE_DEPEND_KIND (clause);
 	  t = OMP_CLAUSE_DECL (clause);
 	  gcc_assert (t);
-	  if (TREE_CODE (t) == TREE_LIST
-	      && TREE_PURPOSE (t)
-	      && TREE_CODE (TREE_PURPOSE (t)) == TREE_VEC)
+	  if (OMP_ITERATOR_DECL_P (t))
 	    {
 	      error_at (OMP_CLAUSE_LOCATION (clause),
 			"%<iterator%> modifier may not be specified on "
@@ -958,6 +981,19 @@ c_finish_omp_for (location_t locus, enum tree_code code, tree declv,
       tree cond = TREE_VEC_ELT (condv, i);
       tree incr = TREE_VEC_ELT (incrv, i);
 
+      if (init == NULL_TREE)
+	{
+	  gcc_assert (decl == NULL_TREE
+		      && cond == NULL_TREE
+		      && incr == NULL_TREE);
+	  for (i++; i < TREE_VEC_LENGTH (declv); i++)
+	    gcc_assert (TREE_VEC_ELT (declv, i) == NULL_TREE
+			&& TREE_VEC_ELT (initv, i) == NULL_TREE
+			&& TREE_VEC_ELT (condv, i) == NULL_TREE
+			&& TREE_VEC_ELT (incrv, i) == NULL_TREE);
+	  break;
+	}
+
       elocus = locus;
       if (EXPR_HAS_LOCATION (init))
 	elocus = EXPR_LOCATION (init);
@@ -1162,7 +1198,8 @@ c_finish_omp_for (location_t locus, enum tree_code code, tree declv,
 	      break;
 
 	    case COMPOUND_EXPR:
-	      if (TREE_CODE (TREE_OPERAND (incr, 0)) != SAVE_EXPR
+	      if ((TREE_CODE (TREE_OPERAND (incr, 0)) != SAVE_EXPR
+		   && TREE_CODE (TREE_OPERAND (incr, 0)) != TARGET_EXPR)
 		  || TREE_CODE (TREE_OPERAND (incr, 1)) != MODIFY_EXPR)
 		break;
 	      incr = TREE_OPERAND (incr, 1);
@@ -1304,9 +1341,11 @@ static int
 c_omp_is_loop_iterator (tree decl, struct c_omp_check_loop_iv_data *d)
 {
   for (int i = 0; i < TREE_VEC_LENGTH (d->declv); i++)
-    if (decl == TREE_VEC_ELT (d->declv, i)
-	|| (TREE_CODE (TREE_VEC_ELT (d->declv, i)) == TREE_LIST
-	    && decl == TREE_PURPOSE (TREE_VEC_ELT (d->declv, i))))
+    if (TREE_VEC_ELT (d->declv, i) == NULL_TREE)
+      continue;
+    else if (decl == TREE_VEC_ELT (d->declv, i)
+	     || (TREE_CODE (TREE_VEC_ELT (d->declv, i)) == TREE_LIST
+		 && decl == TREE_PURPOSE (TREE_VEC_ELT (d->declv, i))))
       return i;
     else if (TREE_CODE (TREE_VEC_ELT (d->declv, i)) == TREE_LIST
 	     && TREE_CHAIN (TREE_VEC_ELT (d->declv, i))
@@ -1322,7 +1361,7 @@ c_omp_is_loop_iterator (tree decl, struct c_omp_check_loop_iv_data *d)
 /* Helper function called via walk_tree, to diagnose uses
    of associated loop IVs inside of lb, b and incr expressions
    of OpenMP loops.  */
-   
+
 static tree
 c_omp_check_loop_iv_r (tree *tp, int *walk_subtrees, void *data)
 {
@@ -1584,6 +1623,69 @@ c_omp_check_nonrect_loop_iv (tree *tp, struct c_omp_check_loop_iv_data *d,
   return ret;
 }
 
+/* Callback for walk_tree to find nested loop transforming construct.  */
+
+static tree
+c_find_nested_loop_xform_r (tree *tp, int *walk_subtrees, void *)
+{
+  *walk_subtrees = 0;
+  switch (TREE_CODE (*tp))
+    {
+    case OMP_TILE:
+    case OMP_UNROLL:
+      return *tp;
+    case BIND_EXPR:
+      *walk_subtrees = 1;
+      break;
+    case STATEMENT_LIST:
+      *walk_subtrees = 1;
+      break;
+    case TRY_FINALLY_EXPR:
+    case CLEANUP_POINT_EXPR:
+      *walk_subtrees = 1;
+      break;
+    default:
+      break;
+    }
+  return NULL;
+}
+
+/* Find Jth loop among generated loops of STMT.  */
+
+int
+c_omp_find_generated_loop (tree &stmt, int j, walk_tree_lh lh)
+{
+  stmt = walk_tree_1 (&stmt, c_find_nested_loop_xform_r,
+		      NULL, NULL, lh);
+  gcc_assert (stmt);
+  switch (TREE_CODE (stmt))
+    {
+    case OMP_UNROLL:
+      gcc_assert (omp_find_clause (OMP_FOR_CLAUSES (stmt),
+				   OMP_CLAUSE_PARTIAL));
+      /* FALLTHRU */
+    case OMP_TILE:
+      int k;
+      k = 0;
+      for (int i = 0; i < TREE_VEC_LENGTH (OMP_FOR_INIT (stmt)); ++i)
+	if (i == j)
+	  {
+	    if (TREE_VEC_ELT (OMP_FOR_INIT (stmt), i) == NULL_TREE)
+	      {
+		stmt = OMP_FOR_BODY (stmt);
+		return c_omp_find_generated_loop (stmt, k, lh);
+	      }
+	    else
+	      return i;
+	  }
+	else if (TREE_VEC_ELT (OMP_FOR_INIT (stmt), i) == NULL_TREE)
+	  ++k;
+      gcc_unreachable ();
+    default:
+      gcc_unreachable ();
+    }
+}
+
 /* Diagnose invalid references to loop iterators in lb, b and incr
    expressions.  */
 
@@ -1592,7 +1694,7 @@ c_omp_check_loop_iv (tree stmt, tree declv, walk_tree_lh lh)
 {
   hash_set<tree> pset;
   struct c_omp_check_loop_iv_data data;
-  int i;
+  int i, k = 0;
 
   data.declv = declv;
   data.fail = false;
@@ -1602,13 +1704,24 @@ c_omp_check_loop_iv (tree stmt, tree declv, walk_tree_lh lh)
   data.ppset = &pset;
   for (i = 0; i < TREE_VEC_LENGTH (OMP_FOR_INIT (stmt)); i++)
     {
+      tree this_stmt = stmt;
+      int j = i;
       tree init = TREE_VEC_ELT (OMP_FOR_INIT (stmt), i);
+      if (init == NULL_TREE)
+	{
+	  if (k == 0)
+	    data.declv = copy_node (declv);
+	  this_stmt = OMP_FOR_BODY (stmt);
+	  j = c_omp_find_generated_loop (this_stmt, k++, lh);
+	  init = TREE_VEC_ELT (OMP_FOR_INIT (this_stmt), j);
+	  TREE_VEC_ELT (data.declv, i) = TREE_OPERAND (init, 0);
+	}
       gcc_assert (TREE_CODE (init) == MODIFY_EXPR);
       tree decl = TREE_OPERAND (init, 0);
-      tree cond = TREE_VEC_ELT (OMP_FOR_COND (stmt), i);
+      tree cond = TREE_VEC_ELT (OMP_FOR_COND (this_stmt), j);
       gcc_assert (COMPARISON_CLASS_P (cond));
       gcc_assert (TREE_OPERAND (cond, 0) == decl);
-      tree incr = TREE_VEC_ELT (OMP_FOR_INCR (stmt), i);
+      tree incr = TREE_VEC_ELT (OMP_FOR_INCR (this_stmt), j);
       data.expr_loc = EXPR_LOCATION (TREE_OPERAND (init, 1));
       tree vec_outer1 = NULL_TREE, vec_outer2 = NULL_TREE;
       int kind = 0;
@@ -1636,9 +1749,9 @@ c_omp_check_loop_iv (tree stmt, tree declv, walk_tree_lh lh)
 	 expression then involves the subtraction and always refers
 	 to the original value.  The C++ FE needs to warn on those
 	 earlier.  */
-      if (decl == TREE_VEC_ELT (declv, i)
-	  || (TREE_CODE (TREE_VEC_ELT (declv, i)) == TREE_LIST
-	      && decl == TREE_PURPOSE (TREE_VEC_ELT (declv, i))))
+      if (decl == TREE_VEC_ELT (data.declv, i)
+	  || (TREE_CODE (TREE_VEC_ELT (data.declv, i)) == TREE_LIST
+	      && decl == TREE_PURPOSE (TREE_VEC_ELT (data.declv, i))))
 	{
 	  data.expr_loc = EXPR_LOCATION (cond);
 	  data.kind = kind | 1;
@@ -1655,6 +1768,15 @@ c_omp_check_loop_iv (tree stmt, tree declv, walk_tree_lh lh)
 	    loc = data.stmt_loc;
 	  error_at (loc, "two different outer iteration variables %qD and %qD"
 			 " used in a single loop", vec_outer1, vec_outer2);
+	  data.fail = true;
+	}
+      else if ((vec_outer1 || vec_outer2) && this_stmt != stmt)
+	{
+	  location_t loc = data.expr_loc;
+	  if (loc == UNKNOWN_LOCATION)
+	    loc = data.stmt_loc;
+	  sorry_at (loc, "non-rectangular loops from generated loops "
+			 "unsupported");
 	  data.fail = true;
 	}
       if (vec_outer1 || vec_outer2)
@@ -1853,6 +1975,12 @@ c_omp_check_loop_binding_exprs (tree stmt, vec<tree> *orig_inits)
   for (int i = 1; i < TREE_VEC_LENGTH (OMP_FOR_INIT (stmt)); i++)
     {
       tree init = TREE_VEC_ELT (OMP_FOR_INIT (stmt), i);
+      if (init == NULL_TREE)
+	{
+	  sorry_at (loc, "imperfectly nested loop using generated loops");
+	  ok = false;
+	  continue;
+	}
       tree cond = TREE_VEC_ELT (OMP_FOR_COND (stmt), i);
       tree incr = TREE_VEC_ELT (OMP_FOR_INCR (stmt), i);
       gcc_assert (TREE_CODE (init) == MODIFY_EXPR);
@@ -2048,11 +2176,14 @@ c_omp_split_clauses (location_t loc, enum tree_code code,
 	{
 	/* First the clauses that are unique to some constructs.  */
 	case OMP_CLAUSE_DEVICE:
-	case OMP_CLAUSE_MAP:
-	case OMP_CLAUSE_IS_DEVICE_PTR:
-	case OMP_CLAUSE_HAS_DEVICE_ADDR:
+	case OMP_CLAUSE_DEVICE_TYPE:
 	case OMP_CLAUSE_DEFAULTMAP:
 	case OMP_CLAUSE_DEPEND:
+	case OMP_CLAUSE_DYN_GROUPPRIVATE:
+	case OMP_CLAUSE_IS_DEVICE_PTR:
+	case OMP_CLAUSE_HAS_DEVICE_ADDR:
+	case OMP_CLAUSE_MAP:
+	case OMP_CLAUSE_USES_ALLOCATORS:
 	  s = C_OMP_CLAUSE_SPLIT_TARGET;
 	  break;
 	case OMP_CLAUSE_DOACROSS:
@@ -4157,6 +4288,306 @@ c_omp_address_inspector::expand_map_clause (tree c, tree expr,
   return error_mark_node;
 }
 
+/* Given a mapper function MAPPER_FN, recursively scan through the map clauses
+   for that mapper, and if any of those should use a (named or unnamed) mapper
+   themselves, add it to MLIST.  */
+
+void
+c_omp_find_nested_mappers (omp_mapper_list<tree> *mlist, tree mapper_fn)
+{
+  tree mapper = lang_hooks.decls.omp_extract_mapper_directive (mapper_fn);
+  tree mapper_name = NULL_TREE;
+
+  if (mapper == error_mark_node)
+    return;
+
+  gcc_assert (TREE_CODE (mapper) == OMP_DECLARE_MAPPER);
+
+  for (tree clause = OMP_DECLARE_MAPPER_CLAUSES (mapper);
+       clause;
+       clause = OMP_CLAUSE_CHAIN (clause))
+    {
+      tree expr = OMP_CLAUSE_DECL (clause);
+      enum gomp_map_kind clause_kind = OMP_CLAUSE_MAP_KIND (clause);
+      tree elem_type;
+
+      if (clause_kind == GOMP_MAP_PUSH_MAPPER_NAME)
+	{
+	  mapper_name = expr;
+	  continue;
+	}
+      else if (clause_kind == GOMP_MAP_POP_MAPPER_NAME)
+	{
+	  mapper_name = NULL_TREE;
+	  continue;
+	}
+
+      gcc_assert (TREE_CODE (expr) != TREE_LIST);
+      if (TREE_CODE (expr) == OMP_ARRAY_SECTION)
+	{
+	  while (TREE_CODE (expr) == OMP_ARRAY_SECTION)
+	    expr = TREE_OPERAND (expr, 0);
+
+	  elem_type = TREE_TYPE (expr);
+	}
+      else
+	elem_type = TREE_TYPE (expr);
+
+      /* This might be too much... or not enough?  */
+      while (TREE_CODE (elem_type) == ARRAY_TYPE
+	     || TREE_CODE (elem_type) == POINTER_TYPE
+	     || TREE_CODE (elem_type) == REFERENCE_TYPE)
+	elem_type = TREE_TYPE (elem_type);
+
+      elem_type = TYPE_MAIN_VARIANT (elem_type);
+
+      if (RECORD_OR_UNION_TYPE_P (elem_type)
+	  && !mlist->contains (mapper_name, elem_type))
+	{
+	  tree nested_mapper_fn
+	    = lang_hooks.decls.omp_mapper_lookup (mapper_name, elem_type);
+
+	  if (nested_mapper_fn)
+	    {
+	      mlist->add_mapper (mapper_name, elem_type, nested_mapper_fn);
+	      c_omp_find_nested_mappers (mlist, nested_mapper_fn);
+	    }
+	  else if (mapper_name)
+	    {
+	      error ("mapper %qE not found for type %qT", mapper_name,
+		     elem_type);
+	      continue;
+	    }
+	}
+    }
+}
+
+struct remap_mapper_decl_info
+{
+  tree dummy_var;
+  tree expr;
+};
+
+/* Helper for rewriting DUMMY_VAR into EXPR in a map clause decl.  */
+
+static tree
+remap_mapper_decl_1 (tree *tp, int *walk_subtrees, void *data)
+{
+  remap_mapper_decl_info *map_info = (remap_mapper_decl_info *) data;
+
+  if (operand_equal_p (*tp, map_info->dummy_var))
+    {
+      *tp = map_info->expr;
+      *walk_subtrees = 0;
+    }
+
+  return NULL_TREE;
+}
+
+/* Instantiate a mapper MAPPER for expression EXPR, adding new clauses to
+   OUTLIST.  OUTER_KIND is the mapping kind to use if not already specified in
+   the mapper declaration.  */
+
+static tree *
+omp_instantiate_mapper (tree *outlist, tree mapper, tree expr,
+			enum gomp_map_kind outer_kind)
+{
+  tree clauses = OMP_DECLARE_MAPPER_CLAUSES (mapper);
+  tree dummy_var = OMP_DECLARE_MAPPER_DECL (mapper);
+  tree mapper_name = NULL_TREE;
+
+  remap_mapper_decl_info map_info;
+  map_info.dummy_var = dummy_var;
+  map_info.expr = expr;
+
+  for (tree c = clauses; c; c = OMP_CLAUSE_CHAIN (c))
+    {
+      tree unshared = unshare_expr (c);
+      enum gomp_map_kind clause_kind = OMP_CLAUSE_MAP_KIND (c);
+      tree t = OMP_CLAUSE_DECL (unshared);
+      tree type = NULL_TREE;
+      bool nonunit_array_with_mapper = false;
+
+      if (clause_kind == GOMP_MAP_PUSH_MAPPER_NAME)
+	{
+	  mapper_name = t;
+	  continue;
+	}
+      else if (clause_kind == GOMP_MAP_POP_MAPPER_NAME)
+	{
+	  mapper_name = NULL_TREE;
+	  continue;
+	}
+
+      if (TREE_CODE (t) == OMP_ARRAY_SECTION)
+	{
+	  location_t loc = OMP_CLAUSE_LOCATION (c);
+	  tree t2 = lang_hooks.decls.omp_map_array_section (loc, t);
+
+	  if (t2 == t)
+	    {
+	      nonunit_array_with_mapper = true;
+	      /* We'd want use the mapper for the element type if this worked:
+		 look that one up.  */
+	      type = TREE_TYPE (TREE_TYPE (t));
+	    }
+	  else
+	    {
+	      t = t2;
+	      type = TREE_TYPE (t);
+	    }
+	}
+      else
+	type = TREE_TYPE (t);
+
+      gcc_assert (type);
+
+      if (type == error_mark_node)
+	continue;
+
+      walk_tree (&unshared, remap_mapper_decl_1, &map_info, NULL);
+
+      if (OMP_CLAUSE_MAP_KIND (unshared) == GOMP_MAP_UNSET)
+	OMP_CLAUSE_SET_MAP_KIND (unshared, outer_kind);
+
+      type = TYPE_MAIN_VARIANT (type);
+
+      tree mapper_fn = lang_hooks.decls.omp_mapper_lookup (mapper_name, type);
+
+      if (mapper_fn && nonunit_array_with_mapper)
+	{
+	  sorry ("user-defined mapper with non-unit length array section");
+	  continue;
+	}
+      else if (mapper_fn)
+	{
+	  tree nested_mapper
+	    = lang_hooks.decls.omp_extract_mapper_directive (mapper_fn);
+	  if (nested_mapper != mapper)
+	    {
+	      if (clause_kind == GOMP_MAP_UNSET)
+		clause_kind = outer_kind;
+
+	      outlist = omp_instantiate_mapper (outlist, nested_mapper,
+						t, clause_kind);
+	      continue;
+	    }
+	}
+      else if (mapper_name)
+	{
+	  error ("mapper %qE not found for type %qT", mapper_name, type);
+	  continue;
+	}
+
+      *outlist = unshared;
+      outlist = &OMP_CLAUSE_CHAIN (unshared);
+    }
+
+  return outlist;
+}
+
+/* Given a list of CLAUSES, scan each clause and invoke a user-defined mapper
+   appropriate to the type of the data in that clause, if such a mapper is
+   visible in the current parsing context.  */
+
+tree
+c_omp_instantiate_mappers (tree clauses)
+{
+  tree c, *pc, mapper_name = NULL_TREE;
+
+  for (pc = &clauses, c = clauses; c; c = *pc)
+    {
+      bool using_mapper = false;
+
+      switch (OMP_CLAUSE_CODE (c))
+	{
+	case OMP_CLAUSE_MAP:
+	  {
+	    tree t = OMP_CLAUSE_DECL (c);
+	    tree type = NULL_TREE;
+	    bool nonunit_array_with_mapper = false;
+
+	    if (OMP_CLAUSE_MAP_KIND (c) == GOMP_MAP_PUSH_MAPPER_NAME
+		|| OMP_CLAUSE_MAP_KIND (c) == GOMP_MAP_POP_MAPPER_NAME)
+	      {
+		if (OMP_CLAUSE_MAP_KIND (c) == GOMP_MAP_PUSH_MAPPER_NAME)
+		  mapper_name = OMP_CLAUSE_DECL (c);
+		else
+		  mapper_name = NULL_TREE;
+		pc = &OMP_CLAUSE_CHAIN (c);
+		continue;
+	      }
+
+	    if (TREE_CODE (t) == OMP_ARRAY_SECTION)
+	      {
+		location_t loc = OMP_CLAUSE_LOCATION (c);
+		tree t2 = lang_hooks.decls.omp_map_array_section (loc, t);
+
+		if (t2 == t)
+		  {
+		    /* !!! Array sections of size >1 with mappers for elements
+		       are hard to support.  Do something here.  */
+		    nonunit_array_with_mapper = true;
+		    type = TREE_TYPE (TREE_TYPE (t));
+		  }
+		else
+		  {
+		    t = t2;
+		    type = TREE_TYPE (t);
+		  }
+	      }
+	    else
+	      type = TREE_TYPE (t);
+
+	    if (type == NULL_TREE || type == error_mark_node)
+	      {
+		pc = &OMP_CLAUSE_CHAIN (c);
+		continue;
+	      }
+
+	    enum gomp_map_kind kind = OMP_CLAUSE_MAP_KIND (c);
+	    if (kind == GOMP_MAP_UNSET)
+	      kind = GOMP_MAP_TOFROM;
+
+	    type = TYPE_MAIN_VARIANT (type);
+
+	    tree mapper_fn
+	      = lang_hooks.decls.omp_mapper_lookup (mapper_name, type);
+
+	    if (mapper_fn && nonunit_array_with_mapper)
+	      {
+		sorry ("user-defined mapper with non-unit length "
+		       "array section");
+		using_mapper = true;
+	      }
+	    else if (mapper_fn)
+	      {
+		tree mapper
+		  = lang_hooks.decls.omp_extract_mapper_directive (mapper_fn);
+		pc = omp_instantiate_mapper (pc, mapper, t, kind);
+		using_mapper = true;
+	      }
+	    else if (mapper_name)
+	      {
+		error ("mapper %qE not found for type %qT", mapper_name, type);
+		using_mapper = true;
+	      }
+	  }
+	  break;
+
+	default:
+	  ;
+	}
+
+      if (using_mapper)
+	*pc = OMP_CLAUSE_CHAIN (c);
+      else
+	pc = &OMP_CLAUSE_CHAIN (c);
+    }
+
+  return clauses;
+}
+
 const struct c_omp_directive c_omp_directives[] = {
   /* Keep this alphabetically sorted by the first word.  Non-null second/third
      if any should precede null ones.  */
@@ -4174,18 +4605,23 @@ const struct c_omp_directive c_omp_directives[] = {
     C_OMP_DIR_INFORMATIONAL, false },
   { "begin", "declare", "target", PRAGMA_OMP_BEGIN,
     C_OMP_DIR_DECLARATIVE, false },
-  /* { "begin", "declare", "variant", PRAGMA_OMP_BEGIN,
-    C_OMP_DIR_DECLARATIVE, false }, */
+  { "begin", "declare", "variant", PRAGMA_OMP_BEGIN,
+    C_OMP_DIR_DECLARATIVE, false },
+  /* 'begin metadirective' is not yet implemented; however,
+     it is only applicable if an end-directive exists, but
+     metadirectives are of limited use for declarative directives.  */
   /* { "begin", "metadirective", nullptr, PRAGMA_OMP_BEGIN,
-    C_OMP_DIR_???, ??? },  */
+    C_OMP_DIR_META, false },  */
   { "cancel", nullptr, nullptr, PRAGMA_OMP_CANCEL,
     C_OMP_DIR_STANDALONE, false },
   { "cancellation", "point", nullptr, PRAGMA_OMP_CANCELLATION_POINT,
     C_OMP_DIR_STANDALONE, false },
   { "critical", nullptr, nullptr, PRAGMA_OMP_CRITICAL,
     C_OMP_DIR_CONSTRUCT, false },
-  /* { "declare", "mapper", nullptr, PRAGMA_OMP_DECLARE,
-    C_OMP_DIR_DECLARATIVE, false },  */
+  /* { "declare", "induction", nullptr, PRAGMA_OMP_DECLARE,
+    C_OMP_DIR_DECLARATIVE, true }, */
+  { "declare", "mapper", nullptr, PRAGMA_OMP_DECLARE,
+    C_OMP_DIR_DECLARATIVE, false },
   { "declare", "reduction", nullptr, PRAGMA_OMP_DECLARE,
     C_OMP_DIR_DECLARATIVE, true },
   { "declare", "simd", nullptr, PRAGMA_OMP_DECLARE,
@@ -4196,37 +4632,43 @@ const struct c_omp_directive c_omp_directives[] = {
     C_OMP_DIR_DECLARATIVE, false },
   { "depobj", nullptr, nullptr, PRAGMA_OMP_DEPOBJ,
     C_OMP_DIR_STANDALONE, false },
-  /* { "dispatch", nullptr, nullptr, PRAGMA_OMP_DISPATCH,
-    C_OMP_DIR_CONSTRUCT, false },  */
+  { "dispatch", nullptr, nullptr, PRAGMA_OMP_DISPATCH,
+    C_OMP_DIR_DECLARATIVE, false },
   { "distribute", nullptr, nullptr, PRAGMA_OMP_DISTRIBUTE,
     C_OMP_DIR_CONSTRUCT, true },
   { "end", "assumes", nullptr, PRAGMA_OMP_END,
     C_OMP_DIR_INFORMATIONAL, false },
   { "end", "declare", "target", PRAGMA_OMP_END,
     C_OMP_DIR_DECLARATIVE, false },
-  /* { "end", "declare", "variant", PRAGMA_OMP_END,
-    C_OMP_DIR_DECLARATIVE, false }, */
+  { "end", "declare", "variant", PRAGMA_OMP_END,
+    C_OMP_DIR_DECLARATIVE, false },
   /* { "end", "metadirective", nullptr, PRAGMA_OMP_END,
-    C_OMP_DIR_???, ??? },  */
+    C_OMP_DIR_META, false },  */
   /* error with at(execution) is C_OMP_DIR_STANDALONE.  */
   { "error", nullptr, nullptr, PRAGMA_OMP_ERROR,
     C_OMP_DIR_UTILITY, false },
+  /* { "flatten", nullptr, nullptr, PRAGMA_OMP_FLATTEN,
+    C_OMP_DIR_CONSTRUCT, true },  */
   { "flush", nullptr, nullptr, PRAGMA_OMP_FLUSH,
     C_OMP_DIR_STANDALONE, false },
   { "for", nullptr, nullptr, PRAGMA_OMP_FOR,
     C_OMP_DIR_CONSTRUCT, true },
-  /* { "groupprivate", nullptr, nullptr, PRAGMA_OMP_GROUPPRIVATE,
-    C_OMP_DIR_DECLARATIVE, false },  */
-  /* { "interop", nullptr, nullptr, PRAGMA_OMP_INTEROP,
-    C_OMP_DIR_STANDALONE, false },  */
+  /* { "fuse", nullptr, nullptr, PRAGMA_OMP_FUSE,
+    C_OMP_DIR_CONSTRUCT, true },  */
+  { "groupprivate", nullptr, nullptr, PRAGMA_OMP_GROUPPRIVATE,
+    C_OMP_DIR_DECLARATIVE, false },
+  /* { "interchange", nullptr, nullptr, PRAGMA_OMP_INTERCHANGE,
+    C_OMP_DIR_CONSTRUCT, true },  */
+  { "interop", nullptr, nullptr, PRAGMA_OMP_INTEROP,
+    C_OMP_DIR_STANDALONE, false },
   { "loop", nullptr, nullptr, PRAGMA_OMP_LOOP,
     C_OMP_DIR_CONSTRUCT, true },
   { "masked", nullptr, nullptr, PRAGMA_OMP_MASKED,
     C_OMP_DIR_CONSTRUCT, true },
   { "master", nullptr, nullptr, PRAGMA_OMP_MASTER,
     C_OMP_DIR_CONSTRUCT, true },
-  /* { "metadirective", nullptr, nullptr, PRAGMA_OMP_METADIRECTIVE,
-    C_OMP_DIR_???, ??? },  */
+  { "metadirective", nullptr, nullptr, PRAGMA_OMP_METADIRECTIVE,
+    C_OMP_DIR_META, false },
   { "nothing", nullptr, nullptr, PRAGMA_OMP_NOTHING,
     C_OMP_DIR_UTILITY, false },
   /* ordered with depend clause is C_OMP_DIR_STANDALONE.  */
@@ -4248,6 +4690,10 @@ const struct c_omp_directive c_omp_directives[] = {
     C_OMP_DIR_CONSTRUCT, true },
   { "single", nullptr, nullptr, PRAGMA_OMP_SINGLE,
     C_OMP_DIR_CONSTRUCT, false },
+  /* { "split", nullptr, nullptr, PRAGMA_OMP_SPLIT,
+    C_OMP_DIR_CONSTRUCT, true },  */
+  /* { "stripe", nullptr, nullptr, PRAGMA_OMP_STRIPE,
+    C_OMP_DIR_CONSTRUCT, true },  */
   { "target", "data", nullptr, PRAGMA_OMP_TARGET,
     C_OMP_DIR_CONSTRUCT, false },
   { "target", "enter", "data", PRAGMA_OMP_TARGET,
@@ -4260,6 +4706,10 @@ const struct c_omp_directive c_omp_directives[] = {
     C_OMP_DIR_CONSTRUCT, true },
   { "task", nullptr, nullptr, PRAGMA_OMP_TASK,
     C_OMP_DIR_CONSTRUCT, false },
+  /* { "task", "iteration", nullptr, PRAGMA_OMP_TASK_ITERATION,
+    C_OMP_DIR_STANDALONE, false },  */
+  /* { "taskgraph", nullptr, nullptr, PRAGMA_OMP_TASKGRAPH,
+    C_OMP_DIR_CONSTRUCT, false },  */
   { "taskgroup", nullptr, nullptr, PRAGMA_OMP_TASKGROUP,
     C_OMP_DIR_CONSTRUCT, false },
   { "taskloop", nullptr, nullptr, PRAGMA_OMP_TASKLOOP,
@@ -4268,14 +4718,14 @@ const struct c_omp_directive c_omp_directives[] = {
     C_OMP_DIR_STANDALONE, false },
   { "taskyield", nullptr, nullptr, PRAGMA_OMP_TASKYIELD,
     C_OMP_DIR_STANDALONE, false },
-  /* { "tile", nullptr, nullptr, PRAGMA_OMP_TILE,
-    C_OMP_DIR_CONSTRUCT, false },  */
+  { "tile", nullptr, nullptr, PRAGMA_OMP_TILE,
+    C_OMP_DIR_CONSTRUCT, false },
   { "teams", nullptr, nullptr, PRAGMA_OMP_TEAMS,
     C_OMP_DIR_CONSTRUCT, true },
   { "threadprivate", nullptr, nullptr, PRAGMA_OMP_THREADPRIVATE,
-    C_OMP_DIR_DECLARATIVE, false }
-  /* { "unroll", nullptr, nullptr, PRAGMA_OMP_UNROLL,
-    C_OMP_DIR_CONSTRUCT, false },  */
+    C_OMP_DIR_DECLARATIVE, false },
+  { "unroll", nullptr, nullptr, PRAGMA_OMP_UNROLL,
+    C_OMP_DIR_CONSTRUCT, false },
 };
 
 /* Find (non-combined/composite) OpenMP directive (if any) which starts
@@ -4308,4 +4758,56 @@ c_omp_categorize_directive (const char *first, const char *second,
       return &c_omp_directives[i];
     }
   return NULL;
+}
+
+/* Auxilliary helper function for c_omp_expand_variant_construct.  */
+
+static tree
+c_omp_expand_variant_construct_r (vec<struct omp_variant> &candidates,
+			      hash_map<tree, tree> &body_labels,
+			      unsigned index)
+{
+  struct omp_variant &candidate = candidates[index];
+  tree if_block = push_stmt_list ();
+  if (candidate.alternative != NULL_TREE)
+    add_stmt (candidate.alternative);
+  if (candidate.body != NULL_TREE)
+    {
+      tree *label = body_labels.get (candidate.body);
+      if (label != NULL)
+	add_stmt (build1 (GOTO_EXPR, void_type_node, *label));
+      else
+	{
+	  tree body_label = create_artificial_label (UNKNOWN_LOCATION);
+	  add_stmt (build1 (LABEL_EXPR, void_type_node, body_label));
+	  add_stmt (candidate.body);
+	  body_labels.put (candidate.body, body_label);
+	}
+    }
+  if_block = pop_stmt_list (if_block);
+
+  if (index == candidates.length () - 1)
+    return if_block;
+
+  tree cond = omp_dynamic_cond (candidate.selector, NULL_TREE);
+  gcc_assert (cond != NULL_TREE);
+
+  tree else_block = c_omp_expand_variant_construct_r (candidates, body_labels,
+						      index + 1);
+  tree ret = push_stmt_list ();
+  tree stmt = build3 (COND_EXPR, void_type_node, cond, if_block, else_block);
+  add_stmt (stmt);
+  ret = pop_stmt_list (ret);
+
+  return ret;
+}
+
+/* Resolve the vector of metadirective variant CANDIDATES to a parse tree
+   structure.  */
+
+tree
+c_omp_expand_variant_construct (vec<struct omp_variant> &candidates)
+{
+  hash_map<tree, tree> body_labels;
+  return c_omp_expand_variant_construct_r (candidates, body_labels, 0);
 }

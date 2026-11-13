@@ -1,5 +1,5 @@
 /* SSA Jump Threading
-   Copyright (C) 2005-2024 Free Software Foundation, Inc.
+   Copyright (C) 2005-2026 Free Software Foundation, Inc.
    Contributed by Jeff Law  <law@redhat.com>
 
 This file is part of GCC.
@@ -494,124 +494,6 @@ jump_threader::simplify_control_stmt_condition_1
     {
       cond_code = swap_tree_comparison (cond_code);
       std::swap (op0, op1);
-    }
-
-  /* If the condition has the form (A & B) CMP 0 or (A | B) CMP 0 then
-     recurse into the LHS to see if there is a simplification that
-     makes this condition always true or always false along the edge
-     E.  */
-  if ((cond_code == EQ_EXPR || cond_code == NE_EXPR)
-      && TREE_CODE (op0) == SSA_NAME
-      && integer_zerop (op1))
-    {
-      gimple *def_stmt = SSA_NAME_DEF_STMT (op0);
-      if (gimple_code (def_stmt) != GIMPLE_ASSIGN)
-        ;
-      else if (gimple_assign_rhs_code (def_stmt) == BIT_AND_EXPR
-	       || gimple_assign_rhs_code (def_stmt) == BIT_IOR_EXPR)
-	{
-	  enum tree_code rhs_code = gimple_assign_rhs_code (def_stmt);
-	  const tree rhs1 = gimple_assign_rhs1 (def_stmt);
-	  const tree rhs2 = gimple_assign_rhs2 (def_stmt);
-
-	  /* Is A != 0 ?  */
-	  const tree res1
-	    = simplify_control_stmt_condition_1 (e, def_stmt,
-						 rhs1, NE_EXPR, op1,
-						 limit - 1);
-	  if (res1 == NULL_TREE)
-	    ;
-	  else if (rhs_code == BIT_AND_EXPR && integer_zerop (res1))
-	    {
-	      /* If A == 0 then (A & B) != 0 is always false.  */
-	      if (cond_code == NE_EXPR)
-	        return boolean_false_node;
-	      /* If A == 0 then (A & B) == 0 is always true.  */
-	      if (cond_code == EQ_EXPR)
-		return boolean_true_node;
-	    }
-	  else if (rhs_code == BIT_IOR_EXPR && integer_nonzerop (res1))
-	    {
-	      /* If A != 0 then (A | B) != 0 is always true.  */
-	      if (cond_code == NE_EXPR)
-		return boolean_true_node;
-	      /* If A != 0 then (A | B) == 0 is always false.  */
-	      if (cond_code == EQ_EXPR)
-		return boolean_false_node;
-	    }
-
-	  /* Is B != 0 ?  */
-	  const tree res2
-	    = simplify_control_stmt_condition_1 (e, def_stmt,
-						 rhs2, NE_EXPR, op1,
-						 limit - 1);
-	  if (res2 == NULL_TREE)
-	    ;
-	  else if (rhs_code == BIT_AND_EXPR && integer_zerop (res2))
-	    {
-	      /* If B == 0 then (A & B) != 0 is always false.  */
-	      if (cond_code == NE_EXPR)
-	        return boolean_false_node;
-	      /* If B == 0 then (A & B) == 0 is always true.  */
-	      if (cond_code == EQ_EXPR)
-		return boolean_true_node;
-	    }
-	  else if (rhs_code == BIT_IOR_EXPR && integer_nonzerop (res2))
-	    {
-	      /* If B != 0 then (A | B) != 0 is always true.  */
-	      if (cond_code == NE_EXPR)
-		return boolean_true_node;
-	      /* If B != 0 then (A | B) == 0 is always false.  */
-	      if (cond_code == EQ_EXPR)
-		return boolean_false_node;
-	    }
-
-	  if (res1 != NULL_TREE && res2 != NULL_TREE)
-	    {
-	      if (rhs_code == BIT_AND_EXPR
-		  && TYPE_PRECISION (TREE_TYPE (op0)) == 1
-		  && integer_nonzerop (res1)
-		  && integer_nonzerop (res2))
-		{
-		  /* If A != 0 and B != 0 then (bool)(A & B) != 0 is true.  */
-		  if (cond_code == NE_EXPR)
-		    return boolean_true_node;
-		  /* If A != 0 and B != 0 then (bool)(A & B) == 0 is false.  */
-		  if (cond_code == EQ_EXPR)
-		    return boolean_false_node;
-		}
-
-	      if (rhs_code == BIT_IOR_EXPR
-		  && integer_zerop (res1)
-		  && integer_zerop (res2))
-		{
-		  /* If A == 0 and B == 0 then (A | B) != 0 is false.  */
-		  if (cond_code == NE_EXPR)
-		    return boolean_false_node;
-		  /* If A == 0 and B == 0 then (A | B) == 0 is true.  */
-		  if (cond_code == EQ_EXPR)
-		    return boolean_true_node;
-		}
-	    }
-	}
-      /* Handle (A CMP B) CMP 0.  */
-      else if (TREE_CODE_CLASS (gimple_assign_rhs_code (def_stmt))
-	       == tcc_comparison)
-	{
-	  tree rhs1 = gimple_assign_rhs1 (def_stmt);
-	  tree rhs2 = gimple_assign_rhs2 (def_stmt);
-
-	  tree_code new_cond = gimple_assign_rhs_code (def_stmt);
-	  if (cond_code == EQ_EXPR)
-	    new_cond = invert_tree_comparison (new_cond, false);
-
-	  tree res
-	    = simplify_control_stmt_condition_1 (e, def_stmt,
-						 rhs1, new_cond, rhs2,
-						 limit - 1);
-	  if (res != NULL_TREE && is_gimple_min_invariant (res))
-	    return res;
-	}
     }
 
   gimple_cond_set_code (dummy_cond, cond_code);
@@ -1432,7 +1314,7 @@ hybrid_jt_simplifier::simplify (gimple *stmt, gimple *, basic_block,
   if (gimple_code (stmt) == GIMPLE_COND
       || gimple_code (stmt) == GIMPLE_ASSIGN)
     {
-      Value_Range r (gimple_range_type (stmt));
+      value_range r (gimple_range_type (stmt));
       tree ret;
       if (m_query->range_of_stmt (r, stmt) && r.singleton_p (&ret))
 	return ret;
@@ -1460,10 +1342,8 @@ hybrid_jt_simplifier::compute_exit_dependencies (bitmap dependencies,
 						 const vec<basic_block> &path,
 						 gimple *stmt)
 {
-  gori_compute &gori = m_ranger->gori ();
-
   // Start with the imports to the final conditional.
-  bitmap_copy (dependencies, gori.imports (path[0]));
+  bitmap_copy (dependencies, m_ranger->gori_ssa ()->imports (path[0]));
 
   // Add any other interesting operands we may have missed.
   if (gimple_bb (stmt) != path[0])
@@ -1473,7 +1353,7 @@ hybrid_jt_simplifier::compute_exit_dependencies (bitmap dependencies,
 	  tree op = gimple_op (stmt, i);
 	  if (op
 	      && TREE_CODE (op) == SSA_NAME
-	      && Value_Range::supports_type_p (TREE_TYPE (op)))
+	      && value_range::supports_type_p (TREE_TYPE (op)))
 	    bitmap_set_bit (dependencies, SSA_NAME_VERSION (op));
 	}
     }

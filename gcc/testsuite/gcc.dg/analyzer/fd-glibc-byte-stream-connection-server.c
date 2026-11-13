@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
 #if __has_include(<sys/select.h>)
@@ -113,7 +114,7 @@ main (void)
                 new = accept (sock,
                               (struct sockaddr *) &clientname,
                               &size);
-                if (new < 0)
+                if (new < 0) /* { dg-bogus "leak" "FIXME" { xfail *-*-* } } */
                   {
                     perror ("accept");
                     exit (EXIT_FAILURE);

@@ -1,5 +1,5 @@
 /* Subroutines for manipulating rtx's in semantically interesting ways.
-   Copyright (C) 1987-2024 Free Software Foundation, Inc.
+   Copyright (C) 1987-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -778,6 +778,20 @@ force_lowpart_subreg (machine_mode outermode, rtx op,
   return force_subreg (outermode, op, innermode, byte);
 }
 
+/* Try to return an rvalue expression for the OUTERMODE highpart of OP,
+   which has mode INNERMODE.  Allow OP to be forced into a new register
+   if necessary.
+
+   Return null on failure.  */
+
+rtx
+force_highpart_subreg (machine_mode outermode, rtx op,
+		       machine_mode innermode)
+{
+  auto byte = subreg_highpart_offset (outermode, innermode);
+  return force_subreg (outermode, op, innermode, byte);
+}
+
 /* If X is a memory ref, copy its contents to a new temp reg and return
    that reg.  Otherwise, return X.  */
 
@@ -840,6 +854,18 @@ promote_function_mode (const_tree type, machine_mode mode, int *punsignedp,
 
   switch (TREE_CODE (type))
     {
+    case BITINT_TYPE:
+      if (TYPE_MODE (type) == BLKmode)
+	return mode;
+
+      struct bitint_info info;
+      bool ok;
+      ok = targetm.c.bitint_type_info (TYPE_PRECISION (type), &info);
+      gcc_assert (ok);
+
+      if (!info.extended)
+	return mode;
+      /* FALLTHRU */
     case INTEGER_TYPE:   case ENUMERAL_TYPE:   case BOOLEAN_TYPE:
     case REAL_TYPE:      case OFFSET_TYPE:     case FIXED_POINT_TYPE:
     case POINTER_TYPE:   case REFERENCE_TYPE:
@@ -879,6 +905,18 @@ promote_mode (const_tree type ATTRIBUTE_UNUSED, machine_mode mode,
 
   switch (code)
     {
+    case BITINT_TYPE:
+      if (TYPE_MODE (type) == BLKmode)
+	return mode;
+
+      struct bitint_info info;
+      bool ok;
+      ok = targetm.c.bitint_type_info (TYPE_PRECISION (type), &info);
+      gcc_assert (ok);
+
+      if (!info.extended)
+	return mode;
+      /* FALLTHRU */
     case INTEGER_TYPE:   case ENUMERAL_TYPE:   case BOOLEAN_TYPE:
     case REAL_TYPE:      case OFFSET_TYPE:     case FIXED_POINT_TYPE:
       /* Values of these types always have scalar mode.  */
@@ -1149,7 +1187,7 @@ emit_stack_restore (enum save_level save_level, rtx sa)
      STACK_POINTER. This renders the HARD_FRAME_POINTER unusable for accessing
      aligned variables, which is reflected in ix86_can_eliminate.
      We normally still have the realigned STACK_POINTER that we can use.
-     But if there is a stack restore still present at reload, it can trigger 
+     But if there is a stack restore still present at reload, it can trigger
      mark_not_eliminable for the STACK_POINTER, leaving no way to eliminate
      FRAME_POINTER into a hard reg.
      To prevent this situation, we force need_drap if we emit a stack
@@ -1223,7 +1261,7 @@ record_new_stack_level (void)
   /* Record the new stack level for nonlocal gotos.  */
   if (cfun->nonlocal_goto_save_area)
     update_nonlocal_goto_save_area ();
- 
+
   /* Record the new stack level for SJLJ exceptions.  */
   if (targetm_common.except_unwind_info (&global_options) == UI_SJLJ)
     update_sjlj_context ();

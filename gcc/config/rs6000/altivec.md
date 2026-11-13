@@ -1,5 +1,5 @@
 ;; AltiVec patterns.
-;; Copyright (C) 2002-2024 Free Software Foundation, Inc.
+;; Copyright (C) 2002-2026 Free Software Foundation, Inc.
 ;; Contributed by Aldy Hernandez (aldy@quesejoda.com)
 
 ;; This file is part of GCC.
@@ -119,7 +119,6 @@
    UNSPEC_STVLXL
    UNSPEC_STVRX
    UNSPEC_STVRXL
-   UNSPEC_VADU
    UNSPEC_VSLV
    UNSPEC_VSRV
    UNSPEC_VMULWHUB
@@ -171,6 +170,19 @@
    UNSPEC_VSTRIL
    UNSPEC_SLDB
    UNSPEC_SRDB
+   UNSPEC_VECTOR_SHIFT
+   UNSPEC_VUCMPRHN
+   UNSPEC_VUCMPRLN
+   UNSPEC_VUCMPRHB
+   UNSPEC_VUCMPRLB
+   UNSPEC_VUCMPRHH
+   UNSPEC_VUCMPRLH
+   UNSPEC_VUPKHSNTOB
+   UNSPEC_VUPKLSNTOB
+   UNSPEC_VUPKINT4TOBF16
+   UNSPEC_VUPKINT8TOBF16
+   UNSPEC_VUPKINT4TOFP32
+   UNSPEC_VUPKINT8TOFP32
 ])
 
 (define_c_enum "unspecv"
@@ -227,8 +239,7 @@
 (define_mode_attr VI_unit [(V16QI "VECTOR_UNIT_ALTIVEC_P (V16QImode)")
 			   (V8HI "VECTOR_UNIT_ALTIVEC_P (V8HImode)")
 			   (V4SI "VECTOR_UNIT_ALTIVEC_P (V4SImode)")
-			   (V2DI "VECTOR_UNIT_P8_VECTOR_P (V2DImode)")
-			   (V1TI "VECTOR_UNIT_ALTIVEC_P (V1TImode)")])
+			   (V2DI "VECTOR_UNIT_P8_VECTOR_P (V2DImode)")])
 
 ;; Vector pack/unpack
 (define_mode_iterator VP [V2DI V4SI V8HI])
@@ -238,6 +249,8 @@
 
 ;; Vector negate
 (define_mode_iterator VNEG [V4SI V2DI])
+
+(define_mode_iterator V16QI_V2DI [V16QI V2DI])
 
 ;; Vector move instructions.
 (define_insn "*altivec_mov<mode>"
@@ -506,12 +519,23 @@
 
 ;; add
 (define_insn "add<mode>3"
-  [(set (match_operand:VI2 0 "register_operand" "=v")
-        (plus:VI2 (match_operand:VI2 1 "register_operand" "v")
-		  (match_operand:VI2 2 "register_operand" "v")))]
+  [(set (match_operand:V16QI_V2DI 0 "register_operand" "=v")
+        (plus:V16QI_V2DI (match_operand:V16QI_V2DI 1 "register_operand" "v")
+                         (match_operand:V16QI_V2DI 2 "register_operand" "v")))]
   "<VI_unit>"
   "vaddu<VI_char>m %0,%1,%2"
   [(set_attr "type" "vecsimple")])
+
+(define_insn "add<mode>3"
+  [(set (match_operand:VIArith 0 "register_operand" "=wa,v")
+        (plus:VIArith (match_operand:VIArith 1 "register_operand" "wa,v")
+                      (match_operand:VIArith 2 "register_operand" "wa,v")))]
+  "<VI_unit>"
+  "@
+   xvaddu<VI_char>m %x0,%x1,%x2
+   vaddu<VI_char>m %0,%1,%2"
+  [(set_attr "type" "vecsimple")
+   (set_attr "isa" "future,*")])
 
 (define_insn "*altivec_addv4sf3"
   [(set (match_operand:V4SF 0 "register_operand" "=v")
@@ -550,12 +574,23 @@
 
 ;; sub
 (define_insn "sub<mode>3"
-  [(set (match_operand:VI2 0 "register_operand" "=v")
-        (minus:VI2 (match_operand:VI2 1 "register_operand" "v")
-		   (match_operand:VI2 2 "register_operand" "v")))]
+  [(set (match_operand:V16QI_V2DI 0 "register_operand" "=v")
+        (minus:V16QI_V2DI (match_operand:V16QI_V2DI 1 "register_operand" "v")
+                          (match_operand:V16QI_V2DI 2 "register_operand" "v")))]
   "<VI_unit>"
   "vsubu<VI_char>m %0,%1,%2"
   [(set_attr "type" "vecsimple")])
+
+(define_insn "sub<mode>3"
+  [(set (match_operand:VIArith 0 "register_operand" "=wa,v")
+        (minus:VIArith (match_operand:VIArith 1 "register_operand" "wa,v")
+                       (match_operand:VIArith 2 "register_operand" "wa,v")))]
+  "<VI_unit>"
+  "@
+   xvsubu<VI_char>m %x0,%x1,%x2
+   vsubu<VI_char>m %0,%1,%2"
+  [(set_attr "type" "vecsimple")
+   (set_attr "isa" "future,*")])
 
 (define_insn "*altivec_subv4sf3"
   [(set (match_operand:V4SF 0 "register_operand" "=v")
@@ -878,9 +913,9 @@
 (define_int_iterator VSHIFT_DBL_LR [UNSPEC_SLDB UNSPEC_SRDB])
 
 (define_insn "vs<SLDB_lr>db_<mode>"
- [(set (match_operand:VI2 0 "register_operand" "=v")
-  (unspec:VI2 [(match_operand:VI2 1 "register_operand" "v")
-	       (match_operand:VI2 2 "register_operand" "v")
+ [(set (match_operand:VEC_IC 0 "register_operand" "=v")
+  (unspec:VEC_IC [(match_operand:VEC_IC 1 "register_operand" "v")
+	       (match_operand:VEC_IC 2 "register_operand" "v")
 	       (match_operand:QI 3 "const_0_to_12_operand" "n")]
 	      VSHIFT_DBL_LR))]
   "TARGET_POWER10"
@@ -2176,6 +2211,56 @@
   "TARGET_ALTIVEC"
   "vsro %0,%1,%2"
   [(set_attr "type" "vecperm")])
+
+;; Optimize V2DI shifts by constants.  This relies on the shift instructions
+;; only looking at the bits needed to do the shift.  This means we can use
+;; VSPLTISW or XXSPLTIB to load up the constant, and not worry about the bits
+;; that the vector shift instructions will not use.
+(define_mode_iterator VSHIFT_MODE	[(V4SI "TARGET_P9_VECTOR")
+					 (V2DI "TARGET_P8_VECTOR")])
+
+(define_code_iterator vshift_code	[ashift ashiftrt lshiftrt])
+(define_code_attr vshift_attr		[(ashift   "ashift")
+					 (ashiftrt "ashiftrt")
+					 (lshiftrt "lshiftrt")])
+
+(define_insn_and_split "*altivec_<mode>_<vshift_attr>_const"
+  [(set (match_operand:VSHIFT_MODE 0 "register_operand" "=v")
+	(vshift_code:VSHIFT_MODE
+	 (match_operand:VSHIFT_MODE 1 "register_operand" "v")
+	 (match_operand:VSHIFT_MODE 2 "vector_shift_constant" "")))
+   (clobber (match_scratch:VSHIFT_MODE 3 "=&v"))]
+  "((<MODE>mode == V2DImode && TARGET_P8_VECTOR)
+    || (<MODE>mode == V4SImode && TARGET_P9_VECTOR))"
+  "#"
+  "&& 1"
+  [(set (match_dup 3)
+	(unspec:VSHIFT_MODE [(match_dup 4)] UNSPEC_VECTOR_SHIFT))
+   (set (match_dup 0)
+	(vshift_code:VSHIFT_MODE (match_dup 1)
+				 (match_dup 3)))]
+{
+  if (GET_CODE (operands[3]) == SCRATCH)
+    operands[3] = gen_reg_rtx (<MODE>mode);
+
+  operands[4] = GET_CODE (operands[2]) == CONST_VECTOR
+		? CONST_VECTOR_ELT (operands[2], 0)
+		: XEXP (operands[2], 0);
+})
+
+(define_insn "*altivec_<mode>_shift_const"
+  [(set (match_operand:VSHIFT_MODE 0 "register_operand" "=v")
+	(unspec:VSHIFT_MODE [(match_operand 1 "const_int_operand" "n")]
+			    UNSPEC_VECTOR_SHIFT))]
+  "TARGET_P8_VECTOR"
+{
+  if (UINTVAL (operands[1]) <= 15)
+    return "vspltisw %0,%1";
+  else if (TARGET_P9_VECTOR)
+    return "xxspltib %x0,%1";
+  else
+    gcc_unreachable ();
+})
 
 (define_insn "altivec_vsum4ubs"
   [(set (match_operand:V4SI 0 "register_operand" "=v")
@@ -3576,10 +3661,7 @@
 
   emit_insn (gen_vsx_xvcvsphp (rtx_tmp_hi, operands[1]));
   emit_insn (gen_vsx_xvcvsphp (rtx_tmp_lo, operands[2]));
-  if (!BYTES_BIG_ENDIAN)
-    emit_insn (gen_altivec_vpkuwum (operands[0], rtx_tmp_hi, rtx_tmp_lo));
-  else
-    emit_insn (gen_altivec_vpkuwum (operands[0], rtx_tmp_lo, rtx_tmp_hi));
+  emit_insn (gen_altivec_vpkuwum (operands[0], rtx_tmp_hi, rtx_tmp_lo));
   DONE;
 })
 
@@ -3699,7 +3781,7 @@
     }
 })
 
-(define_expand "udot_prod<mode>"
+(define_expand "udot_prodv4si<mode>"
   [(set (match_operand:V4SI 0 "register_operand" "=v")
         (plus:V4SI (match_operand:V4SI 3 "register_operand" "v")
                    (unspec:V4SI [(match_operand:VIshort 1 "register_operand" "v")  
@@ -3711,7 +3793,7 @@
   DONE;
 })
 
-(define_expand "sdot_prodv8hi"
+(define_expand "sdot_prodv4siv8hi"
   [(set (match_operand:V4SI 0 "register_operand" "=v")
         (plus:V4SI (match_operand:V4SI 3 "register_operand" "v")
                    (unspec:V4SI [(match_operand:V8HI 1 "register_operand" "v")
@@ -3723,7 +3805,7 @@
   DONE;
 })
 
-(define_expand "widen_usum<mode>3"
+(define_expand "widen_usumv4si<mode>3"
   [(set (match_operand:V4SI 0 "register_operand" "=v")
         (plus:V4SI (match_operand:V4SI 2 "register_operand" "v")
                    (unspec:V4SI [(match_operand:VIshort 1 "register_operand" "v")]
@@ -3737,7 +3819,7 @@
   DONE;
 })
 
-(define_expand "widen_ssumv16qi3"
+(define_expand "widen_ssumv4siv16qi3"
   [(set (match_operand:V4SI 0 "register_operand" "=v")
         (plus:V4SI (match_operand:V4SI 2 "register_operand" "v")
                    (unspec:V4SI [(match_operand:V16QI 1 "register_operand" "v")]
@@ -3751,7 +3833,7 @@
   DONE;
 })
 
-(define_expand "widen_ssumv8hi3"
+(define_expand "widen_ssumv4siv8hi3"
   [(set (match_operand:V4SI 0 "register_operand" "=v")
         (plus:V4SI (match_operand:V4SI 2 "register_operand" "v")
                    (unspec:V4SI [(match_operand:V8HI 1 "register_operand" "v")]
@@ -4323,19 +4405,15 @@
   [(set_attr "type" "vecsimple")])
 
 ;; Vector absolute difference unsigned
-(define_expand "vadu<mode>3"
-  [(set (match_operand:VI 0 "register_operand")
-        (unspec:VI [(match_operand:VI 1 "register_operand")
-		    (match_operand:VI 2 "register_operand")]
-         UNSPEC_VADU))]
-  "TARGET_P9_VECTOR")
-
-;; Vector absolute difference unsigned
-(define_insn "p9_vadu<mode>3"
+(define_insn "uabd<mode>3"
   [(set (match_operand:VI 0 "register_operand" "=v")
-        (unspec:VI [(match_operand:VI 1 "register_operand" "v")
-		    (match_operand:VI 2 "register_operand" "v")]
-         UNSPEC_VADU))]
+	(minus:VI
+	  (umax:VI
+	    (match_operand:VI 1 "register_operand" "v")
+	    (match_operand:VI 2 "register_operand" "v"))
+	  (umin:VI
+	    (match_dup 1)
+	    (match_dup 2))))]
   "TARGET_P9_VECTOR"
   "vabsdu<wd> %0,%1,%2"
   [(set_attr "type" "vecsimple")])
@@ -4381,7 +4459,7 @@
 ;; ISA 2.07 128-bit binary support to target the VMX/altivec registers without
 ;; having to worry about the register allocator deciding GPRs are better.
 
-(define_insn "altivec_vadduqm"
+(define_insn "addv1ti3"
   [(set (match_operand:V1TI 0 "register_operand" "=v")
 	(plus:V1TI (match_operand:V1TI 1 "register_operand" "v")
 		   (match_operand:V1TI 2 "register_operand" "v")))]
@@ -4398,7 +4476,7 @@
   "vaddcuq %0,%1,%2"
   [(set_attr "type" "vecsimple")])
 
-(define_insn "altivec_vsubuqm"
+(define_insn "subv1ti3"
   [(set (match_operand:V1TI 0 "register_operand" "=v")
 	(minus:V1TI (match_operand:V1TI 1 "register_operand" "v")
 		    (match_operand:V1TI 2 "register_operand" "v")))]
@@ -4500,7 +4578,7 @@
   rtx zero = gen_reg_rtx (V4SImode);
   rtx psum = gen_reg_rtx (V4SImode);
 
-  emit_insn (gen_p9_vaduv16qi3 (absd, operands[1], operands[2]));
+  emit_insn (gen_uabdv16qi3 (absd, operands[1], operands[2]));
   emit_insn (gen_altivec_vspltisw (zero, const0_rtx));
   emit_insn (gen_altivec_vsum4ubs (psum, absd, zero));
   emit_insn (gen_addv4si3 (operands[0], psum, operands[3]));
@@ -4521,7 +4599,7 @@
   rtx zero = gen_reg_rtx (V4SImode);
   rtx psum = gen_reg_rtx (V4SImode);
 
-  emit_insn (gen_p9_vaduv8hi3 (absd, operands[1], operands[2]));
+  emit_insn (gen_uabdv8hi3 (absd, operands[1], operands[2]));
   emit_insn (gen_altivec_vspltisw (zero, const0_rtx));
   emit_insn (gen_altivec_vsum4shs (psum, absd, zero));
   emit_insn (gen_addv4si3 (operands[0], psum, operands[3]));
@@ -4784,3 +4862,353 @@
 				  (match_dup 3)]
 				 UNSPEC_BCD_ADD_SUB)
 		    (match_dup 4)))])])
+
+(define_int_attr vu_hl [(UNSPEC_VUPKHSNTOB "h") (UNSPEC_VUPKLSNTOB "l")
+			(UNSPEC_VUCMPRHN "h") (UNSPEC_VUCMPRLN "l")
+			(UNSPEC_VUCMPRHB "h") (UNSPEC_VUCMPRLB "l")
+			(UNSPEC_VUCMPRHH "h") (UNSPEC_VUCMPRLH "l")])
+
+(define_int_attr vu_lh [(UNSPEC_VUPKHSNTOB "l") (UNSPEC_VUPKLSNTOB "h")
+			(UNSPEC_VUCMPRHN "l") (UNSPEC_VUCMPRLN "h")
+			(UNSPEC_VUCMPRHB "l") (UNSPEC_VUCMPRLB "h")
+			(UNSPEC_VUCMPRHH "l") (UNSPEC_VUCMPRLH "h")])
+
+;; Vector unpack instructions for future.
+
+(define_int_iterator VUPKNTOB [UNSPEC_VUPKHSNTOB UNSPEC_VUPKLSNTOB])
+
+(define_insn "altivec_vupk<vu_hl>sntob_direct"
+  [(set (match_operand:V16QI 0 "altivec_register_operand" "=v")
+	(unspec:V16QI [(match_operand:V2DI 1 "altivec_register_operand" "v")]
+		      VUPKNTOB))]
+  "TARGET_FUTURE && TARGET_VSX"
+  "vupk<vu_hl>sntob %0, %1"
+  [(set_attr "type" "vecperm")])
+
+;; Unpack signed nibbles to bytes.
+;; For big-endian, generates:
+;;   vupk<vu_hl>sntob operands[0], operands[1]
+;; For little-endian, generates (requires VSX for xxbrq):
+;;   vupk<vu_lh>sntob operands[0], operands[1]
+;;   xxbrq operands[0], operands[0]
+;; TARGET_VSX is required because the builtin operates on V2DI (vector
+;; unsigned long long), which requires -mvsx. On little-endian systems,
+;; the endian compensation also uses the VSX xxbrq instruction.
+
+(define_expand "altivec_vupk<vu_hl>sntob"
+  [(set (match_operand:V16QI 0 "altivec_register_operand")
+	(unspec:V16QI [(match_operand:V2DI 1 "altivec_register_operand")]
+		      VUPKNTOB))]
+  "TARGET_FUTURE && TARGET_VSX"
+{
+  if (BYTES_BIG_ENDIAN)
+    emit_insn (gen_altivec_vupk<vu_hl>sntob_direct (operands[0],
+						    operands[1]));
+  else
+    {
+      emit_insn (gen_altivec_vupk<vu_lh>sntob_direct (operands[0],
+						      operands[1]));
+      emit_insn (gen_p9_xxbrq_v16qi (operands[0], operands[0]));
+    }
+  DONE;
+})
+
+(define_insn "altivec_vupkint4tobf16"
+  [(set (match_operand:V16QI 0 "altivec_register_operand" "=v")
+	(unspec:V16QI [(match_operand:V8HI 1 "altivec_register_operand" "v")
+		       (match_operand:QI 2 "const_0_to_3_operand" "i")]
+		      UNSPEC_VUPKINT4TOBF16))]
+  "TARGET_FUTURE"
+  "vupkint4tobf16 %0, %1, %2"
+  [(set_attr "type" "vecperm")])
+
+(define_insn "altivec_vupkint8tobf16"
+  [(set (match_operand:V16QI 0 "altivec_register_operand" "=v")
+	(unspec:V16QI [(match_operand:V8HI 1 "altivec_register_operand" "v")
+		       (match_operand:QI 2 "const_0_to_1_operand" "i")]
+		      UNSPEC_VUPKINT8TOBF16))]
+  "TARGET_FUTURE"
+  "vupkint8tobf16 %0, %1, %2"
+  [(set_attr "type" "vecperm")])
+
+(define_insn "altivec_vupkint4tofp32"
+  [(set (match_operand:V4SF 0 "altivec_register_operand" "=v")
+        (unspec:V4SF [(match_operand:V4SI 1 "altivec_register_operand" "v")
+		      (match_operand:QI 2 "const_0_to_7_operand" "i")]
+		     UNSPEC_VUPKINT4TOFP32))]
+  "TARGET_FUTURE"
+  "vupkint4tofp32 %0, %1, %2"
+  [(set_attr "type" "vecperm")])
+
+(define_insn "altivec_vupkint8tofp32"
+  [(set (match_operand:V4SF 0 "altivec_register_operand" "=v")
+	(unspec:V4SF [(match_operand:V4SI 1 "altivec_register_operand" "v")
+		      (match_operand:QI 2 "const_0_to_3_operand" "i")]
+		     UNSPEC_VUPKINT8TOFP32))]
+  "TARGET_FUTURE"
+  "vupkint8tofp32 %0, %1, %2"
+  [(set_attr "type" "vecperm")])
+
+;; Vector uncompress instructions for future.
+
+;; VSX splat values for vector uncompress instructions for little endian.
+(define_int_attr vucmpr_splat [(UNSPEC_VUCMPRHN "3")
+			       (UNSPEC_VUCMPRLN "2")
+			       (UNSPEC_VUCMPRHB "7")
+			       (UNSPEC_VUCMPRLB "6")
+			       (UNSPEC_VUCMPRHH "15")
+			       (UNSPEC_VUCMPRLH "14")])
+
+;; Altivec PCV(Permute Control Vector) mask values for vperm used in
+;; little endian.
+(define_int_attr vucmpr_pcv [(UNSPEC_VUCMPRHN "0x0f0e0d0c")
+			     (UNSPEC_VUCMPRLN "0x0b0a0908")
+			     (UNSPEC_VUCMPRHB "0x0f0e0000")
+			     (UNSPEC_VUCMPRLB "0x0d0c0000")])
+
+;; Values for UIM which are used in vinsw instruction which will be used in
+;; little-endian, to know in vector.
+(define_int_attr vucmpr_uim [(UNSPEC_VUCMPRHN "4") (UNSPEC_VUCMPRLN "0")
+			     (UNSPEC_VUCMPRHB "2") (UNSPEC_VUCMPRLB "0")])
+
+/* On little-endian systems, the selector/mask layout does not match
+   the architectural element ordering used by the vector uncompress
+   instructions. Byte-wise reverse the selector layout and swap the high/low
+   nibbles so that the resulting vector matches big-endian semantics.  */
+
+;; Vector Uncompress Nibbles
+
+(define_int_iterator VUCMPR_N [UNSPEC_VUCMPRHN UNSPEC_VUCMPRLN])
+
+(define_insn "altivec_vucmpr<vu_hl>n_direct"
+  [(set (match_operand:V8HI 0 "altivec_register_operand" "=v")
+	(unspec:V8HI [(match_operand:V16QI 1 "altivec_register_operand" "v")
+		      (match_operand:V4SI 2 "altivec_register_operand" "v")]
+		     VUCMPR_N))]
+  "TARGET_FUTURE"
+  "vucmpr<vu_hl>n %0, %1, %2")
+
+;; Vector uncompress nibbles.
+;; For big-endian, generates:
+;;   vucmpr<vu_hl>n operands[0], operands[1], operands[2]
+;; For little-endian with VSX, generates:
+;;   vspltw splat, operands[2], <vucmpr_splat>
+;;   xxbrw splat, splat
+;;   vspltisb shift, 4
+;;   vrlb rotated, bytes, shift
+;;   vucmpr<vu_lh>n operands[0], operands[1], selector
+;; For little-endian without VSX (Altivec-only), generates:
+;;   pli mask, <vucmpr_pcv>
+;;   vinsw pcv, mask, <vucmpr_uim>
+;;   vperm operands[2], operands[2], operands[2], perm
+;;   vspltisb shift, 4
+;;   vrlb rotated, bytes, shift
+;;   vucmpr<vu_lh>n operands[0], operands[1], selector
+;;
+;; Uncompress builtins require special handling on little-endian systems because
+;; the selector/mask layout does not match the architectural element ordering
+;; used by the vector uncompress instructions. The selector must be byte-wise
+;; reversed and the high/low nibbles swapped (via rotation) so that the
+;; resulting vector matches big-endian semantics.
+
+(define_expand "altivec_vucmpr<vu_hl>n"
+  [(set (match_operand:V8HI 0 "altivec_register_operand")
+	(unspec:V8HI [(match_operand:V16QI 1 "altivec_register_operand")
+		      (match_operand:V4SI 2 "altivec_register_operand")]
+		     VUCMPR_N))]
+  "TARGET_FUTURE"
+{
+  if (BYTES_BIG_ENDIAN)
+    {
+      emit_insn (gen_altivec_vucmpr<vu_hl>n_direct(operands[0], operands[1],
+						   operands[2]));
+      DONE;
+    }
+  if (TARGET_VSX)
+    {
+      rtx splat = gen_reg_rtx (V4SImode);
+      rtx shift = gen_reg_rtx (V16QImode);
+      rtx bytes = gen_reg_rtx (V16QImode);
+      rtx rotated = gen_reg_rtx (V16QImode);
+      rtx selector = gen_reg_rtx (V4SImode);
+
+      emit_insn (gen_altivec_vspltw_direct (splat, operands[2],
+					    GEN_INT (<vucmpr_splat>)));
+      emit_insn (gen_p9_xxbrw_v4si (splat, splat));
+      emit_move_insn (bytes, gen_lowpart (V16QImode, splat));
+      emit_insn (gen_altivec_vspltisb (shift, GEN_INT (4)));
+      emit_insn (gen_altivec_vrlb (rotated, bytes, shift));
+      emit_move_insn (selector, gen_lowpart (V4SImode, rotated));
+      emit_insn (gen_altivec_vucmpr<vu_lh>n_direct (operands[0], operands[1],
+						    selector));
+    }
+  else
+    {
+      rtx pcv = gen_reg_rtx (V4SImode);
+      rtx perm = gen_reg_rtx (V16QImode);
+      rtx mask = gen_reg_rtx (SImode);
+      rtx shift = gen_reg_rtx (V16QImode);
+      rtx bytes = gen_reg_rtx (V16QImode);
+      rtx rotated = gen_reg_rtx (V16QImode);
+      rtx selector = gen_reg_rtx (V4SImode);
+
+      emit_move_insn (mask, GEN_INT (<vucmpr_pcv>));
+      emit_insn (gen_vreplace_elt_v4si_inst (pcv, pcv, mask,
+					     GEN_INT (<vucmpr_uim>)));
+      emit_move_insn (perm, gen_lowpart (V16QImode, pcv));
+      emit_insn (gen_altivec_vperm_v4si_direct (operands[2], operands[2],
+						operands[2], perm));
+      emit_insn (gen_altivec_vspltisb (shift, GEN_INT (4)));
+      emit_move_insn (bytes, gen_lowpart (V16QImode, operands[2]));
+      emit_insn (gen_altivec_vrlb (rotated, bytes, shift));
+      emit_move_insn (selector, gen_lowpart (V4SImode, rotated));
+      emit_insn (gen_altivec_vucmpr<vu_lh>n_direct (operands[0], operands[1],
+						    selector));
+    }
+
+  DONE;
+})
+
+;; Vector Uncompress Bytes
+
+(define_int_iterator VUCMPR_B [UNSPEC_VUCMPRHB UNSPEC_VUCMPRLB])
+
+(define_insn "altivec_vucmpr<vu_hl>b_direct"
+  [(set (match_operand:V4SI 0 "altivec_register_operand" "=v")
+	(unspec:V4SI [(match_operand:V8HI 1 "altivec_register_operand" "v")
+		      (match_operand:V8HI 2 "altivec_register_operand" "v")]
+		     VUCMPR_B))]
+  "TARGET_FUTURE"
+  "vucmpr<vu_hl>b %0, %1, %2"
+  [(set_attr "type" "vecperm")])
+
+;; Vector uncompress bytes.
+;; For big-endian, generates:
+;;   vucmpr<vu_hl>b operands[0], operands[1], operands[2]
+;; For little-endian with VSX, generates:
+;;   vsplth splat, operands[2], <vucmpr_splat>
+;;   xxbrh splat, splat
+;;   vspltisb shift, 4
+;;   vrlb rotated, bytes, shift
+;;   vucmpr<vu_lh>b operands[0], operands[1], selector
+;; For little-endian without VSX (Altivec-only), generates:
+;;   pli mask, <vucmpr_pcv>
+;;   vinsw pcv, mask, <vucmpr_uim>
+;;   vperm bytes, bytes, bytes, perm
+;;   vspltisb shift, 4
+;;   vrlb rotated, bytes, shift
+;;   vucmpr<vu_lh>b operands[0], operands[1], selector
+;;
+;; Below builtins require special handling on little-endian systems similar
+;; to nibbles, with selector byte-reversal and nibble swapping via rotation.
+
+(define_expand "altivec_vucmpr<vu_hl>b"
+  [(set (match_operand:V4SI 0 "altivec_register_operand")
+	(unspec:V4SI [(match_operand:V8HI 1 "altivec_register_operand")
+		      (match_operand:V8HI 2 "altivec_register_operand")]
+		     VUCMPR_B))]
+  "TARGET_FUTURE"
+{
+  if (BYTES_BIG_ENDIAN)
+    {
+      emit_insn (gen_altivec_vucmpr<vu_hl>b_direct (operands[0], operands[1],
+						    operands[2]));
+      DONE;
+    }
+  if (TARGET_VSX)
+    {
+      rtx splat = gen_reg_rtx (V8HImode);
+      rtx shift = gen_reg_rtx (V16QImode);
+      rtx bytes = gen_reg_rtx (V16QImode);
+      rtx rotated = gen_reg_rtx (V16QImode);
+      rtx selector = gen_reg_rtx (V8HImode);
+
+      emit_insn (gen_altivec_vsplth_direct (splat, operands[2],
+					    GEN_INT (<vucmpr_splat>)));
+      emit_insn (gen_p9_xxbrh_v8hi (splat, splat));
+      emit_move_insn (bytes, gen_lowpart (V16QImode, splat));
+      emit_insn (gen_altivec_vspltisb (shift, GEN_INT (4)));
+      emit_insn (gen_altivec_vrlb (rotated, bytes, shift));
+      emit_move_insn (selector, gen_lowpart (V8HImode, rotated));
+      emit_insn (gen_altivec_vucmpr<vu_lh>b_direct (operands[0], operands[1],
+						    selector));
+    }
+  else
+    {
+      rtx pcv = gen_reg_rtx (V4SImode);
+      rtx perm = gen_reg_rtx (V16QImode);
+      rtx mask = gen_reg_rtx (SImode);
+      rtx shift = gen_reg_rtx (V16QImode);
+      rtx bytes = gen_reg_rtx (V16QImode);
+      rtx rotated = gen_reg_rtx (V16QImode);
+      rtx selector = gen_reg_rtx (V8HImode);
+
+      emit_move_insn (mask, GEN_INT (<vucmpr_pcv>));
+      emit_insn (gen_vreplace_elt_v4si_inst (pcv, pcv, mask,
+					     GEN_INT (<vucmpr_uim>)));
+      emit_move_insn (perm, gen_lowpart (V16QImode, pcv));
+      emit_move_insn (bytes, gen_lowpart (V16QImode, operands[2]));
+      emit_insn (gen_altivec_vperm_v16qi_direct (bytes, bytes, bytes, perm));
+      emit_insn (gen_altivec_vspltisb (shift, GEN_INT (4)));
+      emit_insn (gen_altivec_vrlb (rotated, bytes, shift));
+      emit_move_insn (selector, gen_lowpart (V8HImode, rotated));
+      emit_insn (gen_altivec_vucmpr<vu_lh>b_direct (operands[0], operands[1],
+						    selector));
+    }
+
+  DONE;
+})
+
+;; Vector Uncompress Halfwords
+
+(define_int_iterator VUCMPR_H [UNSPEC_VUCMPRHH UNSPEC_VUCMPRLH])
+
+(define_insn "altivec_vucmpr<vu_hl>h_direct"
+  [(set (match_operand:V2DI 0 "altivec_register_operand" "=v")
+        (unspec:V2DI [(match_operand:V4SI 1 "altivec_register_operand" "v")
+		      (match_operand:V16QI 2 "altivec_register_operand" "v")]
+		     VUCMPR_H))]
+  "TARGET_FUTURE && TARGET_VSX"
+  "vucmpr<vu_hl>h %0, %1, %2"
+  [(set_attr "type" "vecperm")])
+
+;; Vector uncompress halfwords.
+;; For big-endian, generates:
+;;   vucmpr<vu_hl>h operands[0], operands[1], operands[2]
+;; For little-endian, generates:
+;;   vspltb splat, operands[2], <vucmpr_splat>
+;;   vspltisb shift, 4
+;;   vrlb rotated, splat, shift
+;;   vucmpr<vu_lh>h operands[0], operands[1], rotated
+;;
+;; TARGET_VSX is required because the builtin operates on V2DI (vector
+;; unsigned long long), which requires -mvsx.
+
+(define_expand "altivec_vucmpr<vu_hl>h"
+  [(set (match_operand:V2DI 0 "altivec_register_operand")
+        (unspec:V2DI [(match_operand:V4SI 1 "altivec_register_operand")
+		      (match_operand:V16QI 2 "altivec_register_operand")]
+		     VUCMPR_H))]
+  "TARGET_FUTURE && TARGET_VSX"
+{
+  if (BYTES_BIG_ENDIAN)
+    {
+      emit_insn (gen_altivec_vucmpr<vu_hl>h_direct (operands[0], operands[1],
+						    operands[2]));
+    }
+  else
+    {
+      rtx splat = gen_reg_rtx (V16QImode);
+      rtx shift = gen_reg_rtx (V16QImode);
+      rtx rotated = gen_reg_rtx (V16QImode);
+
+      emit_insn (gen_altivec_vspltb_direct (splat, operands[2],
+					    GEN_INT (<vucmpr_splat>)));
+      emit_insn (gen_altivec_vspltisb (shift, GEN_INT (4)));
+      emit_insn (gen_altivec_vrlb (rotated, splat, shift));
+      emit_insn (gen_altivec_vucmpr<vu_lh>h_direct (operands[0], operands[1],
+						    rotated));
+    }
+  DONE;
+})
+

@@ -1,5 +1,5 @@
 /* IBM RS/6000 CPU names..
-   Copyright (C) 1991-2024 Free Software Foundation, Inc.
+   Copyright (C) 1991-2026 Free Software Foundation, Inc.
    Contributed by Richard Kenner (kenner@vlsi1.ultra.nyu.edu)
 
    This file is part of GCC.
@@ -68,12 +68,6 @@
 				  | OPTION_MASK_P9_VECTOR)		\
 				 & ~OTHER_FUSION_MASKS)
 
-/* Support for the IEEE 128-bit floating point hardware requires a lot of the
-   VSX instructions that are part of ISA 3.0.  */
-#define ISA_3_0_MASKS_IEEE	(OPTION_MASK_VSX			\
-				 | OPTION_MASK_P8_VECTOR		\
-				 | OPTION_MASK_P9_VECTOR)
-
 /* Flags that need to be turned off if -mno-power10.  */
 /* We comment out PCREL_OPT here to disable it by default because SPEC2017
    performance was degraded by it.  */
@@ -88,6 +82,11 @@
 
 #define POWER11_MASKS_SERVER (ISA_3_1_MASKS_SERVER			\
 			      | OPTION_MASK_POWER11)
+
+/* -mcpu=future flags.  */
+#define FUTURE_MASKS_SERVER	(POWER11_MASKS_SERVER			\
+				 | OPTION_MASK_FUTURE			\
+				 | OPTION_MASK_DMF)
 
 /* Flags that need to be turned off if -mno-vsx.  */
 #define OTHER_VSX_VECTOR_MASKS	(OPTION_MASK_EFFICIENT_UNALIGNED_VSX	\
@@ -127,6 +126,8 @@
 				 | OPTION_MASK_FPRND			\
 				 | OPTION_MASK_POWER10			\
 				 | OPTION_MASK_POWER11			\
+				 | OPTION_MASK_FUTURE			\
+				 | OPTION_MASK_DMF			\
 				 | OPTION_MASK_P10_FUSION		\
 				 | OPTION_MASK_HTM			\
 				 | OPTION_MASK_ISEL			\
@@ -255,6 +256,7 @@ RS6000_CPU ("power9", PROCESSOR_POWER9, MASK_POWERPC64 | ISA_3_0_MASKS_SERVER
 	    | OPTION_MASK_HTM)
 RS6000_CPU ("power10", PROCESSOR_POWER10, MASK_POWERPC64 | ISA_3_1_MASKS_SERVER)
 RS6000_CPU ("power11", PROCESSOR_POWER11, MASK_POWERPC64 | POWER11_MASKS_SERVER)
+RS6000_CPU ("future", PROCESSOR_FUTURE, MASK_POWERPC64 | FUTURE_MASKS_SERVER)
 RS6000_CPU ("powerpc", PROCESSOR_POWERPC, 0)
 RS6000_CPU ("powerpc64", PROCESSOR_POWERPC64, OPTION_MASK_PPC_GFXOPT
 	    | MASK_POWERPC64)

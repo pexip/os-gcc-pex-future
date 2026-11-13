@@ -1,5 +1,5 @@
 /* ACLE support for Arm MVE
-   Copyright (C) 2021-2024 Free Software Foundation, Inc.
+   Copyright (C) 2021-2026 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -93,6 +93,13 @@ const unsigned int CP_READ_FPCR = 1U << 0;
 const unsigned int CP_RAISE_FP_EXCEPTIONS = 1U << 1;
 const unsigned int CP_READ_MEMORY = 1U << 2;
 const unsigned int CP_WRITE_MEMORY = 1U << 3;
+
+/* Flags that describe which forms of an intrinsic to generate: non-overloaded
+   and/or overloaded ones.  In general we want both, but for vuninitialized the
+   two forms have different signatures and we need to generate them
+   separately.  */
+const unsigned int NONOVERLOADED_FORM = 1U << 0;
+const unsigned int OVERLOADED_FORM = 1U << 1;
 
 /* Enumerates the MVE predicate and (data) vector types, together called
    "vector types" for brevity.  */
@@ -311,7 +318,7 @@ public:
   ~function_builder ();
 
   void add_unique_function (const function_instance &, tree,
-			    vec<tree> &, bool, bool, bool);
+			    vec<tree> &, bool, bool, bool, unsigned int);
   void add_overloaded_function (const function_instance &, bool, bool);
   void add_overloaded_functions (const function_group_info &,
 				 mode_suffix_index, bool);
@@ -383,10 +390,14 @@ public:
   tree resolve_to (mode_suffix_index,
 		   type_suffix_index = NUM_TYPE_SUFFIXES,
 		   type_suffix_index = NUM_TYPE_SUFFIXES);
+  tree pop_and_resolve_to (mode_suffix_index,
+			   type_suffix_index = NUM_TYPE_SUFFIXES,
+			   type_suffix_index = NUM_TYPE_SUFFIXES);
 
   type_suffix_index infer_pointer_type (unsigned int);
   type_suffix_index infer_vector_or_tuple_type (unsigned int, unsigned int);
   type_suffix_index infer_vector_type (unsigned int);
+  type_suffix_index infer_tuple_type (unsigned int);
 
   bool require_vector_or_scalar_type (unsigned int);
 
@@ -398,10 +409,11 @@ public:
 				    unsigned int = SAME_SIZE);
   bool require_scalar_type (unsigned int, const char *);
   bool require_pointer_type (unsigned int);
+  bool require_pointer_to_type (unsigned int, tree);
   bool require_integer_immediate (unsigned int);
   bool require_derived_scalar_type (unsigned int, type_class_index,
 				    unsigned int = SAME_SIZE);
-  
+
   bool check_num_arguments (unsigned int);
   bool check_gp_argument (unsigned int, unsigned int &, unsigned int &);
   tree resolve_unary (type_class_index = SAME_TYPE_CLASS,
@@ -433,7 +445,11 @@ public:
 
   bool require_immediate_enum (unsigned int, tree);
   bool require_immediate_lane_index (unsigned int, unsigned int = 1);
+  bool require_immediate_one_of (unsigned int, HOST_WIDE_INT, HOST_WIDE_INT,
+				 HOST_WIDE_INT, HOST_WIDE_INT);
   bool require_immediate_range (unsigned int, HOST_WIDE_INT, HOST_WIDE_INT);
+  bool require_immediate_range_multiple (unsigned int, HOST_WIDE_INT,
+					 HOST_WIDE_INT, HOST_WIDE_INT);
 
   bool check ();
 
@@ -441,6 +457,7 @@ private:
   bool argument_exists_p (unsigned int);
 
   bool require_immediate (unsigned int, HOST_WIDE_INT &);
+  bool require_signed_immediate (unsigned int, HOST_WIDE_INT &);
 
   /* The type of the resolved function.  */
   tree m_fntype;
@@ -571,9 +588,14 @@ public:
 class function_shape
 {
 public:
-  virtual bool explicit_type_suffix_p (unsigned int, enum predication_index, enum mode_suffix_index) const = 0;
-  virtual bool explicit_mode_suffix_p (enum predication_index, enum mode_suffix_index) const = 0;
-  virtual bool skip_overload_p (enum predication_index, enum mode_suffix_index) const = 0;
+  virtual bool explicit_type_suffix_p (unsigned int, enum predication_index,
+				       enum mode_suffix_index,
+				       type_suffix_info) const = 0;
+  virtual bool explicit_mode_suffix_p (enum predication_index,
+				       enum mode_suffix_index) const = 0;
+  virtual bool skip_overload_p (enum predication_index,
+				enum mode_suffix_index) const = 0;
+  virtual bool mode_after_pred () const = 0;
 
   /* Define all functions associated with the given group.  */
   virtual void build (function_builder &,
@@ -722,7 +744,7 @@ inline tree
 function_instance::tuple_type (unsigned int i) const
 {
   unsigned int num_vectors = vectors_per_tuple ();
-  return acle_vector_types[num_vectors - 1][type_suffix (i).vector_type];
+  return acle_vector_types[num_vectors >> 1][type_suffix (i).vector_type];
 }
 
 /* Return the vector or predicate mode associated with type suffix I.  */

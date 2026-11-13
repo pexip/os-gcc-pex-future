@@ -29,14 +29,16 @@
 #ifndef _GLIBCXX_TEXT_ENCODING
 #define _GLIBCXX_TEXT_ENCODING
 
+#ifdef _GLIBCXX_SYSHDR
 #pragma GCC system_header
+#endif
 
 #include <bits/requires_hosted.h>
 
 #define __glibcxx_want_text_encoding
 #include <bits/version.h>
 
-#ifdef __cpp_lib_text_encoding
+#ifdef __cpp_lib_text_encoding // >= C++26
 #include <compare>
 #include <string_view>
 #include <bits/functional_hash.h> // hash
@@ -51,7 +53,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
   /**
    * @brief An interface for accessing the IANA Character Sets registry.
    * @ingroup locales
-   * @since C++23
+   * @since C++26
    */
   struct text_encoding
   {
@@ -518,7 +520,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
     operator++()
     {
       if (_M_dereferenceable()) [[likely]]
-      ++_M_rep;
+	++_M_rep;
       else
 	{
 	  __glibcxx_assert(_M_dereferenceable());
@@ -533,7 +535,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       const bool __decrementable
 	= _M_rep != nullptr && _M_rep[-1]._M_id == _M_id;
       if (__decrementable) [[likely]]
-      --_M_rep;
+	--_M_rep;
       else
 	{
 	  __glibcxx_assert(__decrementable);

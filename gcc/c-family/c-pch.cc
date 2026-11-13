@@ -1,5 +1,5 @@
 /* Precompiled header implementation for the C languages.
-   Copyright (C) 2000-2024 Free Software Foundation, Inc.
+   Copyright (C) 2000-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -28,6 +28,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "c-pragma.h"
 #include "langhooks.h"
 #include "hosthooks.h"
+#include "diagnostic.h"
 
 /* This is a list of flag variables that must match exactly, and their
    names for the error message.  The possible values for *flag_var must
@@ -178,7 +179,8 @@ c_common_write_pch (void)
   cpp_write_pch_state (parse_in, pch_outfile);
   timevar_pop (TV_PCH_CPP_SAVE);
 
-  if (fseek (pch_outfile, 0, SEEK_SET) != 0
+  if (global_dc->pch_save (pch_outfile) < 0
+      || fseek (pch_outfile, 0, SEEK_SET) != 0
       || fwrite (get_ident (), IDENT_LENGTH, 1, pch_outfile) != 1)
     fatal_error (input_location, "cannot write %s: %m", pch_file);
 
@@ -345,20 +347,24 @@ c_common_read_pch (cpp_reader *pfile, const char *name,
   rebuild_location_adhoc_htab (line_table);
   line_table->trace_includes = saved_trace_includes;
 
-  /* Set the current location to the line containing the #include (or the
-     #pragma GCC pch_preprocess) for the purpose of assigning locations to any
-     macros that are about to be restored.  */
-  linemap_add (line_table, LC_ENTER, 0, saved_loc.file,
-	       saved_loc.line > 1 ? saved_loc.line - 1 : saved_loc.line);
+  /* Set the line_map current location to the start of the file, so that things
+     remain in order after cpp_read_state() re-adds any macros that were defined
+     prior to calling gt_pch_restore().  */
+  linemap_add (line_table, LC_ENTER, saved_loc.sysp, saved_loc.file, 0);
 
   timevar_push (TV_PCH_CPP_RESTORE);
   cpp_result = cpp_read_state (pfile, name, f, smd);
 
   /* Set the current location to the line following the #include, where we
      were prior to processing the PCH.  */
-  linemap_line_start (line_table, saved_loc.line, 0);
+  linemap_add (line_table, LC_RENAME, saved_loc.sysp, saved_loc.file,
+	       saved_loc.line);
 
   timevar_pop (TV_PCH_CPP_RESTORE);
+
+  if (global_dc->pch_restore (f) < 0)
+    fatal_error (input_location, "cannot read %s: %m", name);
+
   fclose (f);
 
   if (cpp_result != 0)

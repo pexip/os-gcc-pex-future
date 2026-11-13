@@ -1,5 +1,5 @@
 /* Build live ranges for pseudos.
-   Copyright (C) 2010-2024 Free Software Foundation, Inc.
+   Copyright (C) 2010-2026 Free Software Foundation, Inc.
    Contributed by Vladimir Makarov <vmakarov@redhat.com>.
 
 This file is part of GCC.
@@ -38,6 +38,7 @@ along with GCC; see the file COPYING3.	If not see
 #include "insn-config.h"
 #include "regs.h"
 #include "ira.h"
+#include "ira-int.h"
 #include "recog.h"
 #include "cfganal.h"
 #include "sparseset.h"
@@ -61,9 +62,10 @@ int lra_hard_reg_usage[FIRST_PSEUDO_REGISTER];
 /* A global flag whose true value says to build live ranges for all
    pseudos, otherwise the live ranges only for pseudos got memory is
    build.  True value means also building copies and setting up hard
-   register preferences.  The complete info is necessary only for the
-   assignment pass.  The complete info is not needed for the
-   coalescing and spill passes.	 */
+   register preferences.  The complete info is necessary for
+   assignment, rematerialization and spill to register passes.  The
+   complete info is not needed for the coalescing and spill to memory
+   passes.  */
 static bool complete_info_p;
 
 /* Pseudos live at current point in the RTL scan.  */
@@ -109,6 +111,15 @@ free_live_range_list (lra_live_range_t lr)
       lra_live_range_pool.remove (lr);
       lr = next;
     }
+}
+
+/* Reset and release live range list LR.  */
+void
+lra_reset_live_range_list (lra_live_range_t &lr)
+{
+  lra_live_range_t first = lr;
+  lr = NULL;
+  free_live_range_list (first);
 }
 
 /* Create and return pseudo live range with given attributes.  */
@@ -990,8 +1001,29 @@ process_bb_lives (basic_block bb, int &curr_point, bool dead_insn_p)
 	    for (reg2 = curr_static_id->hard_regs; reg2 != NULL; reg2 = reg2->next)
 	      if (reg2->type != OP_OUT && reg2->regno == reg->regno)
 		break;
+	    if (reg2 != NULL)
+	      continue;
+
+	    HARD_REG_SET clobbered_regset;
+	    CLEAR_HARD_REG_SET (clobbered_regset);
+	    SET_HARD_REG_BIT (clobbered_regset, reg->regno);
+
+	    for (reg2 = curr_id->regs; reg2 != NULL; reg2 = reg2->next)
+	      if (reg2->type != OP_OUT && reg2->regno < FIRST_PSEUDO_REGISTER
+		  && ira_hard_reg_set_intersection_p (reg2->regno,
+						      reg2->biggest_mode,
+						      clobbered_regset))
+		break;
 	    if (reg2 == NULL)
-	      make_hard_regno_dead (reg->regno);
+	      {
+		make_hard_regno_dead (reg->regno);
+	      }
+	    else
+	      {
+		EXECUTE_IF_SET_IN_SPARSESET (pseudos_live, j)
+		  SET_HARD_REG_BIT (lra_reg_info[j].conflict_hard_regs,
+				    reg->regno);
+	      }
 	  }
 
       /* Increment the current program point if we must.  */
@@ -1499,6 +1531,19 @@ lra_create_live_ranges (bool all_p, bool dead_insn_p)
   lra_clear_live_ranges ();
   bool res = lra_create_live_ranges_1 (all_p, false);
   lra_assert (! res);
+}
+
+/* Run lra_create_live_ranges if !complete_info_p.  Return FALSE iff
+   live ranges are known to have remained unchanged.  */
+
+bool
+lra_complete_live_ranges (void)
+{
+  if (complete_info_p)
+    return false;
+
+  lra_create_live_ranges (true, true);
+  return true;
 }
 
 /* Finish all live ranges.  */

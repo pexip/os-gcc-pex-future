@@ -1,5 +1,5 @@
 /* { dg-do compile } */
-/* { dg-options "-O3 -fdump-tree-optimized" } */
+/* { dg-options "-std=gnu17 -O3 -fdump-tree-optimized" } */
 
 static int c, d, e, f;
 static short g;
@@ -31,4 +31,4 @@ static int *i() {
 }
 int main() { k(c, c); }
 
-/* { dg-final { scan-tree-dump-not "foo" "optimized" } } */
+/* { dg-final { scan-tree-dump-not "foo" "optimized" { xfail *-*-* } } } */

@@ -1,4 +1,4 @@
-// Copyright (C) 2020-2024 Free Software Foundation, Inc.
+// Copyright (C) 2020-2026 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -21,6 +21,8 @@
 
 #include "rust-ast-lower-base.h"
 #include "rust-ast-lower-expr.h"
+#include "rust-hir-path.h"
+#include "rust-type.h"
 
 namespace Rust {
 namespace HIR {
@@ -63,8 +65,9 @@ class ASTLoweringType : public ASTLoweringBase
   using Rust::HIR::ASTLoweringBase::visit;
 
 public:
-  static HIR::Type *translate (AST::Type *type,
-			       bool default_to_static_lifetime = false);
+  static HIR::Type *translate (AST::Type &type,
+			       bool default_to_static_lifetime = false,
+			       bool impl_trait_allowed = false);
 
   void visit (AST::BareFunctionType &fntype) override;
   void visit (AST::TupleType &tuple) override;
@@ -78,16 +81,18 @@ public:
   void visit (AST::NeverType &type) override;
   void visit (AST::TraitObjectTypeOneBound &type) override;
   void visit (AST::TraitObjectType &type) override;
+  void visit (AST::ParenthesisedType &type) override;
+  void visit (AST::ImplTraitType &type) override;
+  void visit (AST::ImplTraitTypeOneBound &type) override;
+
+  void emit_impl_trait_error (location_t locus);
 
 private:
-  ASTLoweringType (bool default_to_static_lifetime)
-    : ASTLoweringBase (),
-      default_to_static_lifetime (default_to_static_lifetime),
-      translated (nullptr)
-  {}
+  ASTLoweringType (bool default_to_static_lifetime, bool impl_trait_allowed);
 
   /** Used when compiling const and static items. */
   bool default_to_static_lifetime;
+  bool impl_trait_allowed;
 
   HIR::Type *translated;
 };
@@ -97,7 +102,7 @@ class ASTLowerGenericParam : public ASTLoweringBase
   using Rust::HIR::ASTLoweringBase::visit;
 
 public:
-  static HIR::GenericParam *translate (AST::GenericParam *param);
+  static HIR::GenericParam *translate (AST::GenericParam &param);
 
   void visit (AST::LifetimeParam &param) override;
   void visit (AST::ConstGenericParam &param) override;
@@ -114,7 +119,7 @@ class ASTLoweringTypeBounds : public ASTLoweringBase
   using Rust::HIR::ASTLoweringBase::visit;
 
 public:
-  static HIR::TypeParamBound *translate (AST::TypeParamBound *type);
+  static HIR::TypeParamBound *translate (AST::TypeParamBound &type);
 
   void visit (AST::TraitBound &bound) override;
   void visit (AST::Lifetime &bound) override;

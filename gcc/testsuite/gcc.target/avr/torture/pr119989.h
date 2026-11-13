@@ -1,5 +1,5 @@
-const __memx TYP some_data[] = { 1, 2, 3, 4, 5 };
-const __memx TYP *IP;
+const AS TYP some_data[] = { 1, 2, 3, 4, 5 };
+const AS TYP *IP;
 
 TYP DT, a, b;
 

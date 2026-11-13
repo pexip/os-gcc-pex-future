@@ -2,6 +2,7 @@
    an unknown function (PR analyzer/98575).  */
 
 /* { dg-additional-options "-O2" } */
+/* { dg-skip-if "requires hosted libstdc++ for stdlib malloc" { ! hostedlib } } */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,7 +46,7 @@ int pamark(void) {
     if (curbp->b_amark == (AMARK *)NULL)
       curbp->b_amark = p;
     else
-      last->m_next = p; /* { dg-warning "dereference of NULL 'last'" "deref" } */
+      last->m_next = p; /* { dg-warning "dereference of NULL 'last'" "deref" { xfail *-*-* } } */
   }
 
   p->m_name = (char)c; /* { dg-bogus "leak of 'p'" "bogus leak" } */

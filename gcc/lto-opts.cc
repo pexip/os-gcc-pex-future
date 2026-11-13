@@ -1,6 +1,6 @@
 /* LTO IL options.
 
-   Copyright (C) 2009-2024 Free Software Foundation, Inc.
+   Copyright (C) 2009-2026 Free Software Foundation, Inc.
    Contributed by Simon Baldwin <simonb@google.com>
 
 This file is part of GCC.
@@ -97,7 +97,7 @@ lto_write_options (void)
   if (!OPTION_SET_P (flag_cf_protection))
     {
       const char *cf_protection = NULL;
-      switch (global_options.x_flag_cf_protection)
+      switch (global_options.x_flag_cf_protection & ~CF_SET)
 	{
 	case CF_NONE: cf_protection = "-fcf-protection=none"; break;
 	case CF_FULL: cf_protection = "-fcf-protection=full"; break;
@@ -153,6 +153,9 @@ lto_write_options (void)
 	case OPT_fprofile_prefix_map_:
 	case OPT_fcanon_prefix_map:
 	case OPT_fwhole_program:
+	case OPT_fltrans_output_list_:
+	case OPT_flto_incremental_:
+	case OPT_flto_incremental_cache_size_:
 	  continue;
 
 	default:

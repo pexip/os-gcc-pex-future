@@ -1,5 +1,5 @@
 /* Loop manipulation code for GNU compiler.
-   Copyright (C) 2002-2024 Free Software Foundation, Inc.
+   Copyright (C) 2002-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -32,6 +32,9 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-ssa-loop-manip.h"
 #include "dumpfile.h"
 #include "sreal.h"
+#include "tree-cfg.h"
+#include "tree-pass.h"
+#include "hierarchical_discriminator.h"
 
 static void copy_loops_to (class loop **, int,
 			   class loop *);
@@ -39,7 +42,7 @@ static void loop_redirect_edge (edge, basic_block);
 static void remove_bbs (basic_block *, int);
 static bool rpe_enum_p (const_basic_block, const void *);
 static int find_path (edge, basic_block **);
-static void fix_loop_placements (class loop *, bool *);
+static void fix_loop_placements (class loop *, bool *, bitmap);
 static bool fix_bb_placement (basic_block);
 static void fix_bb_placements (basic_block, bool *, bitmap);
 
@@ -123,7 +126,8 @@ fix_bb_placement (basic_block bb)
    invalidate the information about irreducible regions.  */
 
 static bool
-fix_loop_placement (class loop *loop, bool *irred_invalidated)
+fix_loop_placement (class loop *loop, bool *irred_invalidated,
+		    bitmap loop_closed_ssa_invalidated)
 {
   unsigned i;
   edge e;
@@ -154,6 +158,17 @@ fix_loop_placement (class loop *loop, bool *irred_invalidated)
 	    *irred_invalidated = true;
 	  rescan_loop_exit (e, false, false);
 	}
+      /* Any LC SSA PHIs on e->dest might now be on the wrong edge
+	 if their defs were in a former outer loop.  Also all uses
+	 in the original inner loop of defs in the outer loop(s) now
+	 require LC PHI nodes.  */
+      if (loop_closed_ssa_invalidated)
+	{
+	  basic_block *bbs = get_loop_body (loop);
+	  for (unsigned i = 0; i < loop->num_nodes; ++i)
+	    bitmap_set_bit (loop_closed_ssa_invalidated, bbs[i]->index);
+	  free (bbs);
+	}
 
       ret = true;
     }
@@ -171,7 +186,7 @@ fix_loop_placement (class loop *loop, bool *irred_invalidated)
    successors we consider edges coming out of the loops.
 
    If the changes may invalidate the information about irreducible regions,
-   IRRED_INVALIDATED is set to true.  
+   IRRED_INVALIDATED is set to true.
 
    If LOOP_CLOSED_SSA_INVLIDATED is non-zero then all basic blocks with
    changed loop_father are collected there. */
@@ -224,16 +239,10 @@ fix_bb_placements (basic_block from,
       if (from->loop_father->header == from)
 	{
 	  /* Subloop header, maybe move the loop upward.  */
-	  if (!fix_loop_placement (from->loop_father, irred_invalidated))
+	  if (!fix_loop_placement (from->loop_father, irred_invalidated,
+				   loop_closed_ssa_invalidated))
 	    continue;
 	  target_loop = loop_outer (from->loop_father);
-	  if (loop_closed_ssa_invalidated)
-	    {
-	      basic_block *bbs = get_loop_body (from->loop_father);
-	      for (unsigned i = 0; i < from->loop_father->num_nodes; ++i)
-		bitmap_set_bit (loop_closed_ssa_invalidated, bbs[i]->index);
-	      free (bbs);
-	    }
 	}
       else
 	{
@@ -415,7 +424,8 @@ remove_path (edge e, bool *irred_invalidated,
   /* Fix placements of basic blocks inside loops and the placement of
      loops in the loop tree.  */
   fix_bb_placements (from, irred_invalidated, loop_closed_ssa_invalidated);
-  fix_loop_placements (from->loop_father, irred_invalidated);
+  fix_loop_placements (from->loop_father, irred_invalidated,
+		       loop_closed_ssa_invalidated);
 
   if (local_irred_invalidated
       && loops_state_satisfies_p (LOOPS_HAVE_MARKED_IRREDUCIBLE_REGIONS))
@@ -1048,24 +1058,39 @@ unloop (class loop *loop, bool *irred_invalidated,
    invalidate the information about irreducible regions.  */
 
 static void
-fix_loop_placements (class loop *loop, bool *irred_invalidated)
+fix_loop_placements (class loop *loop, bool *irred_invalidated,
+		     bitmap loop_closed_ssa_invalidated)
 {
-  class loop *outer;
+  if (!loop_outer (loop))
+    return;
 
+  auto_vec<edge> exits = get_loop_exit_edges (loop);
+  unsigned i;
+  edge e;
+
+  /* We might need to only re-parent an outer loop, but as the constraint
+     is that we removed an exit from LOOP, we have a limit for what level
+     of outer loop we eventually have to re-parent to.  */
+  class loop *outermost = loop;
+  FOR_EACH_VEC_ELT (exits, i, e)
+    outermost = find_common_loop (outermost, e->dest->loop_father);
+
+  class loop *outer;
   while (loop_outer (loop))
     {
       outer = loop_outer (loop);
-      if (!fix_loop_placement (loop, irred_invalidated))
-	break;
-
-      /* Changing the placement of a loop in the loop tree may alter the
-	 validity of condition 2) of the description of fix_bb_placement
-	 for its preheader, because the successor is the header and belongs
-	 to the loop.  So call fix_bb_placements to fix up the placement
-	 of the preheader and (possibly) of its predecessors.  */
-      fix_bb_placements (loop_preheader_edge (loop)->src,
-			 irred_invalidated, NULL);
+      if (fix_loop_placement (loop, irred_invalidated,
+			      loop_closed_ssa_invalidated))
+	/* Changing the placement of a loop in the loop tree may alter the
+	   validity of condition 2) of the description of fix_bb_placement
+	   for its preheader, because the successor is the header and belongs
+	   to the loop.  So call fix_bb_placements to fix up the placement
+	   of the preheader and (possibly) of its predecessors.  */
+	fix_bb_placements (loop_preheader_edge (loop)->src,
+			   irred_invalidated, loop_closed_ssa_invalidated);
       loop = outer;
+      if (outer == outermost)
+	break;
     }
 }
 
@@ -1108,7 +1133,7 @@ duplicate_loop (class loop *loop, class loop *target, class loop *after)
   class loop *cloop;
   cloop = alloc_loop ();
   place_new_loop (cfun, cloop);
- 
+
   copy_loop_info (loop, cloop);
 
   /* Mark the new loop as copy of LOOP.  */
@@ -1394,6 +1419,40 @@ duplicate_loop_body_to_header_edge (class loop *loop, edge e,
   spec_edges[SE_LATCH] = latch_edge;
 
   place_after = e->src;
+  location_t loop_loc = UNKNOWN_LOCATION;
+  unsigned int loop_copyid_base = 0;
+
+  /* Find a location from the loop header - works for both GIMPLE and RTL.  */
+  if (current_ir_type () == IR_GIMPLE)
+    {
+      gimple *last = last_nondebug_stmt (loop->header);
+      loop_loc = last ? gimple_location (last) : UNKNOWN_LOCATION;
+    }
+  else
+    {
+      /* For RTL, try to find an instruction with a valid location.  */
+      rtx_insn *insn = BB_END (loop->header);
+      while (insn && insn != BB_HEAD (loop->header))
+	{
+	  /* Only check location if this is a valid insn.  */
+	  if (INSN_P (insn))
+	    {
+	      location_t loc = INSN_LOCATION (insn);
+	      if (loc != UNKNOWN_LOCATION)
+		{
+		  loop_loc = get_pure_location (loc);
+		  break;
+		}
+	    }
+	  insn = PREV_INSN (insn);
+	}
+    }
+
+  /* Allocate copyid base for this loop duplication - works for both
+     GIMPLE and RTL since allocator is per-function.  */
+  if (loop_loc != UNKNOWN_LOCATION)
+    loop_copyid_base = allocate_copyid_base (loop_loc, ndupl);
+
   for (j = 0; j < ndupl; j++)
     {
       /* Copy loops.  */
@@ -1410,6 +1469,49 @@ duplicate_loop_body_to_header_edge (class loop *loop, edge e,
 	    gcc_assert (!new_bbs[i]->aux);
 	    new_bbs[i]->aux = (void *)(size_t)(j + 1);
 	  }
+
+      /* Assign hierarchical discriminators to distinguish loop iterations.  */
+      if (flags & DLTHE_RECORD_HIERARCHICAL_DISCRIMINATOR
+	  && loop_copyid_base > 0)
+	{
+	  /* Calculate copyid for this iteration.  */
+	  unsigned int copyid = loop_copyid_base + j;
+	  if (copyid > DISCR_COPYID_MAX)
+	    copyid = DISCR_COPYID_MAX;
+
+	  if (current_ir_type () == IR_GIMPLE)
+	    {
+	      /* Update all basic blocks created in this iteration.  */
+	      for (i = 0; i < n; i++)
+		assign_discriminators_to_bb (new_bbs[i], 0, copyid);
+	    }
+	  else
+	    {
+	      /* For RTL, manually update instruction locations.  */
+	      for (i = 0; i < n; i++)
+		{
+		  basic_block bb = new_bbs[i];
+		  rtx_insn *insn;
+
+		  /* Iterate through all instructions in the block.  */
+		  FOR_BB_INSNS (bb, insn)
+		    {
+		      if (INSN_HAS_LOCATION (insn))
+			{
+			  location_t loc = INSN_LOCATION (insn);
+			  /* Get existing discriminator components.  */
+			  discriminator_components comp
+			    = get_discriminator_components_from_loc (loc);
+			  comp.copyid = copyid;
+
+			  /* Apply hierarchical discriminator format.  */
+			  INSN_LOCATION (insn)
+			    = location_with_discriminator_components (loc, comp);
+			}
+		    }
+		}
+	    }
+	}
 
       /* Note whether the blocks and edges belong to an irreducible loop.  */
       if (add_irreducible_flag)
@@ -1445,9 +1547,9 @@ duplicate_loop_body_to_header_edge (class loop *loop, edge e,
 	}
       else
 	{
+	  redirect_edge_and_branch_force (e, new_bbs[0]);
 	  redirect_edge_and_branch_force (new_spec_edges[SE_LATCH],
 					  loop->header);
-	  redirect_edge_and_branch_force (e, new_bbs[0]);
 	  set_immediate_dominator (CDI_DOMINATORS, new_bbs[0], e->src);
 	  e = new_spec_edges[SE_LATCH];
 	}
@@ -1606,7 +1708,15 @@ create_preheader (class loop *loop, int flags)
 	     just a single successor and a normal edge.  */
           if ((flags & CP_SIMPLE_PREHEADERS)
 	      && ((single_entry->flags & EDGE_COMPLEX)
-		  || !single_succ_p (single_entry->src)))
+		  || !single_succ_p (single_entry->src)
+		  /* We document LOOPS_HAVE_PREHEADERS as to forming a
+		     natural place to move code outside of the loop, so it
+		     should not end with a control instruction.  */
+		  /* ???  This, and below JUMP_P check needs to be a new
+		     CFG hook.  */
+		  || (cfun->curr_properties & PROP_gimple
+		      && !gsi_end_p (gsi_last_bb (single_entry->src))
+		      && stmt_ends_bb_p (*gsi_last_bb (single_entry->src)))))
             need_forwarder_block = true;
           /* If we want fallthru preheaders, also create forwarder block when
              preheader ends with a jump or has predecessors from loop.  */

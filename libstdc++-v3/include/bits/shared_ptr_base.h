@@ -1,6 +1,6 @@
 // shared_ptr and weak_ptr implementation details -*- C++ -*-
 
-// Copyright (C) 2007-2024 Free Software Foundation, Inc.
+// Copyright (C) 2007-2026 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -61,7 +61,6 @@
 #include <ext/atomicity.h>
 #include <ext/concurrence.h>
 #if __cplusplus >= 202002L
-# include <bit>          // __bit_floor
 # include <compare>
 # include <bits/align.h> // std::align
 # include <bits/stl_uninitialized.h>
@@ -149,7 +148,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       // Increment the use count (used when the count is greater than zero).
       void
       _M_add_ref_copy()
-      { __gnu_cxx::__atomic_add_dispatch(&_M_use_count, 1); }
+      { _S_chk(__gnu_cxx::__exchange_and_add_dispatch(&_M_use_count, 1)); }
 
       // Increment the use count if it is non-zero, throw otherwise.
       void
@@ -201,7 +200,13 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       // Increment the weak count.
       void
       _M_weak_add_ref() noexcept
-      { __gnu_cxx::__atomic_add_dispatch(&_M_weak_count, 1); }
+      {
+	// _M_weak_count can always use negative values because it cannot be
+	// observed by users (unlike _M_use_count). See _S_chk for details.
+	constexpr _Atomic_word __max = -1;
+	if (__gnu_cxx::__exchange_and_add_dispatch(&_M_weak_count, 1) == __max)
+	  [[__unlikely__]] __builtin_trap();
+      }
 
       // Decrement the weak count.
       void
@@ -225,18 +230,86 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       long
       _M_get_use_count() const noexcept
       {
-        // No memory barrier is used here so there is no synchronization
-        // with other threads.
-        return __atomic_load_n(&_M_use_count, __ATOMIC_RELAXED);
+	// No memory barrier is used here so there is no synchronization
+	// with other threads.
+	auto __count = __atomic_load_n(&_M_use_count, __ATOMIC_RELAXED);
+
+	// If long is wider than _Atomic_word then we can treat _Atomic_word
+	// as unsigned, and so double its usable range. If the widths are the
+	// same then casting to unsigned and then to long is a no-op.
+	return static_cast<_Unsigned_count_type>(__count);
       }
 
     private:
       _Sp_counted_base(_Sp_counted_base const&) = delete;
       _Sp_counted_base& operator=(_Sp_counted_base const&) = delete;
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wignored-attributes"
+      // This is only to be used for arithmetic, not for atomic ops.
+      using _Unsigned_count_type = make_unsigned<_Atomic_word>::type;
+#pragma GCC diagnostic pop
+
+      // Called when incrementing _M_use_count to cause a trap on overflow.
+      // This should be passed the value of the counter before the increment.
+      static void
+      _S_chk(_Atomic_word __count)
+      {
+	constexpr _Atomic_word __max_atomic_word = _Unsigned_count_type(-1)/2;
+
+	// __max is the maximum allowed value for the shared reference count.
+	// All valid reference count values need to fit into [0,LONG_MAX)
+	// because users can observe the count via shared_ptr::use_count().
+	//
+	// When long is wider than _Atomic_word, _M_use_count can go negative
+	// and the cast in _Sp_counted_base::use_count() will turn it into a
+	// positive value suitable for returning to users. The implementation
+	// only cares whether _M_use_count reaches zero after a decrement,
+	// so negative values are not a problem internally.
+	// So when possible, use -1 for __max (incrementing past that would
+	// overflow _M_use_count to 0, which means an empty shared_ptr).
+	//
+	// When long is not wider than _Atomic_word, __max is just the type's
+	// maximum positive value. We cannot use negative counts because they
+	// would not fit in [0,LONG_MAX) after casting to an unsigned type,
+	// which would cause use_count() to return bogus values.
+	constexpr _Atomic_word __max
+	  = sizeof(long) > sizeof(_Atomic_word) ? -1 : __max_atomic_word;
+
+	if (__count == __max) [[__unlikely__]]
+	  __builtin_trap();
+      }
+
       _Atomic_word  _M_use_count;     // #shared
       _Atomic_word  _M_weak_count;    // #weak + (#shared != 0)
     };
+
+  // We use __atomic_add_single and __exchange_and_add_single in the _S_single
+  // member specializations because they use unsigned arithmetic and so avoid
+  // undefined overflow.
+  template<>
+    inline void
+    _Sp_counted_base<_S_single>::_M_add_ref_copy()
+    {
+      _S_chk(_M_use_count);
+      __gnu_cxx::__atomic_add_single(&_M_use_count, 1);
+    }
+
+  template<>
+    inline void
+    _Sp_counted_base<_S_single>::_M_weak_release() noexcept
+    {
+      if (__gnu_cxx::__exchange_and_add_single(&_M_weak_count, -1) == 1)
+	_M_destroy();
+    }
+
+  template<>
+    inline long
+    _Sp_counted_base<_S_single>::_M_get_use_count() const noexcept
+    {
+      return static_cast<_Unsigned_count_type>(_M_use_count);
+    }
+
 
   template<>
     inline bool
@@ -245,7 +318,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
     {
       if (_M_use_count == 0)
 	return false;
-      ++_M_use_count;
+      _M_add_ref_copy();
       return true;
     }
 
@@ -255,8 +328,15 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
     _M_add_ref_lock_nothrow() noexcept
     {
       __gnu_cxx::__scoped_lock sentry(*this);
-      if (__gnu_cxx::__exchange_and_add_dispatch(&_M_use_count, 1) == 0)
+      if (auto __c = __gnu_cxx::__exchange_and_add_dispatch(&_M_use_count, 1))
+	_S_chk(__c);
+      else
 	{
+	  // Count was zero, so we cannot lock it to get a shared_ptr.
+	  // Reset to zero. This isn't racy, because there are no shared_ptr
+	  // objects using this count and any other weak_ptr objects using it
+	  // must call this function to modify _M_use_count, so would be
+	  // synchronized by the mutex.
 	  _M_use_count = 0;
 	  return false;
 	}
@@ -280,23 +360,18 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       while (!__atomic_compare_exchange_n(&_M_use_count, &__count, __count + 1,
 					  true, __ATOMIC_ACQ_REL,
 					  __ATOMIC_RELAXED));
+      _S_chk(__count);
       return true;
     }
 
   template<>
     inline void
-    _Sp_counted_base<_S_single>::_M_add_ref_copy()
-    { ++_M_use_count; }
-
-  template<>
-    inline void
     _Sp_counted_base<_S_single>::_M_release() noexcept
     {
-      if (--_M_use_count == 0)
+      if (__gnu_cxx::__exchange_and_add_single(&_M_use_count, -1) == 1)
         {
-          _M_dispose();
-          if (--_M_weak_count == 0)
-            _M_destroy();
+	  _M_dispose();
+	  _M_weak_release();
         }
     }
 
@@ -316,6 +391,8 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
     inline void
     _Sp_counted_base<_S_atomic>::_M_release() noexcept
     {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wc++17-extensions" // if constexpr
       _GLIBCXX_SYNCHRONIZATION_HAPPENS_BEFORE(&_M_use_count);
 #if ! _GLIBCXX_TSAN
       constexpr bool __lock_free
@@ -326,7 +403,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       // The ref-count members follow the vptr, so are aligned to
       // alignof(void*).
       constexpr bool __aligned = __alignof(long long) <= alignof(void*);
-      if _GLIBCXX17_CONSTEXPR (__lock_free && __double_word && __aligned)
+      if constexpr (__lock_free && __double_word && __aligned)
 	{
 	  constexpr int __wordbits = __CHAR_BIT__ * sizeof(_Atomic_word);
 	  constexpr int __shiftbits = __double_word ? __wordbits : 0;
@@ -360,26 +437,8 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 	{
 	  _M_release_last_use();
 	}
+#pragma GCC diagnostic pop
     }
-
-  template<>
-    inline void
-    _Sp_counted_base<_S_single>::_M_weak_add_ref() noexcept
-    { ++_M_weak_count; }
-
-  template<>
-    inline void
-    _Sp_counted_base<_S_single>::_M_weak_release() noexcept
-    {
-      if (--_M_weak_count == 0)
-        _M_destroy();
-    }
-
-  template<>
-    inline long
-    _Sp_counted_base<_S_single>::_M_get_use_count() const noexcept
-    { return _M_use_count; }
-
 
   // Forward declarations.
   template<typename _Tp, _Lock_policy _Lp = __default_lock_policy>
@@ -520,11 +579,16 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       _Sp_counted_deleter(_Ptr __p, _Deleter __d, const _Alloc& __a) noexcept
       : _M_impl(__p, std::move(__d), __a) { }
 
+#pragma GCC diagnostic push // PR tree-optimization/122197
+#pragma GCC diagnostic ignored "-Wfree-nonheap-object"
+#pragma GCC diagnostic ignored "-Warray-bounds"
+  template<typename> class auto_ptr;
       ~_Sp_counted_deleter() noexcept { }
 
       virtual void
       _M_dispose() noexcept
       { _M_impl._M_del()(_M_impl._M_ptr); }
+#pragma GCC diagnostic pop
 
       virtual void
       _M_destroy() noexcept
@@ -591,7 +655,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 
 	_Alloc& _M_alloc() noexcept { return _A_base::_S_get(*this); }
 
-	__gnu_cxx::__aligned_buffer<_Tp> _M_storage;
+	__gnu_cxx::__aligned_buffer<__remove_cv_t<_Tp>> _M_storage;
       };
 
     public:
@@ -608,6 +672,8 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 	      std::forward<_Args>(__args)...); // might throw
 	}
 
+#pragma GCC diagnostic push // PR tree-optimization/122197
+#pragma GCC diagnostic ignored "-Warray-bounds"
       ~_Sp_counted_ptr_inplace() noexcept { }
 
       virtual void
@@ -615,6 +681,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       {
 	allocator_traits<_Alloc>::destroy(_M_impl._M_alloc(), _M_ptr());
       }
+#pragma GCC diagnostic pop
 
       // Override because the allocator needs to know the dynamic type
       virtual void
@@ -633,7 +700,6 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       virtual void*
       _M_get_deleter(const std::type_info& __ti) noexcept override
       {
-	auto __ptr = const_cast<typename remove_cv<_Tp>::type*>(_M_ptr());
 	// Check for the fake type_info first, so we don't try to access it
 	// as a real type_info object. Otherwise, check if it's the real
 	// type_info for this class. With RTTI enabled we can check directly,
@@ -646,11 +712,12 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 	    _Sp_make_shared_tag::_S_eq(__ti)
 #endif
 	   )
-	  return __ptr;
+	  return _M_ptr();
 	return nullptr;
       }
 
-      _Tp* _M_ptr() noexcept { return _M_impl._M_storage._M_ptr(); }
+      __remove_cv_t<_Tp>*
+      _M_ptr() noexcept { return _M_impl._M_storage._M_ptr(); }
 
       _Impl _M_impl;
     };
@@ -674,13 +741,13 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       [[no_unique_address]] _Alloc _M_alloc;
 
       union {
-	_Tp _M_obj;
+	remove_cv_t<_Tp> _M_obj;
 	char _M_unused;
       };
 
       friend class __shared_count<_Lp>; // To be able to call _M_ptr().
 
-      _Tp* _M_ptr() noexcept { return std::__addressof(_M_obj); }
+      auto _M_ptr() noexcept { return std::__addressof(_M_obj); }
 
     public:
       using __allocator_type = __alloc_rebind<_Alloc, _Sp_counted_ptr_inplace>;
@@ -962,7 +1029,8 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 	__shared_count(_Tp*& __p, _Sp_alloc_shared_tag<_Alloc> __a,
 		       _Args&&... __args)
 	{
-	  typedef _Sp_counted_ptr_inplace<_Tp, _Alloc, _Lp> _Sp_cp_type;
+	  using _Tp2 = __remove_cv_t<_Tp>;
+	  using _Sp_cp_type = _Sp_counted_ptr_inplace<_Tp2, _Alloc, _Lp>;
 	  typename _Sp_cp_type::__allocator_type __a2(__a._M_a);
 	  auto __guard = std::__allocate_guarded(__a2);
 	  _Sp_cp_type* __mem = __guard.get();
@@ -1119,6 +1187,12 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       _M_less(const __weak_count<_Lp>& __rhs) const noexcept
       { return std::less<_Sp_counted_base<_Lp>*>()(this->_M_pi, __rhs._M_pi); }
 
+#ifdef __glibcxx_smart_ptr_owner_equality // >= C++26
+      size_t
+      _M_owner_hash() const noexcept
+      { return std::hash<_Sp_counted_base<_Lp>*>()(this->_M_pi); }
+#endif
+
       // Friend function injected into enclosing namespace and found by ADL
       friend inline bool
       operator==(const __shared_count& __a, const __shared_count& __b) noexcept
@@ -1221,6 +1295,12 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       bool
       _M_less(const __shared_count<_Lp>& __rhs) const noexcept
       { return std::less<_Sp_counted_base<_Lp>*>()(this->_M_pi, __rhs._M_pi); }
+
+#ifdef __glibcxx_smart_ptr_owner_equality // >= C++26
+      size_t
+      _M_owner_hash() const noexcept
+      { return std::hash<_Sp_counted_base<_Lp>*>()(this->_M_pi); }
+#endif
 
       // Friend function injected into enclosing namespace and found by ADL
       friend inline bool
@@ -1336,6 +1416,15 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
     { };
 
 
+  template<typename _Tp>
+    [[__gnu__::__always_inline__]]
+    inline _Tp*
+    __shared_ptr_deref(_Tp* __p)
+    {
+      __glibcxx_assert(__p != nullptr);
+      return __p;
+    }
+
   // Define operator* and operator-> for shared_ptr<T>.
   template<typename _Tp, _Lock_policy _Lp,
 	   bool = is_array<_Tp>::value, bool = is_void<_Tp>::value>
@@ -1346,10 +1435,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 
       element_type&
       operator*() const noexcept
-      {
-	__glibcxx_assert(_M_get() != nullptr);
-	return *_M_get();
-      }
+      { return *std::__shared_ptr_deref(_M_get()); }
 
       element_type*
       operator->() const noexcept
@@ -1391,10 +1477,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       [[__deprecated__("shared_ptr<T[]>::operator* is absent from C++17")]]
       element_type&
       operator*() const noexcept
-      {
-	__glibcxx_assert(_M_get() != nullptr);
-	return *_M_get();
-      }
+      { return *std::__shared_ptr_deref(_M_get()); }
 
       [[__deprecated__("shared_ptr<T[]>::operator-> is absent from C++17")]]
       element_type*
@@ -1405,13 +1488,16 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       }
 #endif
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wc++17-extensions"
       element_type&
       operator[](ptrdiff_t __i) const noexcept
       {
-	__glibcxx_assert(_M_get() != nullptr);
-	__glibcxx_assert(!extent<_Tp>::value || __i < extent<_Tp>::value);
-	return _M_get()[__i];
+	if constexpr (extent<_Tp>::value)
+	  __glibcxx_assert(__i < extent<_Tp>::value);
+	return std::__shared_ptr_deref(_M_get())[__i];
       }
+#pragma GCC diagnostic pop
 
     private:
       element_type*
@@ -1559,7 +1645,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 	__shared_ptr(unique_ptr<_Yp, _Del>&& __r)
 	: _M_ptr(__r.get()), _M_refcount()
 	{
-	  auto __raw = __to_address(__r.get());
+	  auto __raw = std::__to_address(__r.get());
 	  _M_refcount = __shared_count<_Lp>(std::move(__r));
 	  _M_enable_shared_from_this_with(__raw);
 	}
@@ -1575,7 +1661,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 	__shared_ptr(unique_ptr<_Tp1, _Del>&& __r, __sp_array_delete)
 	: _M_ptr(__r.get()), _M_refcount()
 	{
-	  auto __raw = __to_address(__r.get());
+	  auto __raw = std::__to_address(__r.get());
 	  _M_refcount = __shared_count<_Lp>(std::move(__r));
 	  _M_enable_shared_from_this_with(__raw);
 	}
@@ -1705,6 +1791,20 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 	owner_before(__weak_ptr<_Tp1, _Lp> const& __rhs) const noexcept
 	{ return _M_refcount._M_less(__rhs._M_refcount); }
       /// @}
+
+#ifdef __glibcxx_smart_ptr_owner_equality // >= C++26
+      size_t owner_hash() const noexcept { return _M_refcount._M_owner_hash(); }
+
+      template<typename _Tp1>
+	bool
+	owner_equal(__shared_ptr<_Tp1, _Lp> const& __rhs) const noexcept
+	{ return _M_refcount == __rhs._M_refcount; }
+
+      template<typename _Tp1>
+	bool
+	owner_equal(__weak_ptr<_Tp1, _Lp> const& __rhs) const noexcept
+	{ return _M_refcount == __rhs._M_refcount; }
+#endif
 
     protected:
       // This constructor is non-standard, it is used by allocate_shared.
@@ -1977,6 +2077,10 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
   template<typename _Tp, _Lock_policy _Lp>
     class __weak_ptr
     {
+    public:
+      using element_type = typename remove_extent<_Tp>::type;
+
+    private:
       template<typename _Yp, typename _Res = void>
 	using _Compatible = typename
 	  enable_if<__sp_compatible_with<_Yp*, _Tp*>::value, _Res>::type;
@@ -1985,9 +2089,44 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       template<typename _Yp>
 	using _Assignable = _Compatible<_Yp, __weak_ptr&>;
 
-    public:
-      using element_type = typename remove_extent<_Tp>::type;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wc++17-extensions" // if constexpr
+      // Helper for construction/assignment:
+      template<typename _Yp>
+	static element_type*
+	_S_safe_upcast(const __weak_ptr<_Yp, _Lp>& __r)
+	{
+	  // We know that _Yp and _Tp are compatible, that is, either
+	  // _Yp* is convertible to _Tp* or _Yp is U[N] and _Tp is U cv [].
 
+	  // If _Yp is the same as _Tp after removing extents and cv
+	  // qualifications, there's no pointer adjustments to do. This
+	  // also allows us to support incomplete types.
+	  using _At = typename remove_cv<typename remove_extent<_Tp>::type>::type;
+	  using _Bt = typename remove_cv<typename remove_extent<_Yp>::type>::type;
+	  if constexpr (is_same<_At, _Bt>::value)
+	    return __r._M_ptr;
+	  // If they're not the same type, but they're both scalars,
+	  // we again don't need any adjustment. This allows us to support e.g.
+	  // pointers to a differently cv qualified type X.
+	  else if constexpr (__and_<is_scalar<_At>, is_scalar<_Bt>>::value)
+	    return __r._M_ptr;
+#if _GLIBCXX_USE_BUILTIN_TRAIT(__builtin_is_virtual_base_of)
+	  // If _Tp is not a virtual base class of _Yp, the pointer
+	  // conversion does not require dereferencing __r._M_ptr; just
+	  // rely on the implicit conversion.
+	  else if constexpr (!__builtin_is_virtual_base_of(_Tp, _Yp))
+	    return __r._M_ptr;
+#endif
+	  // Expensive path; must lock() and do the pointer conversion while
+	  // a shared_ptr keeps the pointee alive (because we may need
+	  // to dereference).
+	  else
+	    return __r.lock().get();
+	}
+#pragma GCC diagnostic pop
+
+    public:
       constexpr __weak_ptr() noexcept
       : _M_ptr(nullptr), _M_refcount()
       { }
@@ -2012,8 +2151,8 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       // in multithreaded programs __r._M_ptr may be invalidated at any point.
       template<typename _Yp, typename = _Compatible<_Yp>>
 	__weak_ptr(const __weak_ptr<_Yp, _Lp>& __r) noexcept
-	: _M_refcount(__r._M_refcount)
-        { _M_ptr = __r.lock().get(); }
+	: _M_ptr(_S_safe_upcast(__r)), _M_refcount(__r._M_refcount)
+        { }
 
       template<typename _Yp, typename = _Compatible<_Yp>>
 	__weak_ptr(const __shared_ptr<_Yp, _Lp>& __r) noexcept
@@ -2026,7 +2165,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 
       template<typename _Yp, typename = _Compatible<_Yp>>
 	__weak_ptr(__weak_ptr<_Yp, _Lp>&& __r) noexcept
-	: _M_ptr(__r.lock().get()), _M_refcount(std::move(__r._M_refcount))
+	: _M_ptr(_S_safe_upcast(__r)), _M_refcount(std::move(__r._M_refcount))
         { __r._M_ptr = nullptr; }
 
       __weak_ptr&
@@ -2036,7 +2175,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 	_Assignable<_Yp>
 	operator=(const __weak_ptr<_Yp, _Lp>& __r) noexcept
 	{
-	  _M_ptr = __r.lock().get();
+	  _M_ptr = _S_safe_upcast(__r);
 	  _M_refcount = __r._M_refcount;
 	  return *this;
 	}
@@ -2061,7 +2200,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 	_Assignable<_Yp>
 	operator=(__weak_ptr<_Yp, _Lp>&& __r) noexcept
 	{
-	  _M_ptr = __r.lock().get();
+	  _M_ptr = _S_safe_upcast(__r);
 	  _M_refcount = std::move(__r._M_refcount);
 	  __r._M_ptr = nullptr;
 	  return *this;
@@ -2069,7 +2208,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 
       __shared_ptr<_Tp, _Lp>
       lock() const noexcept
-      { return __shared_ptr<element_type, _Lp>(*this, std::nothrow); }
+      { return __shared_ptr<_Tp, _Lp>(*this, std::nothrow); }
 
       long
       use_count() const noexcept
@@ -2088,6 +2227,20 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 	bool
 	owner_before(const __weak_ptr<_Tp1, _Lp>& __rhs) const noexcept
 	{ return _M_refcount._M_less(__rhs._M_refcount); }
+
+#ifdef __glibcxx_smart_ptr_owner_equality // >= C++26
+      size_t owner_hash() const noexcept { return _M_refcount._M_owner_hash(); }
+
+      template<typename _Tp1>
+      bool
+      owner_equal(const __shared_ptr<_Tp1, _Lp> & __rhs) const noexcept
+      { return _M_refcount == __rhs._M_refcount; }
+
+      template<typename _Tp1>
+      bool
+      owner_equal(const __weak_ptr<_Tp1, _Lp> & __rhs) const noexcept
+      { return _M_refcount == __rhs._M_refcount; }
+#endif
 
       void
       reset() noexcept

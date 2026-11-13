@@ -1,5 +1,5 @@
 /* Structure for saving state for a nested function.
-   Copyright (C) 1989-2024 Free Software Foundation, Inc.
+   Copyright (C) 1989-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -45,7 +45,7 @@ struct GTY(()) emit_status {
 
   /* seq.first and seq.last are the ends of the doubly-linked chain of
      rtl for the current function.  Both are reset to null at the
-     start of rtl generation for the function. 
+     start of rtl generation for the function.
 
      start_sequence saves both of these on seq.next and then starts
      a new, nested sequence of insns.
@@ -274,6 +274,11 @@ struct GTY(()) function {
      the same uid.  This is used for condition coverage.  */
   hash_map <gcond*, unsigned> *GTY((skip)) cond_uids;
 
+  /* Per-function copyid allocator for hierarchical discriminators.
+     Tracks the next available copyid for each location to ensure uniqueness
+     across code duplication passes (unrolling, vectorization, etc.).  */
+  struct copyid_allocator *GTY((skip)) copyid_alloc;
+
   /* For function.cc.  */
 
   /* Points to the FUNCTION_DECL of this function.  */
@@ -333,7 +338,6 @@ struct GTY(()) function {
 
   /* Properties used by the pass manager.  */
   unsigned int curr_properties;
-  unsigned int last_verified;
 
   /* Different from normal TODO_flags which are handled right at the
      beginning or the end of one pass execution, the pending_TODOs
@@ -430,6 +434,9 @@ struct GTY(()) function {
   /* Nonzero when the tail call has been identified.  */
   unsigned int tail_call_marked : 1;
 
+  /* Has musttail marked calls.  */
+  unsigned int has_musttail : 1;
+
   /* Nonzero if the current function contains a #pragma GCC unroll.  */
   unsigned int has_unroll : 1;
 
@@ -446,6 +453,9 @@ struct GTY(()) function {
   /* Set for artificial function created for [[assume (cond)]].
      These should be GIMPLE optimized, but not expanded to RTL.  */
   unsigned int assume_function : 1;
+
+  /* Nonzero if reload will have to split basic blocks.  */
+  unsigned int split_basic_blocks_after_reload : 1;
 };
 
 /* Add the decl D to the local_decls list of FUN.  */
@@ -698,6 +708,8 @@ extern void number_blocks (tree);
 extern void set_cfun (struct function *new_cfun, bool force = false);
 extern void push_cfun (struct function *new_cfun);
 extern void pop_cfun (void);
+extern void push_function_decl (tree, bool = false);
+extern void pop_function_decl (void);
 
 extern int get_next_funcdef_no (void);
 extern int get_last_funcdef_no (void);

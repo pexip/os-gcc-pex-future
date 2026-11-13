@@ -1,5 +1,5 @@
 /* Analyze RTL for GNU compiler.
-   Copyright (C) 1987-2024 Free Software Foundation, Inc.
+   Copyright (C) 1987-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -813,21 +813,6 @@ rtx_addr_varies_p (const_rtx x, bool for_alias)
   return false;
 }
 
-/* Return the CALL in X if there is one.  */
-
-rtx
-get_call_rtx_from (const rtx_insn *insn)
-{
-  rtx x = PATTERN (insn);
-  if (GET_CODE (x) == PARALLEL)
-    x = XVECEXP (x, 0, 0);
-  if (GET_CODE (x) == SET)
-    x = SET_SRC (x);
-  if (GET_CODE (x) == CALL && MEM_P (XEXP (x, 0)))
-    return x;
-  return NULL_RTX;
-}
-
 /* Get the declaration of the function called by INSN.  */
 
 tree
@@ -1561,6 +1546,9 @@ single_set_2 (const rtx_insn *insn, const_rtx pat)
 	    case CLOBBER:
 	      break;
 
+	    default:
+	      return NULL_RTX;
+
 	    case SET:
 	      /* We can consider insns having multiple sets, where all
 		 but one are dead as single set insns.  In common case
@@ -1570,23 +1558,28 @@ single_set_2 (const rtx_insn *insn, const_rtx pat)
 		 When we reach set first time, we just expect this is
 		 the single set we are looking for and only when more
 		 sets are found in the insn, we check them.  */
+	      auto unused = [] (const rtx_insn *insn, rtx dest) {
+		if (!df)
+		  return false;
+		if (df_note)
+		  return !!find_reg_note (insn, REG_UNUSED, dest);
+		return (REG_P (dest)
+			&& !HARD_REGISTER_P (dest)
+			&& REGNO (dest) < df->regs_inited
+			&& DF_REG_USE_COUNT (REGNO (dest)) == 0);
+	      };
 	      if (!set_verified)
 		{
-		  if (find_reg_note (insn, REG_UNUSED, SET_DEST (set))
-		      && !side_effects_p (set))
+		  if (unused (insn, SET_DEST (set)) && !side_effects_p (set))
 		    set = NULL;
 		  else
 		    set_verified = 1;
 		}
 	      if (!set)
 		set = sub, set_verified = 0;
-	      else if (!find_reg_note (insn, REG_UNUSED, SET_DEST (sub))
-		       || side_effects_p (sub))
+	      else if (!unused (insn, SET_DEST (sub)) || side_effects_p (sub))
 		return NULL_RTX;
 	      break;
-
-	    default:
-	      return NULL_RTX;
 	    }
 	}
     }
@@ -1686,6 +1679,7 @@ set_noop_p (const_rtx set)
 	}
       return
 	REG_CAN_CHANGE_MODE_P (REGNO (dst), GET_MODE (src0), GET_MODE (dst))
+	&& validate_subreg (GET_MODE (dst), GET_MODE (src0), src0, offset)
 	&& simplify_subreg_regno (REGNO (src0), GET_MODE (src0),
 				  offset, GET_MODE (dst)) == (int) REGNO (dst);
     }
@@ -2162,10 +2156,18 @@ rtx_properties::try_to_add_dest (const_rtx x, unsigned int flags)
 
   if (LIKELY (REG_P (x)))
     {
-      /* We want to keep sp alive everywhere -  by making all
-	 writes to sp also use sp. */
       if (REGNO (x) == STACK_POINTER_REGNUM)
-	flags |= rtx_obj_flags::IS_READ;
+	{
+	  /* Stack accesses are dependent on previous allocations and
+	     anti-dependent on later deallocations, so both types of
+	     stack operation are akin to a memory write.  */
+	  if (ref_iter != ref_end)
+	    *ref_iter++ = rtx_obj_reference (MEM_REGNO, flags, BLKmode);
+
+	  /* We want to keep sp alive everywhere - by making all
+	     writes to sp also use sp.  */
+	  flags |= rtx_obj_flags::IS_READ;
+	}
       try_to_add_reg (x, flags);
       return;
     }
@@ -2226,7 +2228,7 @@ rtx_properties::try_to_add_src (const_rtx x, unsigned int flags)
 	{
 	  has_pre_post_modify = true;
 
-	  unsigned int addr_flags = (base_flags
+	  unsigned int addr_flags = (flags
 				     | rtx_obj_flags::IS_PRE_POST_MODIFY
 				     | rtx_obj_flags::IS_READ);
 	  try_to_add_dest (XEXP (x, 0), addr_flags);
@@ -3243,6 +3245,7 @@ may_trap_p_1 (const_rtx x, unsigned flags)
 	return true;
       break;
 
+    case PARALLEL:
     case NEG:
     case ABS:
     case SUBREG:
@@ -4250,11 +4253,16 @@ subreg_offset_representable_p (unsigned int xregno, machine_mode xmode,
 
    can be simplified.  Return -1 if the subreg can't be simplified.
 
-   XREGNO is a hard register number.  */
+   XREGNO is a hard register number.  ALLOW_STACK_REGS is true if
+   we should allow subregs of stack_pointer_rtx, frame_pointer_rtx.
+   and arg_pointer_rtx (which are normally expected to be the unique
+   way of referring to their respective registers).  */
+
 
 int
 simplify_subreg_regno (unsigned int xregno, machine_mode xmode,
-		       poly_uint64 offset, machine_mode ymode)
+		       poly_uint64 offset, machine_mode ymode,
+		       bool allow_stack_regs)
 {
   struct subreg_info info;
   unsigned int yregno;
@@ -4265,20 +4273,23 @@ simplify_subreg_regno (unsigned int xregno, machine_mode xmode,
       && !REG_CAN_CHANGE_MODE_P (xregno, xmode, ymode))
     return -1;
 
-  /* We shouldn't simplify stack-related registers.  */
-  if ((!reload_completed || frame_pointer_needed)
-      && xregno == FRAME_POINTER_REGNUM)
-    return -1;
+  if (!allow_stack_regs)
+    {
+      /* We shouldn't simplify stack-related registers.  */
+      if ((!reload_completed || frame_pointer_needed)
+	  && xregno == FRAME_POINTER_REGNUM)
+	return -1;
 
-  if (FRAME_POINTER_REGNUM != ARG_POINTER_REGNUM
-      && xregno == ARG_POINTER_REGNUM)
-    return -1;
+      if (FRAME_POINTER_REGNUM != ARG_POINTER_REGNUM
+	  && xregno == ARG_POINTER_REGNUM)
+	return -1;
 
-  if (xregno == STACK_POINTER_REGNUM
-      /* We should convert hard stack register in LRA if it is
-	 possible.  */
-      && ! lra_in_progress)
-    return -1;
+      if (xregno == STACK_POINTER_REGNUM
+	  /* We should convert hard stack register in LRA if it is
+	     possible.  */
+	  && ! lra_in_progress)
+	return -1;
+    }
 
   /* Try to get the register offset.  */
   subreg_get_info (xregno, xmode, offset, ymode, &info);
@@ -4784,6 +4795,24 @@ nonzero_bits1 (const_rtx x, scalar_int_mode mode, const_rtx known_x,
 
   unsigned int mode_width = GET_MODE_PRECISION (mode);
 
+  /* For unary ops like ffs or popcount we want to determine the number of
+     nonzero bits from the operand.  This only matters with very large
+     vector modes.  A
+       (popcount:DI (V128BImode)
+     should not get a nonzero-bit mask of (1 << 7) - 1 as that could
+     lead to incorrect optimizations based on it, see PR123501.  */
+  unsigned int op_mode_width = mode_width;
+  machine_mode op_mode = mode;
+  if (UNARY_P (x))
+    {
+      const_rtx op = XEXP (x, 0);
+      if (GET_MODE_PRECISION (GET_MODE (op)).is_constant ())
+	{
+	  op_mode = GET_MODE (op);
+	  op_mode_width = GET_MODE_PRECISION (op_mode).to_constant ();
+	}
+    }
+
   if (CONST_INT_P (x))
     {
       if (SHORT_IMMEDIATES_SIGN_EXTEND
@@ -5187,13 +5216,16 @@ nonzero_bits1 (const_rtx x, scalar_int_mode mode, const_rtx known_x,
     case FFS:
     case POPCOUNT:
       /* This is at most the number of bits in the mode.  */
-      nonzero = (HOST_WIDE_INT_UC (2) << (floor_log2 (mode_width))) - 1;
+      nonzero = (HOST_WIDE_INT_UC (2) << (floor_log2 (op_mode_width))) - 1;
       break;
 
     case CLZ:
       /* If CLZ has a known value at zero, then the nonzero bits are
-	 that value, plus the number of bits in the mode minus one.  */
-      if (CLZ_DEFINED_VALUE_AT_ZERO (mode, nonzero))
+	 that value, plus the number of bits in the mode minus one.
+	 If we have a different operand mode, don't try to get nonzero
+	 bits as currently nonzero is not a poly_int.  */
+      if (op_mode == mode
+	  && CLZ_DEFINED_VALUE_AT_ZERO (mode, nonzero))
 	nonzero
 	  |= (HOST_WIDE_INT_1U << (floor_log2 (mode_width))) - 1;
       else
@@ -5202,8 +5234,10 @@ nonzero_bits1 (const_rtx x, scalar_int_mode mode, const_rtx known_x,
 
     case CTZ:
       /* If CTZ has a known value at zero, then the nonzero bits are
-	 that value, plus the number of bits in the mode minus one.  */
-      if (CTZ_DEFINED_VALUE_AT_ZERO (mode, nonzero))
+	 that value, plus the number of bits in the mode minus one.
+	 See above for op_mode != mode.  */
+      if (op_mode == mode
+	  && CLZ_DEFINED_VALUE_AT_ZERO (mode, nonzero))
 	nonzero
 	  |= (HOST_WIDE_INT_1U << (floor_log2 (mode_width))) - 1;
       else
@@ -5212,7 +5246,7 @@ nonzero_bits1 (const_rtx x, scalar_int_mode mode, const_rtx known_x,
 
     case CLRSB:
       /* This is at most the number of bits in the mode minus 1.  */
-      nonzero = (HOST_WIDE_INT_1U << (floor_log2 (mode_width))) - 1;
+      nonzero = (HOST_WIDE_INT_1U << (floor_log2 (op_mode_width))) - 1;
       break;
 
     case PARITY:
@@ -5737,7 +5771,8 @@ pattern_cost (rtx pat, bool speed)
 	  rtx x = XVECEXP (pat, 0, i);
 	  if (GET_CODE (x) == SET)
 	    {
-	      if (GET_CODE (SET_SRC (x)) == COMPARE)
+	      if (GET_CODE (SET_SRC (x)) == COMPARE
+		  || GET_MODE_CLASS (GET_MODE (SET_DEST (x))) == MODE_CC)
 		{
 		  if (comparison)
 		    return 0;
@@ -5762,7 +5797,7 @@ pattern_cost (rtx pat, bool speed)
     return 0;
 
   cost = set_src_cost (SET_SRC (set), GET_MODE (SET_DEST (set)), speed);
-  return cost > 0 ? cost : COSTS_N_INSNS (1);
+  return MAX (COSTS_N_INSNS (1), cost);
 }
 
 /* Calculate the cost of a single instruction.  A return value of zero
@@ -5792,7 +5827,8 @@ seq_cost (const rtx_insn *seq, bool speed)
         cost += set_rtx_cost (set, speed);
       else if (NONDEBUG_INSN_P (seq))
 	{
-	  int this_cost = insn_cost (CONST_CAST_RTX_INSN (seq), speed);
+	  int this_cost = insn_cost (const_cast<struct rtx_insn *> (seq),
+				     speed);
 	  if (this_cost > 0)
 	    cost += this_cost;
 	  else
@@ -6467,10 +6503,30 @@ strip_address_mutations (rtx *loc, enum rtx_code *outer_code)
 	/* (and ... (const_int -X)) is used to align to X bytes.  */
 	loc = &XEXP (*loc, 0);
       else if (code == SUBREG
-               && !OBJECT_P (SUBREG_REG (*loc))
-               && subreg_lowpart_p (*loc))
-	/* (subreg (operator ...) ...) inside and is used for mode
-	   conversion too.  */
+	       && (!OBJECT_P (SUBREG_REG (*loc))
+		   || CONSTANT_P (SUBREG_REG (*loc)))
+	       && subreg_lowpart_p (*loc))
+	/* (subreg (operator ...) ...) inside AND is used for mode
+	   conversion too.  It is also used for load-address operations
+	   in which an extension can be done for free, such as:
+
+	     (zero_extend:DI
+	       (subreg:SI (plus:DI (reg:DI R) (symbol_ref:DI "foo") 0)))
+
+	   The latter usage also covers subregs of plain "displacements",
+	   such as:
+
+	     (zero_extend:DI (subreg:SI (symbol_ref:DI "foo") 0))
+
+	   The inner address should then be the symbol_ref, not the subreg,
+	   similarly to the plus case above.
+
+	   In contrast, the subreg in:
+
+	     (zero_extend:DI (subreg:SI (reg:DI R) 0))
+
+	   should be treated as the base, since it should be replaced by
+	   an SImode hard register during register allocation.  */
 	loc = &SUBREG_REG (*loc);
       else
 	return loc;
@@ -6494,6 +6550,25 @@ binary_scale_code_p (enum rtx_code code)
           || code == ROTATERT);
 }
 
+/* Return true if X appears to be a valid base or index term.  */
+static bool
+valid_base_or_index_term_p (rtx x)
+{
+  if (GET_CODE (x) == SCRATCH)
+    return true;
+  /* Handle what appear to be eliminated forms of a register.  If we reach
+     here, the elimination occurs outside of the outermost PLUS tree,
+     and so the elimination offset cannot be treated as a displacement
+     of the main address.  Instead, we need to treat the whole PLUS as
+     the base or index term.  The address can only be made legitimate by
+     reloading the PLUS.  */
+  if (GET_CODE (x) == PLUS && CONST_SCALAR_INT_P (XEXP (x, 1)))
+    x = XEXP (x, 0);
+  if (GET_CODE (x) == SUBREG)
+    x = SUBREG_REG (x);
+  return REG_P (x) || MEM_P (x);
+}
+
 /* If *INNER can be interpreted as a base, return a pointer to the inner term
    (see address_info).  Return null otherwise.  */
 
@@ -6502,10 +6577,7 @@ get_base_term (rtx *inner)
 {
   if (GET_CODE (*inner) == LO_SUM)
     inner = strip_address_mutations (&XEXP (*inner, 0));
-  if (REG_P (*inner)
-      || MEM_P (*inner)
-      || GET_CODE (*inner) == SUBREG
-      || GET_CODE (*inner) == SCRATCH)
+  if (valid_base_or_index_term_p (*inner))
     return inner;
   return 0;
 }
@@ -6519,10 +6591,7 @@ get_index_term (rtx *inner)
   /* At present, only constant scales are allowed.  */
   if (binary_scale_code_p (GET_CODE (*inner)) && CONSTANT_P (XEXP (*inner, 1)))
     inner = strip_address_mutations (&XEXP (*inner, 0));
-  if (REG_P (*inner)
-      || MEM_P (*inner)
-      || GET_CODE (*inner) == SUBREG
-      || GET_CODE (*inner) == SCRATCH)
+  if (valid_base_or_index_term_p (*inner))
     return inner;
   return 0;
 }
@@ -6724,20 +6793,36 @@ decompose_normal_address (struct address_info *info)
     }
   else if (out == 2)
     {
+      auto address_mode = targetm.addr_space.address_mode (info->as);
+      rtx inner_op0 = *inner_ops[0];
+      rtx inner_op1 = *inner_ops[1];
+      int base;
+      /* If one inner operand has the expected mode for a base and the other
+	 doesn't, assume that the other one is the index.  This is useful
+	 for addresses such as:
+
+	   (plus (zero_extend X) Y)
+
+	 zero_extend is not in itself enough to assume an index, since bases
+	 can be zero-extended on POINTERS_EXTEND_UNSIGNED targets.  But if
+	 Y has address mode and X doesn't, there should be little doubt that
+	 Y is the base.  */
+      if (GET_MODE (inner_op0) == address_mode
+	  && GET_MODE (inner_op1) != address_mode)
+	base = 0;
+      else if (GET_MODE (inner_op1) == address_mode
+	       && GET_MODE (inner_op0) != address_mode)
+	base = 1;
       /* In the event of a tie, assume the base comes first.  */
-      if (baseness (*inner_ops[0], info->mode, info->as, PLUS,
-		    GET_CODE (*ops[1]))
-	  >= baseness (*inner_ops[1], info->mode, info->as, PLUS,
-		       GET_CODE (*ops[0])))
-	{
-	  set_address_base (info, ops[0], inner_ops[0]);
-	  set_address_index (info, ops[1], inner_ops[1]);
-	}
+      else if (baseness (inner_op0, info->mode, info->as, PLUS,
+			 GET_CODE (*ops[1]))
+	       >= baseness (inner_op1, info->mode, info->as, PLUS,
+			    GET_CODE (*ops[0])))
+	base = 0;
       else
-	{
-	  set_address_base (info, ops[1], inner_ops[1]);
-	  set_address_index (info, ops[0], inner_ops[0]);
-	}
+	base = 1;
+      set_address_base (info, ops[base], inner_ops[base]);
+      set_address_index (info, ops[1 - base], inner_ops[1 - base]);
     }
   else
     gcc_assert (out == 0);
@@ -6922,6 +7007,26 @@ add_auto_inc_notes (rtx_insn *insn, rtx x)
 	for (j = XVECLEN (x, i) - 1; j >= 0; j--)
 	  add_auto_inc_notes (insn, XVECEXP (x, i, j));
     }
+}
+
+/* Return true if INSN is the second element of a pair of macro-fused
+   single_sets, both of which having the same register output as another.  */
+bool
+single_output_fused_pair_p (rtx_insn *insn)
+{
+  rtx set, prev_set;
+  rtx_insn *prev;
+
+  return INSN_P (insn)
+	 && SCHED_GROUP_P (insn)
+	 && (prev = prev_nonnote_nondebug_insn (insn))
+	 && (set = single_set (insn)) != NULL_RTX
+	 && (prev_set = single_set (prev))
+	     != NULL_RTX
+	 && REG_P (SET_DEST (set))
+	 && REG_P (SET_DEST (prev_set))
+	 && (!reload_completed
+	     || REGNO (SET_DEST (set)) == REGNO (SET_DEST (prev_set)));
 }
 
 /* Return true if X is register asm.  */

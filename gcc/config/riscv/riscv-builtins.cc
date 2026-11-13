@@ -1,5 +1,5 @@
 /* Subroutines used for expanding RISC-V builtins.
-   Copyright (C) 2011-2024 Free Software Foundation, Inc.
+   Copyright (C) 2011-2026 Free Software Foundation, Inc.
    Contributed by Andrew Waterman (andrew@sifive.com).
 
 This file is part of GCC.
@@ -137,6 +137,11 @@ AVAIL (cvalu, TARGET_XCVALU && !TARGET_64BIT)
 AVAIL (cvelw, TARGET_XCVELW && !TARGET_64BIT)
 AVAIL (cvsimd, TARGET_XCVSIMD && !TARGET_64BIT)
 
+/* ANDES AVAIL.  */
+AVAIL (andesperf32, !TARGET_64BIT && TARGET_XANDESPERF)
+AVAIL (andesperf64, TARGET_64BIT && TARGET_XANDESPERF)
+AVAIL (andesbfhcvt, TARGET_XANDESBFHCVT)
+
 /* Construct a riscv_builtin_description from the given arguments.
 
    INSN is the name of the associated instruction pattern, without the
@@ -191,8 +196,11 @@ AVAIL (cvsimd, TARGET_XCVSIMD && !TARGET_64BIT)
 #define RISCV_ATYPE_QI intQI_type_node
 #define RISCV_ATYPE_HI intHI_type_node
 #define RISCV_ATYPE_SI intSI_type_node
+#define RISCV_ATYPE_DI intDI_type_node
 #define RISCV_ATYPE_VOID_PTR ptr_type_node
 #define RISCV_ATYPE_INT_PTR integer_ptr_type_node
+#define RISCV_ATYPE_BF bfloat16_type_node
+#define RISCV_ATYPE_SF float_type_node
 
 /* RISCV_FTYPE_ATYPESN takes N RISCV_FTYPES-like type codes and lists
    their associated RISCV_ATYPEs.  */
@@ -212,6 +220,7 @@ static const struct riscv_builtin_description riscv_builtins[] = {
   #include "riscv-cmo.def"
   #include "riscv-scalar-crypto.def"
   #include "corev.def"
+  #include "andes.def"
 
   DIRECT_BUILTIN (frflags, RISCV_USI_FTYPE, hard_float),
   DIRECT_NO_TARGET_BUILTIN (fsflags, RISCV_VOID_FTYPE_USI, hard_float),
@@ -230,6 +239,7 @@ static GTY(()) int riscv_builtin_decl_index[NUM_INSN_CODES];
   riscv_builtin_decls[riscv_builtin_decl_index[(CODE)]]
 
 tree riscv_float16_type_node = NULL_TREE;
+tree riscv_bfloat16_type_node = NULL_TREE;
 
 /* Return the function type associated with function prototype TYPE.  */
 
@@ -273,6 +283,21 @@ riscv_init_builtin_types (void)
   if (!maybe_get_identifier ("_Float16"))
     lang_hooks.types.register_builtin_type (riscv_float16_type_node,
 					    "_Float16");
+
+  /* Provide the __bf16 type and bfloat16_type_node if needed.  */
+  if (!bfloat16_type_node)
+    {
+      riscv_bfloat16_type_node = make_node (REAL_TYPE);
+      TYPE_PRECISION (riscv_bfloat16_type_node) = 16;
+      SET_TYPE_MODE (riscv_bfloat16_type_node, BFmode);
+      layout_type (riscv_bfloat16_type_node);
+    }
+  else
+    riscv_bfloat16_type_node = bfloat16_type_node;
+
+  if (!maybe_get_identifier ("__bf16"))
+    lang_hooks.types.register_builtin_type (riscv_bfloat16_type_node,
+					    "__bf16");
 }
 
 /* Implement TARGET_INIT_BUILTINS.  */

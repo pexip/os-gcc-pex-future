@@ -1,5 +1,5 @@
 /* Convert a program in SSA form into Normal form.
-   Copyright (C) 2004-2024 Free Software Foundation, Inc.
+   Copyright (C) 2004-2026 Free Software Foundation, Inc.
    Contributed by Andrew Macleod <amacleod@redhat.com>
 
 This file is part of GCC.
@@ -25,6 +25,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "rtl.h"
 #include "tree.h"
 #include "gimple.h"
+#include "gimple-expr.h"
 #include "cfghooks.h"
 #include "ssa.h"
 #include "tree-ssa.h"
@@ -44,7 +45,10 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-ssa-ter.h"
 #include "tree-ssa-coalesce.h"
 #include "tree-outof-ssa.h"
+#include "cfgexpand.h"
 #include "dojump.h"
+#include "internal-fn.h"
+#include "gimple-fold.h"
 
 /* FIXME: A lot of code here deals with expanding to RTL.  All that code
    should be in cfgexpand.cc.  */
@@ -60,8 +64,14 @@ ssa_is_replaceable_p (gimple *stmt)
   tree def;
   gimple *use_stmt;
 
-  /* Only consider modify stmts.  */
-  if (!is_gimple_assign (stmt))
+  /* Only consider modify stmts and direct internal fn calls that are
+     not also tail-calls.  */
+  gcall *call;
+  if (!is_gimple_assign (stmt)
+      && (!(call = dyn_cast <gcall *> (stmt))
+	  || gimple_call_tail_p (call)
+	  || !gimple_call_internal_p (call)
+	  || !direct_internal_fn_p (gimple_call_internal_fn (call))))
     return false;
 
   /* If the statement may throw an exception, it cannot be replaced.  */
@@ -92,12 +102,9 @@ ssa_is_replaceable_p (gimple *stmt)
 
   /* An assignment with a register variable on the RHS is not
      replaceable.  */
-  if (gimple_assign_rhs_code (stmt) == VAR_DECL
+  if (is_gimple_assign (stmt)
+      && gimple_assign_rhs_code (stmt) == VAR_DECL
       && DECL_HARD_REGISTER (gimple_assign_rhs1 (stmt)))
-    return false;
-
-  /* No function calls can be replaced.  */
-  if (is_gimple_call (stmt))
     return false;
 
   /* Leave any stmt with volatile operands alone as well.  */
@@ -259,10 +266,7 @@ emit_partition_copy (rtx dest, rtx src, int unsignedsrcp, tree sizeexp)
     emit_move_insn (dest, src);
   do_pending_stack_adjust ();
 
-  rtx_insn *seq = get_insns ();
-  end_sequence ();
-
-  return seq;
+  return end_sequence ();
 }
 
 /* Insert a copy instruction from partition SRC to DEST onto edge E.  */
@@ -352,8 +356,7 @@ insert_value_copy_on_edge (edge e, int dest, tree src, location_t locus)
     emit_move_insn (dest_rtx, x);
   do_pending_stack_adjust ();
 
-  seq = get_insns ();
-  end_sequence ();
+  seq = end_sequence ();
 
   insert_insn_on_edge (seq, e);
 }
@@ -562,7 +565,7 @@ static inline bool
 queue_phi_copy_p (var_map map, tree t)
 {
   if (TREE_CODE (t) == SSA_NAME)
-    { 
+    {
       if (var_to_partition (map, t) == NO_PARTITION)
         return true;
       return false;
@@ -1004,9 +1007,8 @@ get_undefined_value_partitions (var_map map)
 }
 
 /* Given the out-of-ssa info object SA (with prepared partitions)
-   eliminate all phi nodes in all basic blocks.  Afterwards no
-   basic block will have phi nodes anymore and there are possibly
-   some RTL instructions inserted on edges.  */
+   eliminate all phi nodes in all basic blocks.  Afterwards there
+   are possibly some RTL instructions inserted on edges.  */
 
 void
 expand_phi_nodes (struct ssaexpand *sa)
@@ -1022,7 +1024,6 @@ expand_phi_nodes (struct ssaexpand *sa)
 	edge_iterator ei;
 	FOR_EACH_EDGE (e, ei, bb->preds)
 	  eliminate_phi (e, &g);
-	set_phi_nodes (bb, NULL);
 	/* We can't redirect EH edges in RTL land, so we need to do this
 	   here.  Redirection happens only when splitting is necessary,
 	   which it is only for critical edges, normally.  For EH edges
@@ -1049,6 +1050,116 @@ expand_phi_nodes (struct ssaexpand *sa)
       }
 }
 
+
+/* Out-of-SSA can leave several partitions sharing one base VAR_DECL, when
+   that variable's SSA versions are simultaneously live and so cannot all be
+   coalesced.  When such a partition is spilled (it has no register mode,
+   e.g.  an oversized vector that is BLKmode), set_mem_attributes would give
+   every one of those slots that single decl as its MEM_EXPR at offset 0, so
+   the distinct slots appear to be the same object and mislead MEM_EXPR-based
+   disambiguation, and the load/store pair-fusion pass then fuses across the
+   slots and corrupts one.  Give every partition but one of such a decl its
+   own artificial decl so the slots are distinguished at the source.
+   The new decl carries a DECL_DEBUG_EXPR back to the user variable so debug
+   info still attributes the storage to it (cf.  create_access_replacement in
+   tree-sra.cc).  A PARM_DECL or RESULT_DECL keeps the partition of its default
+   definition, which holds the canonical RTL, and only its other partitions are
+   split.  */
+
+static void
+split_overlapping_partition_decls (var_map map)
+{
+  unsigned n = num_var_partitions (map);
+  hash_set<tree> seen;
+  auto_vec<tree> new_decl;
+  new_decl.safe_grow_cleared (n);
+  bool any = false;
+  unsigned ver;
+  tree name;
+
+  /* set_rtl attaches the base variable of any name in a partition to that
+     partition's location, not just the one of its representative, so collect
+     what the names of each partition contribute.  A name with no base
+     variable contributes nothing, since set_rtl passes a type rather than a
+     decl for those and leaves the MEM_EXPR it has in place.  */
+  auto_vec<tree> part_var;
+  part_var.safe_grow_cleared (n);
+  FOR_EACH_SSA_NAME (ver, name, cfun)
+    {
+      int p = var_to_partition (map, name);
+      if (p == NO_PARTITION)
+	continue;
+      tree var = SSA_NAME_VAR (name);
+      if (!var)
+	continue;
+      part_var[p] = expand_leader_merge (part_var[p], var);
+    }
+
+  for (unsigned i = 0; i < n; i++)
+    {
+      tree repr = partition_to_var (map, i);
+      if (!repr)
+	continue;
+      /* Expansion hands set_rtl the representative before the other names,
+	 and expand_leader_merge keeps the variable it is given first unless a
+	 later one is DECL_IGNORED_P, so merging the two gives the variable
+	 this partition ends up with.  */
+      tree var = SSA_NAME_VAR (repr);
+      if (part_var[i])
+	var = expand_leader_merge (var, part_var[i]);
+      if (!var)
+	continue;
+      /* Only partitions that will live in memory can end up with a
+	 misleading shared MEM_EXPR.  Mirror the decision that
+	 expand_one_ssa_partition will make.  */
+      if (use_register_for_decl (repr))
+	continue;
+      /* One partition of VAR keeps the user decl, the rest are split.
+	 A default definition cannot change its variable, so if VAR has a
+	 partitioned default definition, its partition is the one that
+	 keeps the user decl.  Otherwise the first partition seen does.  */
+      tree ddef = ssa_default_def (cfun, var);
+      int keep = ddef ? var_to_partition (map, ddef) : NO_PARTITION;
+      if (keep == NO_PARTITION)
+	{
+	  if (!seen.add (var))
+	    continue;
+	}
+      else if (keep >= 0 && (unsigned) keep == i)
+	continue;
+
+      tree nvar = create_tmp_var_raw (TREE_TYPE (var));
+      /* Avoid a register-only NVAR when the partition already has a MEM,
+	 since set_rtl cannot assign that MEM to NVAR.  */
+      if (use_register_for_decl (nvar))
+	DECL_IGNORED_P (nvar) = DECL_IGNORED_P (var);
+      gcc_checking_assert (!use_register_for_decl (nvar));
+      DECL_CONTEXT (nvar) = DECL_CONTEXT (var);
+      DECL_SOURCE_LOCATION (nvar) = DECL_SOURCE_LOCATION (var);
+      SET_DECL_ALIGN (nvar, DECL_ALIGN (var));
+      if (!DECL_ARTIFICIAL (var) && DECL_NAME (var))
+	{
+	  SET_DECL_DEBUG_EXPR (nvar, var);
+	  DECL_HAS_DEBUG_EXPR_P (nvar) = 1;
+	}
+      copy_warning (nvar, var);
+      add_local_decl (cfun, nvar);
+      new_decl[i] = nvar;
+      any = true;
+    }
+
+  if (!any)
+    return;
+
+  FOR_EACH_SSA_NAME (ver, name, cfun)
+    {
+      if (SSA_NAME_IS_DEFAULT_DEF (name))
+	continue;
+      int p = var_to_partition (map, name);
+      if (p != NO_PARTITION && new_decl[p])
+	SET_SSA_NAME_VAR_OR_IDENTIFIER (name, new_decl[p]);
+    }
+}
 
 /* Remove the ssa-names in the current function and translate them into normal
    compiler variables.  PERFORM_TER is true if Temporary Expression Replacement
@@ -1080,6 +1191,11 @@ remove_ssa_form (bool perform_ter, struct ssaexpand *sa)
       if (values && dump_file && (dump_flags & TDF_DETAILS))
 	dump_replaceable_exprs (dump_file, values);
     }
+
+  /* Distinct partitions of one decl must not share a MEM_EXPR once they are
+     spilled to separate stack slots.  Done after TER so reassigning
+     SSA_NAME_VAR does not perturb find_replaceable_exprs.  */
+  split_overlapping_partition_decls (map);
 
   rewrite_trees (map);
 
@@ -1255,10 +1371,10 @@ insert_backedge_copies (void)
 		  if (gimple_nop_p (def)
 		      || gimple_code (def) == GIMPLE_PHI)
 		    continue;
-		  tree name = copy_ssa_name (result);
-		  gimple *stmt = gimple_build_assign (name, result);
 		  imm_use_iterator imm_iter;
 		  gimple *use_stmt;
+		  auto_vec<use_operand_p, 8> uses;
+		  int idx = -1;
 		  /* The following matches trivially_conflicts_p.  */
 		  FOR_EACH_IMM_USE_STMT (use_stmt, imm_iter, result)
 		    {
@@ -1269,11 +1385,61 @@ insert_backedge_copies (void)
 			{
 			  use_operand_p use;
 			  FOR_EACH_IMM_USE_ON_STMT (use, imm_iter)
-			    SET_USE (use, name);
+			    {
+			      uses.safe_push (use);
+			      if (!is_gimple_debug (use_stmt))
+				{
+				  if (idx == -1)
+				    idx = uses.length () - 1;
+				  else
+				    idx = -2;
+				}
+			    }
 			}
 		    }
-		  gimple_stmt_iterator gsi = gsi_for_stmt (def);
-		  gsi_insert_before (&gsi, stmt, GSI_SAME_STMT);
+		  /* When there is just a conflicting statement try to
+		     adjust that to refer to the new definition.
+		     In particular for now handle a conflict with the
+		     use in a (exit) condition with a NE compare,
+		     replacing a pre-IV-increment compare with a
+		     post-IV-increment one.  */
+		  if (idx >= 0
+		      && is_a <gcond *> (USE_STMT (uses[idx]))
+		      && (gimple_cond_code (USE_STMT (uses[idx])) == NE_EXPR
+			  || gimple_cond_code (USE_STMT (uses[idx])) == EQ_EXPR)
+		      && is_gimple_assign (def)
+		      && gimple_assign_rhs1 (def) == result
+		      && (gimple_assign_rhs_code (def) == PLUS_EXPR
+			  || gimple_assign_rhs_code (def) == MINUS_EXPR
+			  || gimple_assign_rhs_code (def) == POINTER_PLUS_EXPR)
+		      && TREE_CODE (gimple_assign_rhs2 (def)) == INTEGER_CST)
+		    {
+		      gcond *cond = as_a <gcond *> (USE_STMT (uses[idx]));
+		      tree *adj;
+		      if (gimple_cond_lhs (cond) == result)
+			adj = gimple_cond_rhs_ptr (cond);
+		      else
+			adj = gimple_cond_lhs_ptr (cond);
+		      gimple_stmt_iterator gsi = gsi_for_stmt (cond);
+		      tree newval
+			= gimple_build (&gsi, true, GSI_SAME_STMT,
+					UNKNOWN_LOCATION,
+					gimple_assign_rhs_code (def),
+					TREE_TYPE (*adj),
+					*adj, gimple_assign_rhs2 (def));
+		      *adj = newval;
+		      SET_USE (uses[idx], arg);
+		      update_stmt (cond);
+		    }
+		  else
+		    {
+		      tree name = copy_ssa_name (result);
+		      gimple *stmt = gimple_build_assign (name, result);
+		      gimple_stmt_iterator gsi = gsi_for_stmt (def);
+		      gsi_insert_before (&gsi, stmt, GSI_SAME_STMT);
+		      for (auto use : uses)
+			SET_USE (use, name);
+		    }
 		}
 	    }
 	}

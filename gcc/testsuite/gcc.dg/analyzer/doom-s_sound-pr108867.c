@@ -1,6 +1,6 @@
 /* Reduced from Doom's linuxdoom-1.10/s_sound.c, which is GPLv2 or later.  */
 
-/* { dg-additional-options "-fno-analyzer-call-summaries -Wno-analyzer-too-complex -Wno-analyzer-symbol-too-complex" } */
+/* { dg-additional-options "-std=gnu17 -fno-analyzer-call-summaries -Wno-analyzer-too-complex -Wno-analyzer-symbol-too-complex" } */
 /* { dg-require-effective-target size32plus } */
 
 typedef struct _IO_FILE FILE;
@@ -633,7 +633,7 @@ S_getChannel(void* origin, sfxinfo_t* sfxinfo)
   if (cnum == numChannels) {
 
     for (cnum = 0; cnum < numChannels; cnum++)
-      if (channels[cnum].sfxinfo->priority >= sfxinfo->priority) /* { dg-warning "dereference of NULL" } */
+      if (channels[cnum].sfxinfo->priority >= sfxinfo->priority) /* { dg-warning "dereference of NULL" "" { xfail *-*-* } } */
         break;
 
     if (cnum == numChannels) {

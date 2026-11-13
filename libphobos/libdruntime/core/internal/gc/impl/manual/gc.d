@@ -23,6 +23,8 @@ import core.gc.gcinterface;
 
 import core.internal.container.array;
 
+import core.thread.threadbase : ThreadBase;
+
 import cstdlib = core.stdc.stdlib : calloc, free, malloc, realloc;
 static import core.memory;
 
@@ -76,10 +78,6 @@ class ManualGC : GC
     }
 
     void collect() nothrow
-    {
-    }
-
-    void collectNoStack() nothrow
     {
     }
 
@@ -270,5 +268,33 @@ class ManualGC : GC
     ulong allocatedInCurrentThread() nothrow
     {
         return typeof(return).init;
+    }
+
+    void[] getArrayUsed(void *ptr, bool atomic = false) nothrow
+    {
+        return null;
+    }
+
+    bool expandArrayUsed(void[] slice, size_t newUsed, bool atomic = false) nothrow @safe
+    {
+        return false;
+    }
+
+    size_t reserveArrayCapacity(void[] slice, size_t request, bool atomic = false) nothrow @safe
+    {
+        return 0;
+    }
+
+    bool shrinkArrayUsed(void[] slice, size_t existingUsed, bool atomic = false) nothrow
+    {
+        return false;
+    }
+
+    void initThread(ThreadBase t) nothrow @nogc
+    {
+    }
+
+    void cleanupThread(ThreadBase t) nothrow @nogc
+    {
     }
 }

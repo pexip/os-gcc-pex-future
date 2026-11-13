@@ -1,5 +1,5 @@
 /* Perform instruction reorganizations for delay slot filling.
-   Copyright (C) 1992-2024 Free Software Foundation, Inc.
+   Copyright (C) 1992-2026 Free Software Foundation, Inc.
    Contributed by Richard Kenner (kenner@vlsi1.ultra.nyu.edu).
    Hacked by Michael Tiemann (tiemann@cygnus.com).
 
@@ -1300,12 +1300,12 @@ try_merge_delay_insns (rtx_insn *insn, rtx_insn *thread)
 	     TRIAL's delay list. */
 	  for (int j = 1; j < i; j++)
 	    mark_set_resources (XVECEXP (pat, 0, j),
-				&modified, 0, MARK_SRC_DEST_CALL); 
+				&modified, 0, MARK_SRC_DEST_CALL);
 	  if (! insn_references_resource_p (dtrial, &set, true)
 	      && ! insn_sets_resource_p (dtrial, &set, true)
 	      && ! insn_sets_resource_p (dtrial, &needed, true)
 	      && rtx_equal_p (PATTERN (next_to_match), PATTERN (dtrial))
-	      /* Check that DTRIAL and NEXT_TO_MATCH does not reference a 
+	      /* Check that DTRIAL and NEXT_TO_MATCH does not reference a
 	         resource modified between them (only dtrial is checked because
 	         next_to_match and dtrial shall to be equal in order to hit
 	         this line) */
@@ -3304,7 +3304,7 @@ relax_delay_slots (rtx_insn *first)
 		 We know "trial" is an insn here as it is the output of
 		 next_real_nondebug_insn () above.  */
 	      update_block (as_a <rtx_insn *> (trial), tmp);
-	      
+
 	      /* Now emit a label before the special USE insn, and
 		 redirect our jump to the new label.  */
 	      target_label = get_label_before (PREV_INSN (tmp), target_label);
@@ -3327,7 +3327,7 @@ relax_delay_slots (rtx_insn *first)
 	  rtx temp_label = JUMP_LABEL (trial_seq->insn (0));
 	  if (ANY_RETURN_P (temp_label))
 	    temp_label = find_end_label (temp_label);
-	  
+
 	  if (temp_label
 	      && redirect_with_delay_slots_safe_p (delay_jump_insn,
 						   temp_label, insn))
@@ -3401,7 +3401,8 @@ relax_delay_slots (rtx_insn *first)
 	  && next && simplejump_or_return_p (next)
 	  && (next_active_insn (as_a<rtx_insn *> (target_label))
 	      == next_active_insn (next))
-	  && no_labels_between_p (insn, next))
+	  && no_labels_between_p (insn, next)
+	  && !switch_text_sections_between_p (insn, next_active_insn (next)))
 	{
 	  rtx label = JUMP_LABEL (next);
 	  rtx old_label = JUMP_LABEL (delay_jump_insn);

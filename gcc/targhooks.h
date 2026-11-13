@@ -1,5 +1,5 @@
 /* Default target hook functions.
-   Copyright (C) 2003-2024 Free Software Foundation, Inc.
+   Copyright (C) 2003-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -33,6 +33,8 @@ extern machine_mode default_promote_function_mode (const_tree, machine_mode,
 							int *, const_tree, int);
 extern machine_mode default_promote_function_mode_always_promote
 			(const_tree, machine_mode, int *, const_tree, int);
+extern machine_mode default_promote_function_mode_sign_extend
+  (const_tree, machine_mode, int *, const_tree, int);
 
 extern machine_mode default_cc_modes_compatible (machine_mode,
 						      machine_mode);
@@ -113,8 +115,7 @@ extern poly_uint64 default_preferred_vector_alignment (const_tree);
 extern bool default_builtin_vector_alignment_reachable (const_tree, bool);
 extern bool
 default_builtin_support_vector_misalignment (machine_mode mode,
-					     const_tree,
-					     int, bool);
+					     int, bool, bool);
 extern machine_mode default_preferred_simd_mode (scalar_mode mode);
 extern machine_mode default_split_reduction (machine_mode);
 extern unsigned int default_autovectorize_vector_modes (vector_modes *, bool);
@@ -123,6 +124,7 @@ extern opt_machine_mode default_vectorize_related_mode (machine_mode,
 							poly_uint64);
 extern opt_machine_mode default_get_mask_mode (machine_mode);
 extern bool default_empty_mask_is_expensive (unsigned);
+extern bool default_conditional_operation_is_expensive (unsigned);
 extern vector_costs *default_vectorize_create_costs (vec_info *, bool);
 
 /* OpenACC hooks.  */
@@ -172,6 +174,7 @@ extern void default_emit_call_builtin___clear_cache (rtx, rtx);
 extern poly_int64 default_return_pops_args (tree, tree, poly_int64);
 extern reg_class_t default_ira_change_pseudo_allocno_class (int, reg_class_t,
 							    reg_class_t);
+extern int default_ira_callee_saved_register_cost_scale (int);
 extern bool default_lra_p (void);
 extern int default_register_priority (int);
 extern bool default_register_usage_leveling_p (void);
@@ -213,9 +216,12 @@ extern bool default_addr_space_subset_p (addr_space_t, addr_space_t);
 extern bool default_addr_space_zero_address_valid (addr_space_t);
 extern int default_addr_space_debug (addr_space_t);
 extern void default_addr_space_diagnose_usage (addr_space_t, location_t);
+extern addr_space_t default_addr_space_for_artificial_rodata (tree,
+							      artificial_rodata);
 extern rtx default_addr_space_convert (rtx, tree, tree);
 extern unsigned int default_case_values_threshold (void);
 extern bool default_have_conditional_execution (void);
+extern bool default_have_ccmp (void);
 
 extern bool default_libc_has_function (enum function_class, tree);
 extern bool default_libc_has_fast_function (int fcode);
@@ -232,6 +238,11 @@ extern tree default_builtin_tm_load_store (tree);
 extern int default_memory_move_cost (machine_mode, reg_class_t, bool);
 extern int default_register_move_cost (machine_mode, reg_class_t,
 				       reg_class_t);
+extern int default_callee_save_cost (spill_cost_type, unsigned int,
+				     machine_mode, unsigned int, int,
+				     const HARD_REG_SET &, bool);
+extern int default_frame_allocation_cost (frame_cost_type,
+					  const HARD_REG_SET &);
 extern bool default_slow_unaligned_access (machine_mode, unsigned int);
 extern HOST_WIDE_INT default_estimated_poly_value (poly_int64,
 						   poly_value_estimate_kind);
@@ -251,6 +262,9 @@ extern reg_class_t default_preferred_output_reload_class (rtx, reg_class_t);
 extern reg_class_t default_preferred_rename_class (reg_class_t rclass);
 extern bool default_class_likely_spilled_p (reg_class_t);
 extern unsigned char default_class_max_nregs (reg_class_t, machine_mode);
+
+extern bool default_avoid_store_forwarding_p (vec<store_fwd_info>, rtx, int,
+					      bool);
 
 extern enum unwind_info_type default_debug_unwind_info (void);
 
@@ -289,16 +303,17 @@ extern unsigned int default_min_arithmetic_precision (void);
 extern enum flt_eval_method
 default_excess_precision (enum excess_precision_type ATTRIBUTE_UNUSED);
 extern bool default_bitint_type_info (int, struct bitint_info *);
+extern machine_mode default_mode_for_floating_type (enum tree_index);
 extern HOST_WIDE_INT default_stack_clash_protection_alloca_probe_range (void);
 extern void default_select_early_remat_modes (sbitmap);
 extern tree default_preferred_else_value (unsigned, tree, unsigned, tree *);
-
+extern bool default_instruction_selection (function *, gimple_stmt_iterator *);
 extern bool default_have_speculation_safe_value (bool);
 extern bool speculation_safe_value_not_needed (bool);
 extern rtx default_speculation_safe_value (machine_mode, rtx, rtx, rtx);
 
 extern bool default_memtag_can_tag_addresses ();
-extern uint8_t default_memtag_tag_size ();
+extern uint8_t default_memtag_tag_bitsize ();
 extern uint8_t default_memtag_granule_size ();
 extern rtx default_memtag_insert_random_tag (rtx, rtx);
 extern rtx default_memtag_add_tag (rtx, poly_int64, uint8_t);

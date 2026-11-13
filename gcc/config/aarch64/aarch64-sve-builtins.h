@@ -1,5 +1,5 @@
 /* ACLE support for AArch64 SVE
-   Copyright (C) 2018-2024 Free Software Foundation, Inc.
+   Copyright (C) 2018-2026 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -28,6 +28,7 @@
    - the "mode" suffix ("_n", "_index", etc.)
    - the type suffixes ("_s32", "_b8", etc.)
    - the predication suffix ("_x", "_z", etc.)
+   - the "_fpm" suffix when the floating point mode register is set
 
    Each piece of information is individually useful, so we retain this
    classification throughout:
@@ -37,10 +38,12 @@
    - mode_suffix_index represents the mode suffix
 
    - type_suffix_index represents individual type suffixes, while
-     type_suffix_pair represents a pair of them
+     type_suffix_triple represents a tuple of them
 
    - prediction_index extends the predication suffix with an additional
      alternative: PRED_implicit for implicitly-predicated operations
+
+   - fpm_mode represents whether the fpm register is set or not
 
    In addition to its unique full name, a function may have a shorter
    overloaded alias.  This alias removes pieces of the suffixes that
@@ -54,9 +57,10 @@
    function_shape describes how that instruction has been presented at
    the language level.
 
-   The static list of functions uses function_group to describe a group
-   of related functions.  The function_builder class is responsible for
-   expanding this static description into a list of individual functions
+   The static arrays of function_group_info (function_groups,
+   neon_sve_function_groups, sme_function_groups) use function_group to describe
+   a group of related functions.  The function_builder class is responsible for
+   expanding these static description into a list of individual functions
    and registering the associated built-in functions.  function_instance
    describes one of these individual functions in terms of the properties
    described above.
@@ -164,6 +168,14 @@ enum predication_index
   NUM_PREDS
 };
 
+/* Classifies intrinsics on whether they set the FPM register */
+enum fpm_mode_index
+{
+  FPM_unused,
+  FPM_set,
+  NUM_FPM_MODES
+};
+
 /* Classifies element types, based on type suffixes with the bit count
    removed.  "count" isn't really an element type, but we pretend it is
    for consistency.  */
@@ -173,6 +185,7 @@ enum type_class_index
   TYPE_bfloat,
   TYPE_count,
   TYPE_float,
+  TYPE_mfloat,
   TYPE_signed,
   TYPE_unsigned,
   NUM_TYPE_CLASSES
@@ -214,8 +227,8 @@ enum group_suffix_index
   NUM_GROUP_SUFFIXES
 };
 
-/* Combines two type suffixes.  */
-typedef enum type_suffix_index type_suffix_pair[2];
+/* Combines three type suffixes.  */
+typedef enum type_suffix_index type_suffix_triple[3];
 
 class function_base;
 class function_shape;
@@ -354,18 +367,20 @@ struct function_group_info
   /* A list of the available type suffixes, group suffixes, and predication
      types.  The function supports every combination of the three.
 
-     The list of type suffixes is terminated by two NUM_TYPE_SUFFIXES.
+     The list of type suffixes is terminated by three NUM_TYPE_SUFFIXES.
      It is lexicographically ordered based on the index value.
 
      The list of group suffixes is terminated by NUM_GROUP_SUFFIXES
      and the list of predication types is terminated by NUM_PREDS.  */
-  const type_suffix_pair *types;
+  const type_suffix_triple *types;
   const group_suffix_index *groups;
   const predication_index *preds;
 
-  /* The architecture extensions that the functions require, as a set of
-     AARCH64_FL_* flags.  */
-  aarch64_feature_flags required_extensions;
+  /* The architecture extensions that the functions require.  */
+  aarch64_required_extensions required_extensions;
+
+  /* Whether the floating point register is set */
+  fpm_mode_index fpm_mode;
 };
 
 /* Describes a single fully-resolved function (i.e. one that has a
@@ -375,8 +390,8 @@ class GTY((user)) function_instance
 public:
   function_instance (const char *, const function_base *,
 		     const function_shape *, mode_suffix_index,
-		     const type_suffix_pair &, group_suffix_index,
-		     predication_index);
+		     const type_suffix_triple &, group_suffix_index,
+		     predication_index, fpm_mode_index);
 
   bool operator== (const function_instance &) const;
   bool operator!= (const function_instance &) const;
@@ -388,6 +403,8 @@ public:
   bool could_trap_p () const;
 
   vector_type_index gp_type_index () const;
+  tree gp_value (gcall *) const;
+  tree inactive_values (gcall *) const;
   tree gp_type () const;
 
   unsigned int vectors_per_tuple () const;
@@ -417,9 +434,11 @@ public:
   const function_base *base;
   const function_shape *shape;
   mode_suffix_index mode_suffix_id;
-  type_suffix_pair type_suffix_ids;
+  type_suffix_triple type_suffix_ids;
   group_suffix_index group_suffix_id;
   predication_index pred;
+  fpm_mode_index fpm_mode;
+  int gp_index;
 };
 
 class registered_function;
@@ -432,9 +451,9 @@ public:
   ~function_builder ();
 
   void add_unique_function (const function_instance &, tree,
-			    vec<tree> &, aarch64_feature_flags, bool);
+			    vec<tree> &, aarch64_required_extensions, bool);
   void add_overloaded_function (const function_instance &,
-				aarch64_feature_flags);
+				aarch64_required_extensions);
   void add_overloaded_functions (const function_group_info &,
 				 mode_suffix_index);
 
@@ -446,11 +465,11 @@ private:
 
   char *get_name (const function_instance &, bool);
 
-  tree get_attributes (const function_instance &, aarch64_feature_flags);
+  tree get_attributes (const function_instance &, aarch64_required_extensions);
 
   registered_function &add_function (const function_instance &,
 				     const char *, tree, tree,
-				     aarch64_feature_flags, bool, bool);
+				     aarch64_required_extensions, bool, bool);
 
   /* The function type to use for functions that are resolved by
      function_resolver.  */
@@ -489,6 +508,7 @@ public:
 class function_resolver : public function_call_info
 {
 public:
+  enum target_type_restrictions { TARGET_ANY, TARGET_32_64 };
   enum { SAME_SIZE = 256, HALF_SIZE, QUARTER_SIZE };
   static const type_class_index SAME_TYPE_CLASS = NUM_TYPE_CLASSES;
 
@@ -507,9 +527,11 @@ public:
   tree lookup_form (mode_suffix_index,
 		    type_suffix_index = NUM_TYPE_SUFFIXES,
 		    type_suffix_index = NUM_TYPE_SUFFIXES,
+		    type_suffix_index = NUM_TYPE_SUFFIXES,
 		    group_suffix_index = GROUP_none);
   tree lookup_form (mode_suffix_index, sve_type);
   tree resolve_to (mode_suffix_index,
+		   type_suffix_index = NUM_TYPE_SUFFIXES,
 		   type_suffix_index = NUM_TYPE_SUFFIXES,
 		   type_suffix_index = NUM_TYPE_SUFFIXES,
 		   group_suffix_index = GROUP_none);
@@ -519,7 +541,8 @@ public:
   vector_type_index infer_predicate_type (unsigned int);
   type_suffix_index infer_integer_scalar_type (unsigned int);
   type_suffix_index infer_64bit_scalar_integer_pair (unsigned int);
-  type_suffix_index infer_pointer_type (unsigned int, bool = false);
+  type_suffix_index infer_pointer_type (unsigned int, bool = false,
+					target_type_restrictions = TARGET_ANY);
   sve_type infer_sve_type (unsigned int);
   sve_type infer_vector_or_tuple_type (unsigned int, unsigned int);
   type_suffix_index infer_vector_type (unsigned int);
@@ -629,13 +652,20 @@ public:
   tree fold_contiguous_base (gimple_seq &, tree);
   tree load_store_cookie (tree);
 
-  gimple *redirect_call (const function_instance &);
+  gcall *redirect_call (const function_instance &);
   gimple *redirect_pred_x ();
+  gimple *fold_pfalse ();
+  gimple *convert_and_fold (tree, gimple *(*) (gimple_folder &,
+					       tree, vec<tree> &));
 
   gimple *fold_to_cstu (poly_uint64);
   gimple *fold_to_pfalse ();
   gimple *fold_to_ptrue ();
   gimple *fold_to_vl_pred (unsigned int);
+  gimple *fold_const_binary (enum tree_code);
+  gimple *fold_active_lanes_to (tree);
+  gimple *fold_call_to (tree);
+  gimple *fold_to_stmt_vops (gimple *);
 
   gimple *fold ();
 
@@ -659,6 +689,8 @@ public:
   insn_code direct_optab_handler (optab, unsigned int = 0);
   insn_code direct_optab_handler_for_sign (optab, optab, unsigned int = 0,
 					   machine_mode = E_VOIDmode);
+  insn_code convert_optab_handler_for_sign (optab, optab, unsigned int,
+					    machine_mode, machine_mode);
 
   machine_mode result_mode () const;
 
@@ -691,7 +723,7 @@ public:
   rtx use_pred_x_insn (insn_code);
   rtx use_cond_insn (insn_code, unsigned int = DEFAULT_MERGE_ARGNO);
   rtx use_vcond_mask_insn (insn_code, unsigned int = DEFAULT_MERGE_ARGNO);
-  rtx use_contiguous_load_insn (insn_code);
+  rtx use_contiguous_load_insn (insn_code, bool = false);
   rtx use_contiguous_prefetch_insn (insn_code);
   rtx use_contiguous_store_insn (insn_code);
 
@@ -774,12 +806,16 @@ public:
   virtual bool has_merge_argument_p (const function_instance &,
 				     unsigned int) const;
 
+  virtual bool has_gp_argument_p (const function_instance &) const;
+
   virtual bool explicit_type_suffix_p (unsigned int) const = 0;
 
   /* True if the group suffix is present in overloaded names.
      This isn't meaningful for pre-SME intrinsics, and true is
      more common than false, so provide a default definition.  */
   virtual bool explicit_group_suffix_p () const { return true; }
+
+  virtual type_suffix_index vector_base_type (type_suffix_index) const;
 
   /* Define all functions associated with the given group.  */
   virtual void build (function_builder &,
@@ -794,24 +830,17 @@ public:
   virtual bool check (function_checker &) const { return true; }
 };
 
-/* RAII class for enabling enough SVE features to define the built-in
-   types and implement the arm_sve.h pragma.  */
-class sve_switcher : public aarch64_simd_switcher
+/* RAII class for temporarily disabling the effect of any -fpack-struct option.
+   This is used to ensure that sve vector tuple types are defined with the
+   correct alignment.  */
+class sve_alignment_switcher
 {
 public:
-  sve_switcher (aarch64_feature_flags = 0);
-  ~sve_switcher ();
+  sve_alignment_switcher ();
+  ~sve_alignment_switcher ();
 
 private:
   unsigned int m_old_maximum_field_alignment;
-  bool m_old_have_regs_of_mode[MAX_MACHINE_MODE];
-};
-
-/* Extends sve_switch enough for defining arm_sme.h.  */
-class sme_switcher : public sve_switcher
-{
-public:
-  sme_switcher () : sve_switcher (AARCH64_FL_SME) {}
 };
 
 extern const type_suffix_info type_suffixes[NUM_TYPE_SUFFIXES + 1];
@@ -825,6 +854,7 @@ extern tree acle_svprfop;
 
 bool vector_cst_all_same (tree, unsigned int);
 bool is_ptrue (tree, unsigned int);
+bool is_pfalse (tree);
 const function_instance *lookup_fndecl (tree);
 
 /* Try to find a mode with the given mode_suffix_info fields.  Return the
@@ -867,17 +897,24 @@ tuple_type_field (tree type)
   gcc_unreachable ();
 }
 
+/* Return the vector type associated with TYPE.  */
+inline tree
+get_vector_type (sve_type type)
+{
+  auto vector_type = type_suffixes[type.type].vector_type;
+  return acle_vector_types[type.num_vectors - 1][vector_type];
+}
+
 inline function_instance::
-function_instance (const char *base_name_in,
-		   const function_base *base_in,
+function_instance (const char *base_name_in, const function_base *base_in,
 		   const function_shape *shape_in,
 		   mode_suffix_index mode_suffix_id_in,
-		   const type_suffix_pair &type_suffix_ids_in,
+		   const type_suffix_triple &type_suffix_ids_in,
 		   group_suffix_index group_suffix_id_in,
-		   predication_index pred_in)
+		   predication_index pred_in, fpm_mode_index fpm_mode_in)
   : base_name (base_name_in), base (base_in), shape (shape_in),
     mode_suffix_id (mode_suffix_id_in), group_suffix_id (group_suffix_id_in),
-    pred (pred_in)
+    pred (pred_in), fpm_mode (fpm_mode_in)
 {
   memcpy (type_suffix_ids, type_suffix_ids_in, sizeof (type_suffix_ids));
 }
@@ -890,8 +927,10 @@ function_instance::operator== (const function_instance &other) const
 	  && mode_suffix_id == other.mode_suffix_id
 	  && type_suffix_ids[0] == other.type_suffix_ids[0]
 	  && type_suffix_ids[1] == other.type_suffix_ids[1]
+	  && type_suffix_ids[2] == other.type_suffix_ids[2]
 	  && group_suffix_id == other.group_suffix_id
-	  && pred == other.pred);
+	  && pred == other.pred
+	  && fpm_mode == other.fpm_mode);
 }
 
 inline bool
@@ -916,6 +955,33 @@ inline tree
 function_instance::gp_type () const
 {
   return acle_vector_types[0][gp_type_index ()];
+}
+
+/* Return the tree value that should be used as the governing predicate of
+   this function.  If none then return NULL_TREE.  */
+inline tree
+function_instance::gp_value (gcall *call) const
+{
+  if (gp_index < 0)
+    return NULL_TREE;
+
+  return gimple_call_arg (call, gp_index);
+}
+
+/* Return the tree value that should be used for the inactive lanes should this
+   function be a predicated function with a gp.  Otherwise return NULL_TREE.  */
+inline tree
+function_instance::inactive_values (gcall *call) const
+{
+  if (gp_index < 0)
+    return NULL_TREE;
+
+  /* Function is unary with m predicate.  */
+  if (gp_index == 1)
+    return gimple_call_arg (call, 0);
+
+  /* Else the inactive values are the next element.  */
+  return gimple_call_arg (call, 1);
 }
 
 /* If the function operates on tuples of vectors, return the number
@@ -1090,6 +1156,14 @@ function_shape::has_merge_argument_p (const function_instance &instance,
 				      unsigned int nargs) const
 {
   return nargs == 1 && instance.pred == PRED_m;
+}
+
+/* Return true if INSTANCE has an predicate argument that can be used as the global
+   predicate.  */
+inline bool
+function_shape::has_gp_argument_p (const function_instance &instance) const
+{
+  return instance.pred != PRED_none;
 }
 
 /* Return the mode of the result of a call.  */
