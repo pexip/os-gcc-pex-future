@@ -1,3 +1,10 @@
+gcc-pex-future (16.2.0-0+pexip25u1) pexip-trixie; urgency=medium
+
+  * Switch to using gcc-16.2.0
+  * Tweak build-deps
+
+ -- Steve McIntyre <steve.mcintyre@pexip.com>  Thu, 12 Nov 2026 14:28:51 +0000
+
 gcc-pex-future (14.3.0-0+pexip25u1) pexip-trixie; urgency=medium
 
   * Switch to using gcc-14.3.0
