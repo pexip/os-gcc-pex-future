@@ -1,5 +1,5 @@
 /* Define builtin-in macros for the C family front ends.
-   Copyright (C) 2002-2024 Free Software Foundation, Inc.
+   Copyright (C) 2002-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -651,7 +651,7 @@ c_cpp_builtins_optimize_pragma (cpp_reader *pfile, tree prev_tree,
 
 /* This function will emit cpp macros to indicate the presence of various lock
    free atomic operations.  */
-   
+
 static void
 cpp_atomic_builtins (cpp_reader *pfile)
 {
@@ -732,26 +732,26 @@ cpp_atomic_builtins (cpp_reader *pfile)
      lock free.  */
 #define SIZEOF_NODE(T) (tree_to_uhwi (TYPE_SIZE_UNIT (T)))
 #define SWAP_INDEX(T) ((SIZEOF_NODE (T) < SWAP_LIMIT) ? SIZEOF_NODE (T) : 0)
-  builtin_define_with_int_value ("__GCC_ATOMIC_BOOL_LOCK_FREE", 
+  builtin_define_with_int_value ("__GCC_ATOMIC_BOOL_LOCK_FREE",
 			(have_swap[SWAP_INDEX (boolean_type_node)]? 2 : 1));
-  builtin_define_with_int_value ("__GCC_ATOMIC_CHAR_LOCK_FREE", 
+  builtin_define_with_int_value ("__GCC_ATOMIC_CHAR_LOCK_FREE",
 			(have_swap[SWAP_INDEX (signed_char_type_node)]? 2 : 1));
   if (flag_char8_t)
     builtin_define_with_int_value ("__GCC_ATOMIC_CHAR8_T_LOCK_FREE",
 			(have_swap[SWAP_INDEX (char8_type_node)]? 2 : 1));
-  builtin_define_with_int_value ("__GCC_ATOMIC_CHAR16_T_LOCK_FREE", 
+  builtin_define_with_int_value ("__GCC_ATOMIC_CHAR16_T_LOCK_FREE",
 			(have_swap[SWAP_INDEX (char16_type_node)]? 2 : 1));
-  builtin_define_with_int_value ("__GCC_ATOMIC_CHAR32_T_LOCK_FREE", 
+  builtin_define_with_int_value ("__GCC_ATOMIC_CHAR32_T_LOCK_FREE",
 			(have_swap[SWAP_INDEX (char32_type_node)]? 2 : 1));
-  builtin_define_with_int_value ("__GCC_ATOMIC_WCHAR_T_LOCK_FREE", 
+  builtin_define_with_int_value ("__GCC_ATOMIC_WCHAR_T_LOCK_FREE",
 			(have_swap[SWAP_INDEX (wchar_type_node)]? 2 : 1));
-  builtin_define_with_int_value ("__GCC_ATOMIC_SHORT_LOCK_FREE", 
+  builtin_define_with_int_value ("__GCC_ATOMIC_SHORT_LOCK_FREE",
 		      (have_swap[SWAP_INDEX (short_integer_type_node)]? 2 : 1));
-  builtin_define_with_int_value ("__GCC_ATOMIC_INT_LOCK_FREE", 
+  builtin_define_with_int_value ("__GCC_ATOMIC_INT_LOCK_FREE",
 			(have_swap[SWAP_INDEX (integer_type_node)]? 2 : 1));
-  builtin_define_with_int_value ("__GCC_ATOMIC_LONG_LOCK_FREE", 
+  builtin_define_with_int_value ("__GCC_ATOMIC_LONG_LOCK_FREE",
 		      (have_swap[SWAP_INDEX (long_integer_type_node)]? 2 : 1));
-  builtin_define_with_int_value ("__GCC_ATOMIC_LLONG_LOCK_FREE", 
+  builtin_define_with_int_value ("__GCC_ATOMIC_LLONG_LOCK_FREE",
 		(have_swap[SWAP_INDEX (long_long_integer_type_node)]? 2 : 1));
 
   /* If we're dealing with a "set" value that doesn't exactly correspond
@@ -778,7 +778,7 @@ cpp_atomic_builtins (cpp_reader *pfile)
   psize = POINTER_SIZE_UNITS;
   if (psize >= SWAP_LIMIT)
     psize = 0;
-  builtin_define_with_int_value ("__GCC_ATOMIC_POINTER_LOCK_FREE", 
+  builtin_define_with_int_value ("__GCC_ATOMIC_POINTER_LOCK_FREE",
 			(have_swap[psize]? 2 : 1));
 }
 
@@ -913,23 +913,42 @@ c_cpp_builtins (cpp_reader *pfile)
 
   /* encoding definitions used by users and libraries  */
   builtin_define_with_value ("__GNUC_EXECUTION_CHARSET_NAME",
-    cpp_get_narrow_charset_name (pfile), 1);
+			     cpp_get_narrow_charset_name (pfile), 1);
   builtin_define_with_value ("__GNUC_WIDE_EXECUTION_CHARSET_NAME",
-    cpp_get_wide_charset_name (pfile), 1);
-
+			     cpp_get_wide_charset_name (pfile), 1);
 
   if (c_dialect_cxx ())
-  {
-    int major;
-    parse_basever (&major, NULL, NULL);
-    cpp_define_formatted (pfile, "__GNUG__=%d", major);
-  }
+    {
+      int major;
+      parse_basever (&major, NULL, NULL);
+      cpp_define_formatted (pfile, "__GNUG__=%d", major);
+    }
 
   /* For stddef.h.  They require macros defined in c-common.cc.  */
   c_stddef_cpp_builtins ();
 
+  /* Variant of cpp_define which arranges for diagnostics on user #define
+     or #undef of the macros.  */
+  auto cpp_define_warn = [] (cpp_reader *pfile, const char *def)
+    {
+      const char *end = strchr (def, '=');
+      cpp_define (pfile, def);
+      cpp_warn (pfile, def, end ? end - def : strlen (def));
+    };
+
   if (c_dialect_cxx ())
     {
+      /* Treat all cpp_define calls in this block for macros starting
+	 with __cpp_ (for C++20 and later) or __STDCPP_ as cpp_define_warn.  */
+      auto cpp_define = [=] (cpp_reader *pfile, const char *def)
+	{
+	  if ((cxx_dialect >= cxx20 && startswith (def, "__cpp_"))
+	      || startswith (def, "__STDCPP_"))
+	    cpp_define_warn (pfile, def);
+	  else
+	    ::cpp_define (pfile, def);
+	};
+
       if (flag_weak && SUPPORTS_ONE_ONLY)
 	cpp_define (pfile, "__GXX_WEAK__=1");
       else
@@ -945,7 +964,10 @@ c_cpp_builtins (cpp_reader *pfile)
 	}
 
       if (cxx_dialect >= cxx11)
-        cpp_define (pfile, "__GXX_EXPERIMENTAL_CXX0X__");
+	{
+	  cpp_define (pfile, "__GXX_EXPERIMENTAL_CXX0X__");
+	  cpp_define (pfile, "__GXX_CONSTEXPR_ASM__");
+	}
 
       /* Binary literals have been allowed in g++ before C++11
 	 and were standardized for C++14.  */
@@ -1022,7 +1044,11 @@ c_cpp_builtins (cpp_reader *pfile)
 	  cpp_define (pfile, "__cpp_fold_expressions=201603L");
 	  if (cxx_dialect <= cxx17)
 	    cpp_define (pfile, "__cpp_nontype_template_args=201411L");
-	  cpp_define (pfile, "__cpp_range_based_for=201603L");
+	  if (!flag_range_for_ext_temps)
+	    cpp_define (pfile, "__cpp_range_based_for=201603L");
+          else
+	    /* This is the C++23 or -std=c++17 -frange-for-ext-temps value.  */
+	    cpp_define (pfile, "__cpp_range_based_for=202211L");
 	  if (cxx_dialect <= cxx17)
 	    cpp_define (pfile, "__cpp_constexpr=201603L");
 	  cpp_define (pfile, "__cpp_if_constexpr=201606L");
@@ -1035,7 +1061,8 @@ c_cpp_builtins (cpp_reader *pfile)
 	  /* Old macro, superseded by
 	     __cpp_nontype_template_parameter_auto.  */
 	  cpp_define (pfile, "__cpp_template_auto=201606L");
-	  cpp_define (pfile, "__cpp_structured_bindings=201606L");
+	  if (cxx_dialect <= cxx23)
+	    cpp_define (pfile, "__cpp_structured_bindings=201606L");
 	  cpp_define (pfile, "__cpp_variadic_using=201611L");
 	  cpp_define (pfile, "__cpp_guaranteed_copy_elision=201606L");
 	  cpp_define (pfile, "__cpp_nontype_template_parameter_auto=201606L");
@@ -1052,7 +1079,8 @@ c_cpp_builtins (cpp_reader *pfile)
 	  cpp_define (pfile, "__cpp_conditional_explicit=201806L");
 	  cpp_define (pfile, "__cpp_consteval=202211L");
 	  cpp_define (pfile, "__cpp_constinit=201907L");
-	  cpp_define (pfile, "__cpp_deduction_guides=201907L");
+	  if (cxx_dialect <= cxx20)
+	    cpp_define (pfile, "__cpp_deduction_guides=201907L");
 	  cpp_define (pfile, "__cpp_nontype_template_args=201911L");
 	  cpp_define (pfile, "__cpp_nontype_template_parameter_class=201806L");
 	  cpp_define (pfile, "__cpp_impl_destroying_delete=201806L");
@@ -1069,6 +1097,7 @@ c_cpp_builtins (cpp_reader *pfile)
 	  cpp_define (pfile, "__cpp_auto_cast=202110L");
 	  if (cxx_dialect <= cxx23)
 	    cpp_define (pfile, "__cpp_constexpr=202211L");
+	  cpp_define (pfile, "__cpp_deduction_guides=202207L");
 	  cpp_define (pfile, "__cpp_multidimensional_subscript=202211L");
 	  cpp_define (pfile, "__cpp_named_character_escapes=202207L");
 	  cpp_define (pfile, "__cpp_static_call_operator=202207L");
@@ -1078,53 +1107,79 @@ c_cpp_builtins (cpp_reader *pfile)
       if (cxx_dialect > cxx23)
 	{
 	  /* Set feature test macros for C++26.  */
-	  cpp_define (pfile, "__cpp_constexpr=202306L");
+	  cpp_define (pfile, "__cpp_constexpr=202406L");
+	  cpp_define (pfile, "__cpp_constexpr_exceptions=202411L");
 	  cpp_define (pfile, "__cpp_static_assert=202306L");
 	  cpp_define (pfile, "__cpp_placeholder_variables=202306L");
+	  cpp_define (pfile, "__cpp_structured_bindings=202411L");
+	  cpp_define (pfile, "__cpp_deleted_function=202403L");
+	  cpp_define (pfile, "__cpp_variadic_friend=202403L");
+	  cpp_define (pfile, "__cpp_pack_indexing=202311L");
+	  cpp_define (pfile, "__cpp_pp_embed=202502L");
+	  cpp_define (pfile, "__cpp_constexpr_virtual_inheritance=202506L");
+	  cpp_define (pfile, "__cpp_expansion_statements=202506L");
+	  if (flag_reflection)
+	    cpp_define (pfile, "__cpp_impl_reflection=202603L");
+	  else
+	    cpp_warn (pfile, "__cpp_impl_reflection");
 	}
-      if (flag_concepts)
-        {
-	  if (flag_concepts_ts && cxx_dialect < cxx20)
-            cpp_define (pfile, "__cpp_concepts=201507L");
-	  else if (cxx_dialect > cxx14)
-	    cpp_define (pfile, "__cpp_concepts=202002L");
-        }
+      if (flag_concepts && cxx_dialect > cxx14)
+	cpp_define (pfile, "__cpp_concepts=202002L");
+      else if (cxx_dialect >= cxx20)
+	cpp_warn (pfile, "__cpp_concepts");
       if (flag_contracts)
-	{
-	  cpp_define (pfile, "__cpp_contracts=201906L");
-	  cpp_define (pfile, "__cpp_contracts_literal_semantics=201906L");
-	  cpp_define (pfile, "__cpp_contracts_roles=201906L");
-	}
+	cpp_define (pfile, "__cpp_contracts=202502L");
+      else if (cxx_dialect >= cxx26)
+	cpp_warn (pfile, "__cpp_contracts");
       if (flag_modules)
 	/* The std-defined value is 201907L, but I don't think we can
 	   claim victory yet.  201810 is the p1103 date. */
 	cpp_define (pfile, "__cpp_modules=201810L");
+      else if (cxx_dialect >= cxx20)
+	cpp_warn (pfile, "__cpp_modules");
       if (flag_coroutines)
 	cpp_define (pfile, "__cpp_impl_coroutine=201902L"); /* n4861, DIS */
+      else if (cxx_dialect >= cxx20)
+	cpp_warn (pfile, "__cpp_impl_coroutine");
       if (flag_tm)
 	/* Use a value smaller than the 201505 specified in
 	   the TS, since we don't yet support atomic_cancel.  */
 	cpp_define (pfile, "__cpp_transactional_memory=201500L");
       if (flag_sized_deallocation)
 	cpp_define (pfile, "__cpp_sized_deallocation=201309L");
+      else if (cxx_dialect >= cxx20)
+	cpp_warn (pfile, "__cpp_sized_deallocation");
       if (aligned_new_threshold)
 	{
 	  cpp_define (pfile, "__cpp_aligned_new=201606L");
 	  cpp_define_formatted (pfile, "__STDCPP_DEFAULT_NEW_ALIGNMENT__=%d",
 				aligned_new_threshold);
 	}
+      else if (cxx_dialect >= cxx20)
+	cpp_warn (pfile, "__cpp_aligned_new");
+      if (cxx_dialect >= cxx17)
+	cpp_warn (pfile, "__STDCPP_DEFAULT_NEW_ALIGNMENT__");
       if (flag_new_ttp)
 	cpp_define (pfile, "__cpp_template_template_args=201611L");
+      else if (cxx_dialect >= cxx20)
+	cpp_warn (pfile, "__cpp_template_template_args");
       if (flag_threadsafe_statics)
 	cpp_define (pfile, "__cpp_threadsafe_static_init=200806L");
+      else if (cxx_dialect >= cxx20)
+	cpp_warn (pfile, "__cpp_threadsafe_static_init");
       if (flag_char8_t)
 	cpp_define (pfile, "__cpp_char8_t=202207L");
+      else if (cxx_dialect >= cxx20)
+	cpp_warn (pfile, "__cpp_char8_t");
 #ifndef THREAD_MODEL_SPEC
       /* Targets that define THREAD_MODEL_SPEC need to define
 	 __STDCPP_THREADS__ in their config/XXX/XXX-c.c themselves.  */
       if (cxx_dialect >= cxx11 && strcmp (thread_model, "single") != 0)
 	cpp_define (pfile, "__STDCPP_THREADS__=1");
+      else
 #endif
+	if (cxx_dialect >= cxx11)
+	  cpp_warn (pfile, "__STDCPP_THREADS__");
       if (flag_implicit_constexpr)
 	cpp_define (pfile, "__cpp_implicit_constexpr=20211111L");
     }
@@ -1273,16 +1328,22 @@ c_cpp_builtins (cpp_reader *pfile)
 
   for (int i = 0; i < NUM_FLOATN_NX_TYPES; i++)
     {
-      if (FLOATN_NX_TYPE_NODE (i) == NULL_TREE)
-	continue;
       if (c_dialect_cxx ()
 	  && cxx_dialect > cxx20
 	  && !floatn_nx_types[i].extended)
 	{
 	  char name[sizeof ("__STDCPP_FLOAT128_T__=1")];
+	  if (FLOATN_NX_TYPE_NODE (i) == NULL_TREE)
+	    {
+	      sprintf (name, "__STDCPP_FLOAT%d_T__", floatn_nx_types[i].n);
+	      cpp_warn (pfile, name);
+	      continue;
+	    }
 	  sprintf (name, "__STDCPP_FLOAT%d_T__=1", floatn_nx_types[i].n);
-	  cpp_define (pfile, name);
+	  cpp_define_warn (pfile, name);
 	}
+      else if (FLOATN_NX_TYPE_NODE (i) == NULL_TREE)
+	continue;
       char prefix[20], csuffix[20];
       sprintf (prefix, "FLT%d%s", floatn_nx_types[i].n,
 	       floatn_nx_types[i].extended ? "X" : "");
@@ -1294,10 +1355,12 @@ c_cpp_builtins (cpp_reader *pfile)
   if (bfloat16_type_node)
     {
       if (c_dialect_cxx () && cxx_dialect > cxx20)
-	cpp_define (pfile, "__STDCPP_BFLOAT16_T__=1");
+	cpp_define_warn (pfile, "__STDCPP_BFLOAT16_T__=1");
       builtin_define_float_constants ("BFLT16", "BF16", "%s",
 				      "BF16", bfloat16_type_node);
     }
+  else if (cxx_dialect >= cxx23)
+    cpp_warn (pfile, "__STDCPP_BFLOAT16_T__");
 
   /* For float.h.  */
   if (targetm.decimal_float_supported_p ())
@@ -1308,6 +1371,9 @@ c_cpp_builtins (cpp_reader *pfile)
 					      dfloat64_type_node);
       builtin_define_decimal_float_constants ("DEC128", "DL",
 					      dfloat128_type_node);
+      if (dfloat64x_type_node)
+	builtin_define_decimal_float_constants ("DEC64X", "D64x",
+						dfloat64x_type_node);
     }
 
   /* For fixed-point fibt, ibit, max, min, and epsilon.  */
@@ -1623,7 +1689,7 @@ c_cpp_builtins (cpp_reader *pfile)
     cpp_define (pfile, "_OPENACC=201711");
 
   if (flag_openmp)
-    cpp_define (pfile, "_OPENMP=201511");
+    cpp_define (pfile, "_OPENMP=202111");
 
   for (i = 0; i < NUM_INT_N_ENTS; i ++)
     if (int_n_enabled_p[i])
@@ -1662,6 +1728,19 @@ c_cpp_builtins (cpp_reader *pfile)
      format.  */
   if (ENABLE_DECIMAL_FLOAT && ENABLE_DECIMAL_BID_FORMAT)
     cpp_define (pfile, "__DECIMAL_BID_FORMAT__");
+}
+
+/* Given NAME, return the command-line option that would make it be
+   a builtin define, or 0 if unrecognized.  */
+
+diagnostics::option_id
+get_option_for_builtin_define (const char *name)
+{
+  if (!strcmp (name, "_OPENACC"))
+    return OPT_fopenacc;
+  if (!strcmp (name, "_OPENMP"))
+    return OPT_fopenmp;
+  return 0;
 }
 
 /* Pass an object-like macro.  If it doesn't lie in the user's
@@ -1807,7 +1886,7 @@ struct GTY(()) lazy_hex_fp_value_struct
    Each builtin_define_float_constants invocation calls
    builtin_define_with_hex_fp_value 5 times and builtin_define_float_constants
    is called for FLT, DBL, LDBL and up to NUM_FLOATN_NX_TYPES times for
-   FLTNN*.  */ 
+   FLTNN*.  */
 #define LAZY_HEX_FP_VALUES_CNT (5 * (3 + NUM_FLOATN_NX_TYPES))
 static GTY(()) struct lazy_hex_fp_value_struct
   lazy_hex_fp_values[LAZY_HEX_FP_VALUES_CNT];

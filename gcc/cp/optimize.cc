@@ -1,5 +1,5 @@
 /* Perform optimizations on tree structure.
-   Copyright (C) 1998-2024 Free Software Foundation, Inc.
+   Copyright (C) 1998-2026 Free Software Foundation, Inc.
    Written by Mark Michell (mark@codesourcery.com).
 
 This file is part of GCC.
@@ -509,7 +509,7 @@ maybe_clone_body (tree fn)
 
       clone = fns[idx];
       if (!clone)
-	continue;      
+	continue;
 
       /* Update CLONE's source position information to match FN's.  */
       DECL_SOURCE_LOCATION (clone) = DECL_SOURCE_LOCATION (fn);

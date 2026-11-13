@@ -1,14 +1,78 @@
-2025-05-23  Release Manager
+2026-08-07  Release Manager
 
-	* GCC 14.3.0 released.
+	* GCC 16.2.0 released.
 
-2024-08-01  Release Manager
+2026-04-30  Release Manager
 
-	* GCC 14.2.0 released.
+	* GCC 16.1.0 released.
 
-2024-05-07  Release Manager
+2026-01-15  Marek Polacek  <polacek@redhat.com>
+	    Jakub Jelinek  <jakub@redhat.com>
 
-	* GCC 14.1.0 released.
+	PR c++/120775
+	PR c++/123081
+	PR c++/122634
+	* libcp1plugin.cc (start_class_def): Update the call to
+	finish_base_specifier.
+
+2025-12-29  Rainer Orth  <ro@CeBiTec.Uni-Bielefeld.DE>
+
+	* configure: Regenerate.
+
+2025-12-02  Andrew Pinski  <andrew.pinski@oss.qualcomm.com>
+
+	* cc1plugin-config.h.in: Regenerate.
+
+2025-12-01  John David Anglin  <danglin@gcc.gnu.org>
+
+	* configure.ac: Check for libgen.h header.
+	* configure: Regenerate.
+
+2025-11-03  Sam James  <sam@gentoo.org>
+
+	* configure: Regenerate.
+
+2025-10-09  David Malcolm  <dmalcolm@redhat.com>
+
+	* context.cc: Define INCLUDE_VECTOR.
+
+2025-10-05  Sam James  <sam@gentoo.org>
+
+	* Makefile.in: Regenerate.
+	* aclocal.m4: Regenerate.
+
+2025-10-02  H.J. Lu  <hjl.tools@gmail.com>
+
+	* Makefile.in: Regenerated.
+	* aclocal.m4: Likewise.
+	* configure: Likewise.
+
+2025-07-25  David Malcolm  <dmalcolm@redhat.com>
+
+	* context.cc: Update usage of "diagnostic_info" to explicitly
+	refer to "diagnostics::diagnostic_info".
+
+2025-07-25  David Malcolm  <dmalcolm@redhat.com>
+
+	* context.cc: Update for move of diagnostics output formats into
+	namespace "diagnostics" as "sinks".
+
+2024-12-23  Simon Martin  <simon@nasilyan.com>
+
+	* Makefile.am: Remove reference to deleted marshall-c.h.
+	* Makefile.in: Regenerate.
+
+2024-12-20  Nathaniel Shead  <nathanieloshead@gmail.com>
+
+	* libcp1plugin.cc (plugin_add_namespace_alias): Call
+	do_namespace_alias with input_location.
+
+2024-09-20  David Malcolm  <dmalcolm@redhat.com>
+
+	PR other/116613
+	* context.cc: Include "diagnostic-format-text.h".
+	(plugin_print_error_function): Update first param from
+	diagnostic_context * to diagnostic_text_output_format &.
 
 2024-03-16  Francois-Xavier Coudert  <fxcoudert@gcc.gnu.org>
 

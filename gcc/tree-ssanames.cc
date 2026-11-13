@@ -1,5 +1,5 @@
 /* Generic routines for manipulating SSA_NAME expressions
-   Copyright (C) 2003-2024 Free Software Foundation, Inc.
+   Copyright (C) 2003-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -25,6 +25,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "gimple.h"
 #include "tree-pass.h"
 #include "ssa.h"
+#include "gimple-pretty-print.h"
 #include "gimple-iterator.h"
 #include "stor-layout.h"
 #include "tree-into-ssa.h"
@@ -405,6 +406,10 @@ make_ssa_name_fn (struct function *fn, tree var, gimple *stmt,
   SSA_NAME_IN_FREE_LIST (t) = 0;
   SSA_NAME_IS_DEFAULT_DEF (t) = 0;
   init_ssa_name_imm_use (t);
+#if defined ENABLE_GIMPLE_CHECKING
+  t->ssa_name.active_iterated_stmt = NULL;
+  t->ssa_name.fast_iteration_depth = 0;
+#endif
 
   return t;
 }
@@ -425,23 +430,36 @@ set_range_info (tree name, const vrange &r)
       struct ptr_info_def *pi = get_ptr_info (name);
       // If R is nonnull and pi is not, set nonnull.
       if (r.nonzero_p () && (!pi || pi->pt.null))
-	{
-	  set_ptr_nonnull (name);
-	  return true;
-	}
-      return false;
+	set_ptr_nonnull (name);
+      else
+	return false;
     }
-
-  Value_Range tmp (type);
-  if (range_info_p (name))
-    range_info_get_range (name, tmp);
   else
-    tmp.set_varying (type);
-  // If the result doesn't change, or is undefined, return false.
-  if (!tmp.intersect (r) || tmp.undefined_p ())
-    return false;
-
-  return range_info_set_range (name, tmp);
+    {
+      value_range tmp (type);
+      if (range_info_p (name))
+	range_info_get_range (name, tmp);
+      else
+	tmp.set_varying (type);
+      // If the result doesn't change, or is undefined, return false.
+      if (!tmp.intersect (r) || tmp.undefined_p ())
+	return false;
+      if (!range_info_set_range (name, tmp))
+	return false;
+    }
+  if (dump_file)
+    {
+      value_range tmp (type);
+      fprintf (dump_file, "Global Exported: ");
+      print_generic_expr (dump_file, name, TDF_SLIM);
+      fprintf (dump_file, " = ");
+      gimple_range_global (tmp, name);
+      tmp.dump (dump_file);
+      fputc ('\n', dump_file);
+    }
+  // Update the active query, if needed.
+  get_range_query (cfun)->update_range_info (name, r);
+  return true;
 }
 
 /* Set nonnull attribute to pointer NAME.  */
@@ -476,23 +494,37 @@ set_bitmask (tree name, const wide_int &value, const wide_int &mask)
 {
   gcc_assert (!POINTER_TYPE_P (TREE_TYPE (name)));
 
-  int_range<2> r (TREE_TYPE (name));
+  int_range_max r (TREE_TYPE (name));
   r.update_bitmask (irange_bitmask (value, mask));
   set_range_info (name, r);
 }
 
-/* Return a widest_int with potentially non-zero bits in SSA_NAME
+/* Return a wide_int with potentially non-zero bits in SSA_NAME
    NAME, the constant for INTEGER_CST, or -1 if unknown.  */
 
-wide_int
-get_nonzero_bits (const_tree name)
+static wide_int
+get_nonzero_bits_1 (const_tree name)
 {
   if (TREE_CODE (name) == INTEGER_CST)
     return wi::to_wide (name);
 
+  if (POLY_INT_CST_P (name))
+    return -known_alignment (wi::to_poly_wide (name));
+
   /* Use element_precision instead of TYPE_PRECISION so complex and
      vector types get a non-zero precision.  */
   unsigned int precision = element_precision (TREE_TYPE (name));
+
+  if (VECTOR_TYPE_P (TREE_TYPE (name)))
+    {
+      tree elem = uniform_vector_p (name);
+      if (elem)
+	return get_nonzero_bits_1 (elem);
+    }
+
+  if (TREE_CODE (name) != SSA_NAME)
+    return wi::shwi (-1, precision);
+
   if (POINTER_TYPE_P (TREE_TYPE (name)))
     {
       struct ptr_info_def *pi = SSA_NAME_PTR_INFO (name);
@@ -510,15 +542,90 @@ get_nonzero_bits (const_tree name)
   return tmp.get_nonzero_bits ();
 }
 
-/* Return TRUE is OP, an SSA_NAME has a range of values [0..1], false
-   otherwise.
+/* Return a wide_int with potentially non-zero bits in SSA_NAME
+   NAME, the constant for INTEGER_CST, or -1 if unknown.
+   In addition to what get_nonzero_bits_1 handles, this handles one
+   level of BIT_AND_EXPR, either as a def_stmt or tree directly.  */
+
+wide_int
+get_nonzero_bits (const_tree name)
+{
+  if (TREE_CODE (name) == BIT_AND_EXPR)
+    return (get_nonzero_bits_1 (TREE_OPERAND (name, 0))
+	    & get_nonzero_bits_1 (TREE_OPERAND (name, 1)));
+  if (TREE_CODE (name) == SSA_NAME)
+    {
+      gimple *g = SSA_NAME_DEF_STMT (name);
+      if (g
+	  && is_gimple_assign (g)
+	  && gimple_assign_rhs_code (g) == BIT_AND_EXPR)
+	return (get_nonzero_bits_1 (name)
+		& get_nonzero_bits_1 (gimple_assign_rhs1 (g))
+		& get_nonzero_bits_1 (gimple_assign_rhs2 (g)));
+    }
+  return get_nonzero_bits_1 (name);
+}
+
+/* Return a wide_int with known non-zero bits in SSA_NAME
+   NAME (bits whose values aren't known are also clear), the constant
+   for INTEGER_CST, or 0 if unknown.  */
+
+static wide_int
+get_known_nonzero_bits_1 (const_tree name)
+{
+  if (TREE_CODE (name) == INTEGER_CST)
+    return wi::to_wide (name);
+
+  /* Use element_precision instead of TYPE_PRECISION so complex and
+     vector types get a non-zero precision.  */
+  unsigned int precision = element_precision (TREE_TYPE (name));
+  if (TREE_CODE (name) != SSA_NAME || POINTER_TYPE_P (TREE_TYPE (name)))
+    return wi::shwi (0, precision);
+
+  if (!range_info_p (name) || !irange::supports_p (TREE_TYPE (name)))
+    return wi::shwi (0, precision);
+
+  int_range_max tmp;
+  range_info_get_range (name, tmp);
+  if (tmp.undefined_p ())
+    return wi::shwi (0, precision);
+  irange_bitmask bm = tmp.get_bitmask ();
+  return wi::bit_and_not (bm.value (), bm.mask ());
+}
+
+/* Return a wide_int with known non-zero bits in SSA_NAME
+   NAME, the constant for INTEGER_CST, or 0 if unknown.
+   In addition to what get_known_nonzero_bits_1 handles, this handles one
+   level of BIT_IOR_EXPR, either as a def_stmt or tree directly.  */
+
+wide_int
+get_known_nonzero_bits (const_tree name)
+{
+  if (TREE_CODE (name) == BIT_IOR_EXPR)
+    return (get_known_nonzero_bits_1 (TREE_OPERAND (name, 0))
+	    | get_known_nonzero_bits_1 (TREE_OPERAND (name, 1)));
+  if (TREE_CODE (name) == SSA_NAME)
+    {
+      gimple *g = SSA_NAME_DEF_STMT (name);
+      if (g
+	  && is_gimple_assign (g)
+	  && gimple_assign_rhs_code (g) == BIT_IOR_EXPR)
+	return (get_known_nonzero_bits_1 (name)
+		| get_known_nonzero_bits_1 (gimple_assign_rhs1 (g))
+		| get_known_nonzero_bits_1 (gimple_assign_rhs2 (g)));
+    }
+  return get_known_nonzero_bits_1 (name);
+}
+
+/* Return TRUE is OP, an SSA_NAME has a range of values [0..1] at the
+   STMT, false otherwise.
 
    This can be because it is a boolean type, any unsigned integral
    type with a single bit of precision, or has known range of [0..1]
    via range analysis.  */
 
 bool
-ssa_name_has_boolean_range (tree op)
+ssa_name_has_boolean_range (tree op, gimple *stmt)
 {
   gcc_assert (TREE_CODE (op) == SSA_NAME);
 
@@ -535,7 +642,7 @@ ssa_name_has_boolean_range (tree op)
       && (TYPE_PRECISION (TREE_TYPE (op)) > 1))
     {
       int_range<2> r;
-      if (get_range_query (cfun)->range_of_expr (r, op)
+      if (get_range_query (cfun)->range_of_expr (r, op, stmt)
 	  && r == range_true_and_false (TREE_TYPE (op)))
 	return true;
 
@@ -751,7 +858,7 @@ duplicate_ssa_name_range_info (tree name, tree src)
 
   if (range_info_p (src))
     {
-      Value_Range src_range (TREE_TYPE (src));
+      value_range src_range (TREE_TYPE (src));
       range_info_get_range (src, src_range);
       range_info_set_range (name, src_range);
     }

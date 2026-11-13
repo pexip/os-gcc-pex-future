@@ -1,6 +1,6 @@
 // TR1 functional_hash.h header -*- C++ -*-
 
-// Copyright (C) 2007-2024 Free Software Foundation, Inc.
+// Copyright (C) 2007-2026 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -30,7 +30,9 @@
 #ifndef _GLIBCXX_TR1_FUNCTIONAL_HASH_H
 #define _GLIBCXX_TR1_FUNCTIONAL_HASH_H 1
 
+#ifdef _GLIBCXX_SYSHDR
 #pragma GCC system_header
+#endif
 
 namespace std _GLIBCXX_VISIBILITY(default)
 {
@@ -128,7 +130,7 @@ namespace tr1
 	  return __result;
 	}
     };
-  
+
   template<>
     struct _Fnv_hash_base<8>
     {

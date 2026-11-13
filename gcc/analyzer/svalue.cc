@@ -1,5 +1,5 @@
 /* Symbolic values.
-   Copyright (C) 2019-2024 Free Software Foundation, Inc.
+   Copyright (C) 2019-2026 Free Software Foundation, Inc.
    Contributed by David Malcolm <dmalcolm@redhat.com>.
 
 This file is part of GCC.
@@ -18,37 +18,24 @@ You should have received a copy of the GNU General Public License
 along with GCC; see the file COPYING3.  If not see
 <http://www.gnu.org/licenses/>.  */
 
-#include "config.h"
-#define INCLUDE_MEMORY
-#include "system.h"
-#include "coretypes.h"
-#include "tree.h"
-#include "diagnostic-core.h"
-#include "gimple-pretty-print.h"
-#include "function.h"
-#include "basic-block.h"
-#include "gimple.h"
-#include "gimple-iterator.h"
-#include "diagnostic-core.h"
-#include "graphviz.h"
-#include "options.h"
-#include "cgraph.h"
-#include "tree-dfa.h"
-#include "stringpool.h"
-#include "convert.h"
-#include "target.h"
-#include "fold-const.h"
+#include "analyzer/common.h"
+
 #include "tree-pretty-print.h"
-#include "bitmap.h"
-#include "analyzer/analyzer.h"
+#include "gimple-pretty-print.h"
+#include "fold-const.h"
+#include "diagnostic.h"
+#include "tree-diagnostic.h"
+#include "value-relation.h"
+#include "range-op.h"
+
+#include "text-art/dump.h"
+
 #include "analyzer/analyzer-logging.h"
 #include "analyzer/call-string.h"
 #include "analyzer/program-point.h"
 #include "analyzer/store.h"
 #include "analyzer/svalue.h"
 #include "analyzer/region-model.h"
-#include "diagnostic.h"
-#include "tree-diagnostic.h"
 
 #if ENABLE_ANALYZER
 
@@ -60,18 +47,32 @@ static int cmp_csts_and_types (const_tree cst1, const_tree cst2);
 
 /* class svalue.  */
 
+/* Dump a tree-like representation of this svalue and its constituent symbols
+   to stderr, using global_dc's colorization and theming options.
+
+   For example:
+   . (gdb) call index_sval->dump()
+   . (27): ‘int’: initial_svalue
+   . ╰─ m_reg: (26): ‘int’: decl_region(‘x_10(D)’)
+   .    ╰─ parent: (9): frame_region(‘test_bitmask_2’, index: 0, depth: 1)
+   .       ╰─ parent: (1): stack region
+   .          ╰─ parent: (0): root region
+  */
+
+DEBUG_FUNCTION void
+svalue::dump () const
+{
+  text_art::dump (*this);
+}
+
 /* Dump a representation of this svalue to stderr.  */
 
 DEBUG_FUNCTION void
 svalue::dump (bool simple) const
 {
-  pretty_printer pp;
-  pp_format_decoder (&pp) = default_tree_printer;
-  pp_show_color (&pp) = pp_show_color (global_dc->printer);
-  pp.buffer->stream = stderr;
+  tree_dump_pretty_printer pp (stderr);
   dump_to_pp (&pp, simple);
   pp_newline (&pp);
-  pp_flush (&pp);
 }
 
 /* Generate a textual representation of this svalue for debugging purposes.  */
@@ -87,11 +88,11 @@ svalue::get_desc (bool simple) const
 
 /* Return a new json::string describing the svalue.  */
 
-json::value *
+std::unique_ptr<json::value>
 svalue::to_json () const
 {
   label_text desc = get_desc (true);
-  json::value *sval_js = new json::string (desc.get ());
+  auto sval_js = std::make_unique<json::string> (desc.get ());
   return sval_js;
 }
 
@@ -203,6 +204,37 @@ svalue::maybe_print_for_user (pretty_printer *pp,
   return false;
 }
 
+/* Use DWI to create a text_art::widget describing this svalue in
+   a tree-like form, using PREFIX as a prefix (e.g. for field names).
+   We do this via two vfuncs:
+   (a) print_dump_widget_label, to populate the text of a tree_widget, and
+   (b) add_dump_widget_children, to add children to the tree_widget.  */
+
+std::unique_ptr<text_art::tree_widget>
+svalue::make_dump_widget (const text_art::dump_widget_info &dwi,
+			  const char *prefix) const
+{
+  pretty_printer pp;
+  pp_format_decoder (&pp) = default_tree_printer;
+  pp_show_color (&pp) = true;
+
+  if (prefix)
+    pp_printf (&pp, "%s: ", prefix);
+
+  pp_printf (&pp, "(%i): ", get_id ());
+  if (get_type ())
+    pp_printf (&pp, "%qT: ", get_type ());
+
+  print_dump_widget_label (&pp);
+
+  std::unique_ptr<text_art::tree_widget> w
+    (text_art::tree_widget::make (dwi, &pp));
+
+  add_dump_widget_children (*w, dwi);
+
+  return w;
+}
+
 /* If this svalue is a constant_svalue, return the underlying tree constant.
    Otherwise return NULL_TREE.  */
 
@@ -217,7 +249,7 @@ svalue::maybe_get_constant () const
 }
 
 /* If this svalue is a region_svalue, return the region it points to.
-   Otherwise return NULL.  */
+   Otherwise return nullptr.  */
 
 const region *
 svalue::maybe_get_region () const
@@ -225,12 +257,12 @@ svalue::maybe_get_region () const
   if (const region_svalue *region_sval = dyn_cast_region_svalue ())
     return region_sval->get_pointee ();
   else
-    return NULL;
+    return nullptr;
 }
 
 /* If this svalue is a cast (i.e a unaryop NOP_EXPR or VIEW_CONVERT_EXPR),
    return the underlying svalue.
-   Otherwise return NULL.  */
+   Otherwise return nullptr.  */
 
 const svalue *
 svalue::maybe_undo_cast () const
@@ -241,7 +273,7 @@ svalue::maybe_undo_cast () const
       if (op == NOP_EXPR || op == VIEW_CONVERT_EXPR)
 	return unaryop_sval->get_arg ();
     }
-  return NULL;
+  return nullptr;
 }
 
 /* If this svalue is an unmergeable decorator around another svalue, return
@@ -257,7 +289,7 @@ svalue::unwrap_any_unmergeable () const
 }
 
 /* Attempt to merge THIS with OTHER, returning the merged svalue.
-   Return NULL if not mergeable.  */
+   Return nullptr if not mergeable.  */
 
 const svalue *
 svalue::can_merge_p (const svalue *other,
@@ -265,22 +297,22 @@ svalue::can_merge_p (const svalue *other,
 		     model_merger *merger) const
 {
   if (!(get_type () && other->get_type ()))
-    return NULL;
+    return nullptr;
 
   if (!types_compatible_p (get_type (), other->get_type ()))
-    return NULL;
+    return nullptr;
 
   /* Reject attempts to merge unmergeable svalues.  */
   if ((get_kind () == SK_UNMERGEABLE)
       || (other->get_kind () == SK_UNMERGEABLE))
-    return NULL;
+    return nullptr;
 
   /* Reject attempts to merge poisoned svalues with other svalues
      (either non-poisoned, or other kinds of poison), so that e.g.
      we identify paths in which a variable is conditionally uninitialized.  */
   if (get_kind () == SK_POISONED
       || other->get_kind () == SK_POISONED)
-    return NULL;
+    return nullptr;
 
   /* Reject attempts to merge NULL pointers with not-NULL-pointers.  */
   if (POINTER_TYPE_P (get_type ()))
@@ -294,25 +326,32 @@ svalue::can_merge_p (const svalue *other,
 	if (zerop (cst1))
 	  null1 = true;
       if (null0 != null1)
-	return NULL;
+	return nullptr;
     }
 
   /* Reject merging svalues that have non-purgable sm-state,
      to avoid falsely reporting memory leaks by merging them
      with something else.  */
   if (!merger->mergeable_svalue_p (this))
-    return NULL;
+    return nullptr;
   if (!merger->mergeable_svalue_p (other))
-    return NULL;
+    return nullptr;
+
+  /* Reject attempts to merge pointers that point to different base regions,
+     except for the case where both are string literals.  */
+  if (auto this_region = maybe_get_region ())
+    if (auto other_region = other->maybe_get_region ())
+      if (this_region != other_region
+	  && (this_region->get_kind () != RK_STRING
+	      || other_region->get_kind () != RK_STRING))
+	return nullptr;
 
   /* Widening.  */
   /* Merge: (new_cst, existing_cst) -> widen (existing, new).  */
   if (maybe_get_constant () && other->maybe_get_constant ())
-    {
-      return mgr->get_or_create_widening_svalue (other->get_type (),
-						 merger->get_function_point (),
-						 other, this);
-    }
+    return mgr->get_or_create_widening_svalue (other->get_type (),
+					       merger->get_supernode (),
+					       other, this);
 
   /* Merger of:
 	 this: BINOP (X, OP, CST)
@@ -323,7 +362,7 @@ svalue::can_merge_p (const svalue *other,
 	&& binop_sval->get_arg1 ()->get_kind () == SK_CONSTANT
 	&& other->get_kind () != SK_WIDENING)
       return mgr->get_or_create_widening_svalue (other->get_type (),
-						 merger->get_function_point (),
+						 merger->get_supernode (),
 						 other, this);
 
   /* Merge: (Widen(existing_val, V), existing_val) -> Widen (existing_val, V)
@@ -380,7 +419,7 @@ svalue::can_merge_p (const svalue *other,
 
 /* Determine if this svalue is either within LIVE_SVALUES, or is implicitly
    live with respect to LIVE_SVALUES and MODEL.
-   LIVE_SVALUES can be NULL, in which case determine if this svalue is
+   LIVE_SVALUES can be nullptr, in which case determine if this svalue is
    intrinsically live.  */
 
 bool
@@ -420,8 +459,21 @@ cmp_csts_same_type (const_tree cst1, const_tree cst2)
     case INTEGER_CST:
       return tree_int_cst_compare (cst1, cst2);
     case STRING_CST:
-      return strcmp (TREE_STRING_POINTER (cst1),
-		     TREE_STRING_POINTER (cst2));
+      if (TREE_STRING_LENGTH (cst1) < TREE_STRING_LENGTH (cst2))
+	return -1;
+      if (TREE_STRING_LENGTH (cst1) > TREE_STRING_LENGTH (cst2))
+	return 1;
+      return memcmp (TREE_STRING_POINTER (cst1),
+		     TREE_STRING_POINTER (cst2),
+		     TREE_STRING_LENGTH (cst1));
+    case RAW_DATA_CST:
+      if (RAW_DATA_LENGTH (cst1) < RAW_DATA_LENGTH (cst2))
+	return -1;
+      if (RAW_DATA_LENGTH (cst1) > RAW_DATA_LENGTH (cst2))
+	return 1;
+      return memcmp (RAW_DATA_POINTER (cst1),
+		     RAW_DATA_POINTER (cst2),
+		     RAW_DATA_LENGTH (cst1));
     case REAL_CST:
       /* Impose an arbitrary but deterministic order.  */
       return memcmp (TREE_REAL_CST_PTR (cst1),
@@ -512,8 +564,8 @@ svalue::cmp_ptr (const svalue *sval1, const svalue *sval2)
       {
 	const poisoned_svalue *poisoned_sval1 = (const poisoned_svalue *)sval1;
 	const poisoned_svalue *poisoned_sval2 = (const poisoned_svalue *)sval2;
-	return (poisoned_sval1->get_poison_kind ()
-		- poisoned_sval2->get_poison_kind ());
+	return (static_cast<int> (poisoned_sval1->get_poison_kind ())
+		- static_cast<int> (poisoned_sval2->get_poison_kind ()));
       }
       break;
     case SK_SETJMP:
@@ -612,9 +664,9 @@ svalue::cmp_ptr (const svalue *sval1, const svalue *sval2)
       {
 	const widening_svalue *widening_sval1 = (const widening_svalue *)sval1;
 	const widening_svalue *widening_sval2 = (const widening_svalue *)sval2;
-	if (int point_cmp = function_point::cmp (widening_sval1->get_point (),
-						 widening_sval2->get_point ()))
-	  return point_cmp;
+	if (int index_cmp = (widening_sval1->get_snode ()->m_id
+			     - widening_sval2->get_snode ()->m_id))
+	  return index_cmp;
 	if (int base_cmp = svalue::cmp_ptr (widening_sval1->get_base_svalue (),
 					    widening_sval2->get_base_svalue ()))
 	  return base_cmp;
@@ -763,7 +815,7 @@ svalue::maybe_fold_bits_within (tree,
 				region_model_manager *) const
 {
   /* By default, don't fold.  */
-  return NULL;
+  return nullptr;
 }
 
 /* Base implementation of svalue::all_zeroes_p.
@@ -776,7 +828,7 @@ svalue::all_zeroes_p () const
 }
 
 /* If this svalue is a pointer, attempt to determine the base region it points
-   to.  Return NULL on any problems.  */
+   to.  Return nullptr on any problems.  */
 
 const region *
 svalue::maybe_get_deref_base_region () const
@@ -787,7 +839,7 @@ svalue::maybe_get_deref_base_region () const
       switch (iter->get_kind ())
 	{
 	default:
-	  return NULL;
+	  return nullptr;
 
 	case SK_REGION:
 	  {
@@ -809,12 +861,53 @@ svalue::maybe_get_deref_base_region () const
 		continue;
 
 	      default:
-		return NULL;
+		return nullptr;
 	      }
-	    return NULL;
+	    return nullptr;
 	  }
 	}
     }
+}
+
+/* If this svalue is a pointer to the typeinfo instance for a particular
+   type, return that type.  Otherwise return NULL_TREE.  */
+
+tree
+svalue::maybe_get_type_from_typeinfo () const
+{
+  if (const region *reg = maybe_get_region ())
+    if (const decl_region *decl_reg = reg->dyn_cast_decl_region ())
+      return TREE_TYPE (DECL_NAME (decl_reg->get_decl ()));
+
+  return NULL_TREE;
+}
+
+/* Return true if we can get a value_range for TYPE (which could be
+   NULL_TREE); false otherwise.  */
+
+static bool
+type_can_have_value_range_p (tree type)
+{
+  if (!type)
+    return false;
+  if (!irange::supports_p (type))
+    return false;
+  return true;
+}
+
+/* Base implementation of svalue::maybe_get_value_range_1 vfunc.
+   If there is a suitable underlying type, write a "varying" for it to OUT
+   (for "any value of that type") and return true; otherwise return false.  */
+
+bool
+svalue::maybe_get_value_range_1 (value_range &out) const
+{
+  tree type = get_type ();
+  if (!type_can_have_value_range_p (type))
+    return false;
+
+  out.set_varying (type);
+  return true;
 }
 
 /* class region_svalue : public svalue.  */
@@ -840,6 +933,26 @@ region_svalue::dump_to_pp (pretty_printer *pp, bool simple) const
       m_reg->dump_to_pp (pp, simple);
       pp_string (pp, ")");
     }
+}
+
+/* Implementation of svalue::print_dump_widget_label vfunc for
+   region_svalue.  */
+
+void
+region_svalue::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "region_svalue: %qs", "&");
+}
+
+/* Implementation of svalue::add_dump_widget_children vfunc for
+   region_svalue.  */
+
+void
+region_svalue::
+add_dump_widget_children (text_art::tree_widget &w,
+			  const text_art::dump_widget_info &dwi) const
+{
+  w.add_child (m_reg->make_dump_widget (dwi));
 }
 
 /* Implementation of svalue::accept vfunc for region_svalue.  */
@@ -940,6 +1053,26 @@ constant_svalue::dump_to_pp (pretty_printer *pp, bool simple) const
       dump_tree (pp, m_cst_expr);
       pp_string (pp, ")");
     }
+}
+
+/* Implementation of svalue::print_dump_widget_label vfunc for
+   constant_svalue.  */
+
+void
+constant_svalue::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "constant_svalue (%qE)", m_cst_expr);
+}
+
+/* Implementation of svalue::add_dump_widget_children vfunc for
+   constant_svalue.  */
+
+void
+constant_svalue::
+add_dump_widget_children (text_art::tree_widget &,
+			  const text_art::dump_widget_info &) const
+{
+  /* No children.  */
 }
 
 /* Implementation of svalue::accept vfunc for constant_svalue.  */
@@ -1051,7 +1184,7 @@ constant_svalue::maybe_fold_bits_within (tree type,
     }
 
   /* Otherwise, don't fold.  */
-  return NULL;
+  return nullptr;
 }
 
 /* Implementation of svalue::all_zeroes_p for constant_svalue.  */
@@ -1060,6 +1193,22 @@ bool
 constant_svalue::all_zeroes_p () const
 {
   return zerop (m_cst_expr);
+}
+
+
+/* Implementation of svalue::maybe_get_value_range_1 for constant_svalue.
+   If there is a suitable underlying type, write the value_range for the
+   single value of m_cst_expr to OUT and return true; otherwise return
+   false.  */
+
+bool
+constant_svalue::maybe_get_value_range_1 (value_range &out) const
+{
+  if (!type_can_have_value_range_p (get_type ()))
+    return false;
+
+  out = value_range (m_cst_expr, m_cst_expr);
+  return true;
 }
 
 /* class unknown_svalue : public svalue.  */
@@ -1085,6 +1234,26 @@ unknown_svalue::dump_to_pp (pretty_printer *pp, bool simple) const
     }
 }
 
+/* Implementation of svalue::print_dump_widget_label vfunc for
+   unknown_svalue.  */
+
+void
+unknown_svalue::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "unknown_svalue");
+}
+
+/* Implementation of svalue::add_dump_widget_children vfunc for
+   unknown_svalue.  */
+
+void
+unknown_svalue::
+add_dump_widget_children (text_art::tree_widget &,
+			  const text_art::dump_widget_info &) const
+{
+  /* No children.  */
+}
+
 /* Implementation of svalue::accept vfunc for unknown_svalue.  */
 
 void
@@ -1105,6 +1274,14 @@ unknown_svalue::maybe_fold_bits_within (tree type,
   return mgr->get_or_create_unknown_svalue (type);
 }
 
+bool
+unknown_svalue::maybe_get_value_range_1 (value_range &) const
+{
+  /* Don't attempt to participate in range ops.  */
+  return false;
+}
+
+
 /* Get a string for KIND for use in debug dumps.  */
 
 const char *
@@ -1114,13 +1291,13 @@ poison_kind_to_str (enum poison_kind kind)
     {
     default:
       gcc_unreachable ();
-    case POISON_KIND_UNINIT:
+    case poison_kind::uninit:
       return "uninit";
-    case POISON_KIND_FREED:
+    case poison_kind::freed:
       return "freed";
-    case POISON_KIND_DELETED:
+    case poison_kind::deleted:
       return "deleted";
-    case POISON_KIND_POPPED_STACK:
+    case poison_kind::popped_stack:
       return "popped stack";
     }
 }
@@ -1144,6 +1321,26 @@ poisoned_svalue::dump_to_pp (pretty_printer *pp, bool simple) const
       print_quoted_type (pp, get_type ());
       pp_printf (pp, ", %s)", poison_kind_to_str (m_kind));
     }
+}
+
+/* Implementation of svalue::print_dump_widget_label vfunc for
+   poisoned_svalue.  */
+
+void
+poisoned_svalue::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "poisoned_svalue(%s)", poison_kind_to_str (m_kind));
+}
+
+/* Implementation of svalue::add_dump_widget_children vfunc for
+   poisoned_svalue.  */
+
+void
+poisoned_svalue::
+add_dump_widget_children (text_art::tree_widget &,
+			  const text_art::dump_widget_info &) const
+{
+  /* No children.  */
 }
 
 /* Implementation of svalue::accept vfunc for poisoned_svalue.  */
@@ -1195,6 +1392,26 @@ initial_svalue::dump_to_pp (pretty_printer *pp, bool simple) const
     }
 }
 
+/* Implementation of svalue::print_dump_widget_label vfunc for
+   initial_svalue.  */
+
+void
+initial_svalue::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "initial_svalue");
+}
+
+/* Implementation of svalue::add_dump_widget_children vfunc for
+   initial_svalue.  */
+
+void
+initial_svalue::
+add_dump_widget_children (text_art::tree_widget &w,
+			  const text_art::dump_widget_info &dwi) const
+{
+  w.add_child (m_reg->make_dump_widget (dwi, "m_reg"));
+}
+
 /* Implementation of svalue::accept vfunc for initial_svalue.  */
 
 void
@@ -1218,7 +1435,7 @@ initial_svalue::implicitly_live_p (const svalue_set *,
      a popped stack frame.  */
   if (model->region_exists_p (m_reg))
     {
-      const svalue *reg_sval = model->get_store_value (m_reg, NULL);
+      const svalue *reg_sval = model->get_store_value (m_reg, nullptr);
       if (reg_sval == this)
 	return true;
     }
@@ -1228,7 +1445,7 @@ initial_svalue::implicitly_live_p (const svalue_set *,
      live in the external caller.  */
   if (initial_value_of_param_p ())
     if (const frame_region *frame_reg = m_reg->maybe_get_frame_region ())
-      if (frame_reg->get_calling_frame () == NULL)
+      if (frame_reg->get_calling_frame () == nullptr)
 	return true;
 
   return false;
@@ -1287,6 +1504,28 @@ unaryop_svalue::dump_to_pp (pretty_printer *pp, bool simple) const
     }
 }
 
+/* Implementation of svalue::print_dump_widget_label vfunc for
+   unaryop_svalue.  */
+
+void
+unaryop_svalue::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp,
+	     "unaryop_svalue(%s)",
+	     get_tree_code_name (m_op));
+}
+
+/* Implementation of svalue::add_dump_widget_children vfunc for
+   unaryop_svalue.  */
+
+void
+unaryop_svalue::
+add_dump_widget_children (text_art::tree_widget &w,
+			  const text_art::dump_widget_info &dwi) const
+{
+  w.add_child (m_arg->make_dump_widget (dwi));
+}
+
 /* Implementation of svalue::accept vfunc for unaryop_svalue.  */
 
 void
@@ -1330,7 +1569,35 @@ unaryop_svalue::maybe_fold_bits_within (tree type,
       break;
     }
   /* Otherwise, don't fold.  */
-  return NULL;
+  return nullptr;
+}
+
+/* Implementation of svalue::maybe_get_value_range_1 for unaryop_svalue.  */
+
+bool
+unaryop_svalue::maybe_get_value_range_1 (value_range &out) const
+{
+  tree type = get_type ();
+  if (!type_can_have_value_range_p (type))
+    return false;
+
+  value_range arg_vr;
+  if (m_arg->maybe_get_value_range (arg_vr))
+    {
+      range_op_handler handler (m_op);
+      if (handler
+	  && handler.operand_check_p (type, arg_vr.type (), type))
+	{
+	  /* For unary ops, range_op_hander::fold_range expects
+	     a VARYING of the unknown value as the 2nd operand.  */
+	  value_range varying (type);
+	  varying.set_varying (type);
+	  out.set_type (type);
+	  if (handler.fold_range (out, type, arg_vr, varying))
+	    return true;
+	}
+    }
+  return false;
 }
 
 /* class binop_svalue : public svalue.  */
@@ -1389,6 +1656,30 @@ binop_svalue::dump_to_pp (pretty_printer *pp, bool simple) const
     }
 }
 
+/* Implementation of svalue::print_dump_widget_label vfunc for
+   binop_svalue.  */
+
+void
+binop_svalue::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp,
+	     "binop_svalue(%s: %qs)",
+	     get_tree_code_name (m_op),
+	     op_symbol_code (m_op));
+}
+
+/* Implementation of svalue::add_dump_widget_children vfunc for
+   binop_svalue.  */
+
+void
+binop_svalue::
+add_dump_widget_children (text_art::tree_widget &w,
+			  const text_art::dump_widget_info &dwi) const
+{
+  w.add_child (m_arg0->make_dump_widget (dwi));
+  w.add_child (m_arg1->make_dump_widget (dwi));
+}
+
 /* Implementation of svalue::accept vfunc for binop_svalue.  */
 
 void
@@ -1425,6 +1716,38 @@ sub_svalue::sub_svalue (symbol::id_t id,
   gcc_assert (parent_svalue->can_have_associated_state_p ());
 }
 
+/* Implementation of svalue::maybe_get_value_range_1 for binop_svalue.  */
+
+bool
+binop_svalue::maybe_get_value_range_1 (value_range &out) const
+{
+  tree type = get_type ();
+  if (!type_can_have_value_range_p (type))
+    return false;
+
+  /* Avoid cases where we have been sloppy about types.  */
+  if (!m_arg0->get_type ())
+    return false;
+  if (!m_arg1->get_type ())
+    return false;
+  if (!range_compatible_p (m_arg0->get_type (), m_arg1->get_type ()))
+    return false;
+
+  value_range lhs, rhs;
+  if (m_arg0->maybe_get_value_range (lhs))
+    if (m_arg1->maybe_get_value_range (rhs))
+      {
+	range_op_handler handler (m_op);
+	if (handler)
+	  {
+	    out.set_type (type);
+	    if (handler.fold_range (out, get_type (), lhs, rhs))
+	      return true;
+	  }
+      }
+  return false;
+}
+
 /* Implementation of svalue::dump_to_pp vfunc for sub_svalue.  */
 
 void
@@ -1447,6 +1770,27 @@ sub_svalue::dump_to_pp (pretty_printer *pp, bool simple) const
       m_subregion->dump_to_pp (pp, simple);
       pp_character (pp, ')');
     }
+}
+
+/* Implementation of svalue::print_dump_widget_label vfunc for
+   sub_svalue.  */
+
+void
+sub_svalue::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "sub_svalue");
+}
+
+/* Implementation of svalue::add_dump_widget_children vfunc for
+   sub_svalue.  */
+
+void
+sub_svalue::
+add_dump_widget_children (text_art::tree_widget &w,
+			  const text_art::dump_widget_info &dwi) const
+{
+  w.add_child (m_parent_svalue->make_dump_widget (dwi, "m_parent_svalue"));
+  w.add_child (m_subregion->make_dump_widget (dwi, "m_subregion"));
 }
 
 /* Implementation of svalue::accept vfunc for sub_svalue.  */
@@ -1517,6 +1861,27 @@ repeated_svalue::dump_to_pp (pretty_printer *pp, bool simple) const
       m_inner_svalue->dump_to_pp (pp, simple);
       pp_character (pp, ')');
     }
+}
+
+/* Implementation of svalue::print_dump_widget_label vfunc for
+   repeated_svalue.  */
+
+void
+repeated_svalue::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "repeated_svalue");
+}
+
+/* Implementation of svalue::add_dump_widget_children vfunc for
+   repeated_svalue.  */
+
+void
+repeated_svalue::
+add_dump_widget_children (text_art::tree_widget &w,
+			  const text_art::dump_widget_info &dwi) const
+{
+  w.add_child (m_outer_size->make_dump_widget (dwi, "m_outer_size"));
+  w.add_child (m_inner_svalue->make_dump_widget (dwi, "m_inner_svalue"));
 }
 
 /* Implementation of svalue::accept vfunc for repeated_svalue.  */
@@ -1593,7 +1958,7 @@ repeated_svalue::maybe_fold_bits_within (tree type,
 	}
     }
 
-  return NULL;
+  return nullptr;
 }
 
 /* class bits_within_svalue : public svalue.  */
@@ -1644,6 +2009,27 @@ bits_within_svalue::dump_to_pp (pretty_printer *pp, bool simple) const
     }
 }
 
+/* Implementation of svalue::print_dump_widget_label vfunc for
+   bits_within_svalue.  */
+
+void
+bits_within_svalue::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "bits_within_svalue: ");
+  m_bits.dump_to_pp (pp);
+}
+
+/* Implementation of svalue::add_dump_widget_children vfunc for
+   bits_within_svalue.  */
+
+void
+bits_within_svalue::
+add_dump_widget_children (text_art::tree_widget &w,
+			  const text_art::dump_widget_info &dwi) const
+{
+  w.add_child (m_inner_svalue->make_dump_widget (dwi, "m_inner_svalue"));
+}
+
 /* Implementation of svalue::maybe_fold_bits_within vfunc
    for bits_within_svalue.  */
 
@@ -1691,7 +2077,7 @@ widening_svalue::dump_to_pp (pretty_printer *pp, bool simple) const
     {
       pp_string (pp, "WIDENING(");
       pp_character (pp, '{');
-      m_point.print (pp, format (false));
+      m_snode->print (pp);
       pp_string (pp, "}, ");
       m_base_sval->dump_to_pp (pp, simple);
       pp_string (pp, ", ");
@@ -1703,13 +2089,35 @@ widening_svalue::dump_to_pp (pretty_printer *pp, bool simple) const
       pp_string (pp, "widening_svalue (");
       pp_string (pp, ", ");
       pp_character (pp, '{');
-      m_point.print (pp, format (false));
+      m_snode->print (pp);
       pp_string (pp, "}, ");
       m_base_sval->dump_to_pp (pp, simple);
       pp_string (pp, ", ");
       m_iter_sval->dump_to_pp (pp, simple);
       pp_character (pp, ')');
     }
+}
+
+/* Implementation of svalue::print_dump_widget_label vfunc for
+   widening_svalue.  */
+
+void
+widening_svalue::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "widening_svalue at ");
+  m_snode->print (pp);
+}
+
+/* Implementation of svalue::add_dump_widget_children vfunc for
+   widening_svalue.  */
+
+void
+widening_svalue::
+add_dump_widget_children (text_art::tree_widget &w,
+			  const text_art::dump_widget_info &dwi) const
+{
+  w.add_child (m_base_sval->make_dump_widget (dwi, "m_base_sval"));
+  w.add_child (m_iter_sval->make_dump_widget (dwi, "m_iter_sval"));
 }
 
 /* Implementation of svalue::accept vfunc for widening_svalue.  */
@@ -1850,6 +2258,26 @@ placeholder_svalue::dump_to_pp (pretty_printer *pp, bool simple) const
     pp_printf (pp, "placeholder_svalue (%qs)", m_name);
 }
 
+/* Implementation of svalue::print_dump_widget_label vfunc for
+   placeholder_svalue.  */
+
+void
+placeholder_svalue::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "placeholder_svalue: %qs", m_name);
+}
+
+/* Implementation of svalue::add_dump_widget_children vfunc for
+   placeholder_svalue.  */
+
+void
+placeholder_svalue::
+add_dump_widget_children (text_art::tree_widget &,
+			  const text_art::dump_widget_info &) const
+{
+  /* No children.  */
+}
+
 /* Implementation of svalue::accept vfunc for placeholder_svalue.  */
 
 void
@@ -1879,6 +2307,26 @@ unmergeable_svalue::dump_to_pp (pretty_printer *pp, bool simple) const
     }
 }
 
+/* Implementation of svalue::print_dump_widget_label vfunc for
+   unmergeable_svalue.  */
+
+void
+unmergeable_svalue::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "unmergeable_svalue");
+}
+
+/* Implementation of svalue::add_dump_widget_children vfunc for
+   unmergeable_svalue.  */
+
+void
+unmergeable_svalue::
+add_dump_widget_children (text_art::tree_widget &w,
+			  const text_art::dump_widget_info &dwi) const
+{
+  w.add_child (m_arg->make_dump_widget (dwi));
+}
+
 /* Implementation of svalue::accept vfunc for unmergeable_svalue.  */
 
 void
@@ -1905,15 +2353,15 @@ compound_svalue::compound_svalue (symbol::id_t id,
 : svalue (calc_complexity (map), id, type), m_map (map)
 {
 #if CHECKING_P
-  for (iterator_t iter = begin (); iter != end (); ++iter)
+  for (auto iter : *this)
     {
       /* All keys within the underlying binding_map are required to be concrete,
 	 not symbolic.  */
-      const binding_key *key = (*iter).first;
+      const binding_key *key = iter.m_key;
       gcc_assert (key->concrete_p ());
 
       /* We don't nest compound svalues.  */
-      const svalue *sval = (*iter).second;
+      const svalue *sval = iter.m_sval;
       gcc_assert (sval->get_kind () != SK_COMPOUND);
     }
 #endif
@@ -1950,16 +2398,35 @@ compound_svalue::dump_to_pp (pretty_printer *pp, bool simple) const
     }
 }
 
+/* Implementation of svalue::print_dump_widget_label vfunc for
+   compound_svalue.  */
+
+void
+compound_svalue::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "compound_svalue");
+}
+
+/* Implementation of svalue::add_dump_widget_children vfunc for
+   compound_svalue.  */
+
+void
+compound_svalue::
+add_dump_widget_children (text_art::tree_widget &w,
+			  const text_art::dump_widget_info &dwi) const
+{
+  m_map.add_to_tree_widget (w, dwi);
+}
+
 /* Implementation of svalue::accept vfunc for compound_svalue.  */
 
 void
 compound_svalue::accept (visitor *v) const
 {
-  for (binding_map::iterator_t iter = m_map.begin ();
-       iter != m_map.end (); ++iter)
+  for (auto iter : m_map)
     {
-      //(*iter).first.accept (v);
-      (*iter).second->accept (v);
+      //iter.first.accept (v);
+      iter.m_sval->accept (v);
     }
   v->visit_compound_svalue (this);
 }
@@ -1972,10 +2439,9 @@ compound_svalue::calc_complexity (const binding_map &map)
 {
   unsigned num_child_nodes = 0;
   unsigned max_child_depth = 0;
-  for (binding_map::iterator_t iter = map.begin ();
-       iter != map.end (); ++iter)
+  for (auto iter : map)
     {
-      const complexity &sval_c = (*iter).second->get_complexity ();
+      const complexity &sval_c = iter.m_sval->get_complexity ();
       num_child_nodes += sval_c.m_num_nodes;
       max_child_depth = MAX (max_child_depth, sval_c.m_max_depth);
     }
@@ -1990,10 +2456,10 @@ compound_svalue::maybe_fold_bits_within (tree type,
 					 const bit_range &bits,
 					 region_model_manager *mgr) const
 {
-  binding_map result_map;
+  binding_map result_map (*mgr->get_store_manager ());
   for (auto iter : m_map)
     {
-      const binding_key *key = iter.first;
+      const binding_key *key = iter.m_key;
       if (const concrete_binding *conc_key
 	  = key->dyn_cast_concrete_binding ())
 	{
@@ -2001,7 +2467,7 @@ compound_svalue::maybe_fold_bits_within (tree type,
 	  if (!conc_key->get_bit_range ().intersects_p (bits))
 	    continue;
 
-	  const svalue *sval = iter.second;
+	  const svalue *sval = iter.m_sval;
 	  /* Get the position of conc_key relative to BITS.  */
 	  bit_range result_location (conc_key->get_start_bit_offset ()
 				     - bits.get_start_bit_offset (),
@@ -2046,7 +2512,7 @@ compound_svalue::maybe_fold_bits_within (tree type,
 	}
       else
 	/* If we have any symbolic keys we can't get it as bits.  */
-	return NULL;
+	return nullptr;
     }
   return mgr->get_or_create_compound_svalue (type, result_map);
 }
@@ -2079,6 +2545,30 @@ conjured_svalue::dump_to_pp (pretty_printer *pp, bool simple) const
       m_id_reg->dump_to_pp (pp, simple);
       pp_character (pp, ')');
     }
+}
+
+/* Implementation of svalue::print_dump_widget_label vfunc for
+   conjured_svalue.  */
+
+void
+conjured_svalue::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "conjured_svalue (");
+  pp_gimple_stmt_1 (pp, m_stmt, 0, (dump_flags_t)0);
+  if (m_idx != 0)
+    pp_printf (pp, ", %i", m_idx);
+  pp_character (pp, ')');
+}
+
+/* Implementation of svalue::add_dump_widget_children vfunc for
+   conjured_svalue.  */
+
+void
+conjured_svalue::
+add_dump_widget_children (text_art::tree_widget &w,
+			  const text_art::dump_widget_info &dwi) const
+{
+  w.add_child (m_id_reg->make_dump_widget (dwi));
 }
 
 /* Implementation of svalue::accept vfunc for conjured_svalue.  */
@@ -2133,6 +2623,34 @@ asm_output_svalue::dump_to_pp (pretty_printer *pp, bool simple) const
 	  dump_input (pp, 0, m_input_arr[i], simple);
 	}
       pp_string (pp, "})");
+    }
+}
+
+/* Implementation of svalue::print_dump_widget_label vfunc for
+   asm_output_svalue.  */
+
+void
+asm_output_svalue::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "asm_output_svalue(%qs, %%%i)",
+	     get_asm_string (),
+	     get_output_idx ());
+}
+
+/* Implementation of svalue::add_dump_widget_children vfunc for
+   asm_output_svalue.  */
+
+void
+asm_output_svalue::
+add_dump_widget_children (text_art::tree_widget &w,
+			  const text_art::dump_widget_info &dwi) const
+{
+  for (unsigned i = 0; i < m_num_inputs; i++)
+    {
+      pretty_printer pp;
+      pp_printf (&pp, "arg %i", i);
+      w.add_child (m_input_arr[i]->make_dump_widget (dwi,
+						     pp_formatted_text (&pp)));
     }
 }
 
@@ -2195,6 +2713,32 @@ const_fn_result_svalue::dump_to_pp (pretty_printer *pp, bool simple) const
 	  dump_input (pp, i, m_input_arr[i], simple);
 	}
       pp_string (pp, "})");
+    }
+}
+
+/* Implementation of svalue::print_dump_widget_label vfunc for
+   const_fn_result_svalue.  */
+
+void
+const_fn_result_svalue::print_dump_widget_label (pretty_printer *pp) const
+{
+  pp_printf (pp, "const_fn_result_svalue: %qD", m_fndecl);
+}
+
+/* Implementation of svalue::add_dump_widget_children vfunc for
+   const_fn_result_svalue.  */
+
+void
+const_fn_result_svalue::
+add_dump_widget_children (text_art::tree_widget &w,
+			  const text_art::dump_widget_info &dwi) const
+{
+  for (unsigned i = 0; i < m_num_inputs; i++)
+    {
+      pretty_printer pp;
+      pp_printf (&pp, "arg %i", i);
+      w.add_child (m_input_arr[i]->make_dump_widget (dwi,
+						     pp_formatted_text (&pp)));
     }
 }
 

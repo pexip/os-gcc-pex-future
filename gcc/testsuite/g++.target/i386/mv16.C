@@ -124,6 +124,14 @@ int __attribute__ ((target("arch=pantherlake"))) foo () {
   return 32;
 }
 
+int __attribute__ ((target("arch=diamondrapids"))) foo () {
+  return 33;
+}
+
+int __attribute__ ((target("arch=novalake"))) foo () {
+  return 34;
+}
+
 int main ()
 {
   int val = foo ();
@@ -178,6 +186,10 @@ int main ()
     assert (val == 31);
   else if (__builtin_cpu_is ("pantherlake"))
     assert (val == 32);
+  else if (__builtin_cpu_is ("diamondrapids"))
+    assert (val == 33);
+  else if (__builtin_cpu_is ("novalake"))
+    assert (val == 34);
   else
     assert (val == 0);
 

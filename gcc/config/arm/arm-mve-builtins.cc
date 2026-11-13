@@ -1,5 +1,5 @@
 /* ACLE support for Arm MVE
-   Copyright (C) 2021-2024 Free Software Foundation, Inc.
+   Copyright (C) 2021-2026 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -38,6 +38,7 @@
 #include "gimple-iterator.h"
 #include "explow.h"
 #include "emit-rtl.h"
+#include "stor-layout.h"
 #include "langhooks.h"
 #include "stringpool.h"
 #include "attribs.h"
@@ -149,8 +150,10 @@ CONSTEXPR const type_suffix_info type_suffixes[NUM_TYPE_SUFFIXES + 1] = {
    class ("b", "f", etc.) and a numerical bit count.  */
 
 /* _f16.  */
-#define TYPES_float16(S, D) \
-  S (f16)
+#define TYPES_float_16(S, D) S (f16)
+
+/* _f32.  */
+#define TYPES_float_32(S, D) S (f32)
 
 /* _f16 _f32.  */
 #define TYPES_all_float(S, D) \
@@ -204,6 +207,40 @@ CONSTEXPR const type_suffix_info type_suffixes[NUM_TYPE_SUFFIXES + 1] = {
 /* s32 .  */
 #define TYPES_signed_32(S, D) \
   S (s32)
+
+/* s64 _u64.  */
+#define TYPES_integer_64(S, D) \
+  S (s64), S (u64)
+
+/* All the type combinations allowed by vcvtq.  */
+#define TYPES_cvt(S, D) \
+  D (f16, s16), \
+  D (f16, u16), \
+  \
+  D (f32, s32), \
+  D (f32, u32), \
+  \
+  D (s16, f16), \
+  D (s32, f32), \
+  \
+  D (u16, f16), \
+  D (u32, f32)
+
+/* vcvt[bt]q_f16_f132.  */
+#define TYPES_cvt_f16_f32(S, D) \
+  D (f16, f32)
+
+/* vcvt[bt]q_f32_f16.  */
+#define TYPES_cvt_f32_f16(S, D) \
+  D (f32, f16)
+
+/* All the type combinations allowed by vcvtXq.  */
+#define TYPES_cvtx(S, D) \
+  D (s16, f16), \
+  D (s32, f32), \
+  \
+  D (u16, f16), \
+  D (u32, f32)
 
 #define TYPES_reinterpret_signed1(D, A) \
   D (A, s8), D (A, s16), D (A, s32), D (A, s64)
@@ -273,7 +310,8 @@ static const type_suffix_pair types_none[] = {
 
 DEF_MVE_TYPES_ARRAY (all_integer);
 DEF_MVE_TYPES_ARRAY (all_integer_with_64);
-DEF_MVE_TYPES_ARRAY (float16);
+DEF_MVE_TYPES_ARRAY (float_16);
+DEF_MVE_TYPES_ARRAY (float_32);
 DEF_MVE_TYPES_ARRAY (all_float);
 DEF_MVE_TYPES_ARRAY (all_signed);
 DEF_MVE_TYPES_ARRAY (all_unsigned);
@@ -281,9 +319,14 @@ DEF_MVE_TYPES_ARRAY (integer_8);
 DEF_MVE_TYPES_ARRAY (integer_8_16);
 DEF_MVE_TYPES_ARRAY (integer_16_32);
 DEF_MVE_TYPES_ARRAY (integer_32);
+DEF_MVE_TYPES_ARRAY (integer_64);
 DEF_MVE_TYPES_ARRAY (poly_8_16);
 DEF_MVE_TYPES_ARRAY (signed_16_32);
 DEF_MVE_TYPES_ARRAY (signed_32);
+DEF_MVE_TYPES_ARRAY (cvt);
+DEF_MVE_TYPES_ARRAY (cvt_f16_f32);
+DEF_MVE_TYPES_ARRAY (cvt_f32_f16);
+DEF_MVE_TYPES_ARRAY (cvtx);
 DEF_MVE_TYPES_ARRAY (reinterpret_integer);
 DEF_MVE_TYPES_ARRAY (reinterpret_float);
 
@@ -307,6 +350,11 @@ static const predication_index preds_mx_or_none[] = {
 static const predication_index preds_p_or_none[] = {
   PRED_p, PRED_none, NUM_PREDS
 };
+
+/* Used by functions that have the z predicated form, in addition to
+   an unpredicated form.  */
+static const predication_index preds_z_or_none[]
+  = {PRED_z, PRED_none, NUM_PREDS};
 
 /* A list of all MVE ACLE functions.  */
 static CONSTEXPR const function_group_info function_groups[] = {
@@ -362,8 +410,6 @@ register_builtin_types ()
 #include "arm-mve-builtins.def"
   for (unsigned int i = 0; i < NUM_VECTOR_TYPES; ++i)
     {
-      if (vector_types[i].requires_float && !TARGET_HAVE_MVE_FLOAT)
-	continue;
       tree eltype = scalar_types[i];
       tree vectype;
       if (eltype == boolean_type_node)
@@ -385,18 +431,6 @@ register_builtin_types ()
 static void
 register_vector_type (vector_type_index type)
 {
-
-  /* If the target does not have the mve.fp extension, but the type requires
-     it, then it needs to be assigned a non-dummy type so that functions
-     with those types in their signature can be registered.  This allows for
-     diagnostics about the missing extension, rather than about a missing
-     function definition.  */
-  if (vector_types[type].requires_float && !TARGET_HAVE_MVE_FLOAT)
-    {
-      acle_vector_types[0][type] = void_type_node;
-      return;
-    }
-
   tree vectype = abi_vector_types[type];
   tree id = get_identifier (vector_types[type].acle_name);
   tree decl = build_decl (input_location, TYPE_DECL, id, vectype);
@@ -422,17 +456,11 @@ register_builtin_tuple_types (vector_type_index type)
 {
   const vector_type_info* info = &vector_types[type];
 
-  /* If the target does not have the mve.fp extension, but the type requires
-     it, then it needs to be assigned a non-dummy type so that functions
-     with those types in their signature can be registered.  This allows for
-     diagnostics about the missing extension, rather than about a missing
-     function definition.  */
-  if (scalar_types[type] == boolean_type_node
-      || (info->requires_float && !TARGET_HAVE_MVE_FLOAT))
+  if (scalar_types[type] == boolean_type_node)
     {
       for (unsigned int num_vectors = 2; num_vectors <= 4; num_vectors += 2)
 	acle_vector_types[num_vectors >> 1][type] = void_type_node;
-    return;
+      return;
     }
 
   const char *vector_type_name = info->acle_name;
@@ -445,15 +473,23 @@ register_builtin_tuple_types (vector_type_index type)
 
       tree vectype = acle_vector_types[0][type];
       tree arrtype = build_array_type_nelts (vectype, num_vectors);
-      gcc_assert (TYPE_MODE_RAW (arrtype) == TYPE_MODE (arrtype));
+      gcc_assert (VECTOR_MODE_P (TYPE_MODE (arrtype))
+		  && TYPE_MODE_RAW (arrtype) == TYPE_MODE (arrtype)
+		  && TYPE_ALIGN (arrtype) == 64);
+
+      /* Build a structure type that contains a single field of type ARRTYPE.
+	 The field is called 'val', as mandated by ACLE.  */
       tree field = build_decl (input_location, FIELD_DECL,
 			       get_identifier ("val"), arrtype);
+      tree tuple_type
+	= lang_hooks.types.simulate_record_decl (input_location,
+						 buffer,
+						 make_array_slice (&field, 1));
+      gcc_assert (VECTOR_MODE_P (TYPE_MODE (tuple_type))
+		  && TYPE_MODE_RAW (tuple_type) == TYPE_MODE (tuple_type)
+		  && TYPE_ALIGN (tuple_type) == 64);
 
-      tree t = lang_hooks.types.simulate_record_decl (input_location, buffer,
-						      make_array_slice (&field,
-									1));
-      gcc_assert (TYPE_MODE_RAW (t) == TYPE_MODE (t));
-      acle_vector_types[num_vectors >> 1][type] = TREE_TYPE (t);
+      acle_vector_types[num_vectors >> 1][type] = tuple_type;
     }
 }
 
@@ -592,6 +628,20 @@ report_out_of_range (location_t location, tree fndecl, unsigned int argno,
 	    min, max);
 }
 
+/* Report that LOCATION has a call to FNDECL in which argument ARGNO has the
+   value ACTUAL, whereas the function requires a value multiple of MULT in the
+   range [MIN, MAX].  ARGNO counts from zero.  */
+static void
+report_out_of_range_multiple (location_t location, tree fndecl,
+			      unsigned int argno,
+			      HOST_WIDE_INT actual, HOST_WIDE_INT min,
+			      HOST_WIDE_INT max, HOST_WIDE_INT mult)
+{
+  error_at (location, "passing %wd to argument %d of %qE, which expects"
+	    " a value multiple of %wd in the range [%wd, %wd]", actual,
+	    argno + 1, fndecl, mult, min, max);
+}
+
 /* Report that LOCATION has a call to FNDECL in which argument ARGNO has
    the value ACTUAL, whereas the function requires a valid value of
    enum type ENUMTYPE.  ARGNO counts from zero.  */
@@ -601,6 +651,20 @@ report_not_enum (location_t location, tree fndecl, unsigned int argno,
 {
   error_at (location, "passing %wd to argument %d of %qE, which expects"
 	    " a valid %qT value", actual, argno + 1, fndecl, enumtype);
+}
+
+/* Report that LOCATION has a call to FNDECL in which argument ARGNO has
+   the value ACTUAL, whereas the function requires one of VALUE0..3.
+   ARGNO counts from zero.  */
+static void
+report_not_one_of (location_t location, tree fndecl, unsigned int argno,
+		   HOST_WIDE_INT actual, HOST_WIDE_INT value0,
+		   HOST_WIDE_INT value1, HOST_WIDE_INT value2,
+		   HOST_WIDE_INT value3)
+{
+  error_at (location, "passing %wd to argument %d of %qE, which expects"
+	    " %wd, %wd, %wd or %wd", actual, argno + 1, fndecl, value0, value1,
+	    value2, value3);
 }
 
 /* Checks that the mve.fp extension is enabled, given that REQUIRES_FLOAT
@@ -710,6 +774,7 @@ function_instance::has_inactive_argument () const
     return false;
 
   if (mode_suffix_id == MODE_r
+      || (base == functions::vbicq && mode_suffix_id == MODE_n)
       || base == functions::vcmlaq
       || base == functions::vcmlaq_rot90
       || base == functions::vcmlaq_rot180
@@ -722,6 +787,12 @@ function_instance::has_inactive_argument () const
       || base == functions::vcmpltq
       || base == functions::vcmpcsq
       || base == functions::vcmphiq
+      || base == functions::vctp16q
+      || base == functions::vctp32q
+      || base == functions::vctp64q
+      || base == functions::vctp8q
+      || (base == functions::vcvtbq && type_suffix (0).element_bits == 16)
+      || (base == functions::vcvttq && type_suffix (0).element_bits == 16)
       || base == functions::vfmaq
       || base == functions::vfmasq
       || base == functions::vfmsq
@@ -762,6 +833,7 @@ function_instance::has_inactive_argument () const
       || (base == functions::vrshlq && mode_suffix_id == MODE_n)
       || base == functions::vrshrnbq
       || base == functions::vrshrntq
+      || base == functions::vshlcq
       || base == functions::vshrnbq
       || base == functions::vshrntq
       || base == functions::vsliq
@@ -822,15 +894,23 @@ function_builder::get_name (const function_instance &instance,
   if (preserve_user_namespace)
     append_name ("__arm_");
   append_name (instance.base_name);
-  append_name (pred_suffixes[instance.pred]);
+
+  if (instance.shape->mode_after_pred ())
+    append_name (pred_suffixes[instance.pred]);
+
   if (!overloaded_p
       || instance.shape->explicit_mode_suffix_p (instance.pred,
 						 instance.mode_suffix_id))
     append_name (instance.mode_suffix ().string);
+
+  if (!instance.shape->mode_after_pred ())
+    append_name (pred_suffixes[instance.pred]);
+
   for (unsigned int i = 0; i < 2; ++i)
     if (!overloaded_p
 	|| instance.shape->explicit_type_suffix_p (i, instance.pred,
-						   instance.mode_suffix_id))
+						   instance.mode_suffix_id,
+						   instance.type_suffix (i)))
       append_name (instance.type_suffix (i).string);
   return finish_name ();
 }
@@ -914,7 +994,8 @@ function_builder::add_unique_function (const function_instance &instance,
 				       vec<tree> &argument_types,
 				       bool preserve_user_namespace,
 				       bool requires_float,
-				       bool force_direct_overloads)
+				       bool force_direct_overloads,
+				       unsigned int which_overload)
 {
   /* Add the function under its full (unique) name with prefix.  */
   char *name = get_name (instance, true, false);
@@ -922,27 +1003,31 @@ function_builder::add_unique_function (const function_instance &instance,
 					   argument_types.length (),
 					   argument_types.address ());
   tree attrs = get_attributes (instance);
-  registered_function &rfn = add_function (instance, name, fntype, attrs,
-					   requires_float, false, false);
+  if (which_overload & NONOVERLOADED_FORM)
+    {
+      registered_function &rfn = add_function (instance, name, fntype, attrs,
+					       requires_float, false, false);
 
-  /* Enter the function into the hash table.  */
-  hashval_t hash = instance.hash ();
-  registered_function **rfn_slot
-    = function_table->find_slot_with_hash (instance, hash, INSERT);
-  gcc_assert (!*rfn_slot);
-  *rfn_slot = &rfn;
+      /* Enter the function into the hash table.  */
+      hashval_t hash = instance.hash ();
+      registered_function **rfn_slot
+	= function_table->find_slot_with_hash (instance, hash, INSERT);
+      gcc_assert (!*rfn_slot);
+      *rfn_slot = &rfn;
 
-  /* Also add the non-prefixed non-overloaded function, as placeholder
-     if the user namespace does not need to be preserved.  */
-  char *noprefix_name = get_name (instance, false, false);
-  attrs = get_attributes (instance);
-  add_function (instance, noprefix_name, fntype, attrs, requires_float,
-		false, preserve_user_namespace);
+      /* Also add the non-prefixed non-overloaded function, as placeholder
+	 if the user namespace does not need to be preserved.  */
+      char *noprefix_name = get_name (instance, false, false);
+      attrs = get_attributes (instance);
+      add_function (instance, noprefix_name, fntype, attrs, requires_float,
+		    false, preserve_user_namespace);
+    }
 
   /* Also add the function under its overloaded alias, if we want
      a separate decl for each instance of an overloaded function.  */
   char *overload_name = get_name (instance, true, true);
-  if (strcmp (name, overload_name) != 0)
+  if ((which_overload & OVERLOADED_FORM)
+      && (strcmp (name, overload_name) != 0))
     {
       /* Attribute lists shouldn't be shared.  */
       attrs = get_attributes (instance);
@@ -1008,9 +1093,11 @@ function_builder::add_overloaded_functions (const function_group_info &group,
   for (unsigned int pi = 0; group.preds[pi] != NUM_PREDS; ++pi)
     {
       unsigned int explicit_type0
-	= (*group.shape)->explicit_type_suffix_p (0, group.preds[pi], mode);
+	= (*group.shape)->explicit_type_suffix_p (0, group.preds[pi], mode,
+						  type_suffixes[NUM_TYPE_SUFFIXES]);
       unsigned int explicit_type1
-	= (*group.shape)->explicit_type_suffix_p (1, group.preds[pi], mode);
+	= (*group.shape)->explicit_type_suffix_p (1, group.preds[pi], mode,
+						  type_suffixes[NUM_TYPE_SUFFIXES]);
 
       if ((*group.shape)->skip_overload_p (group.preds[pi], mode))
 	continue;
@@ -1149,6 +1236,18 @@ function_resolver::resolve_to (mode_suffix_index mode,
   return res;
 }
 
+/* Pop an argument and resolve the function to one with the mode suffix given
+   by MODE and the type suffixes given by TYPE0 and TYPE1.  Return its function
+   decl on success, otherwise report an error and return error_mark_node.  */
+tree
+function_resolver::pop_and_resolve_to (mode_suffix_index mode,
+				       type_suffix_index type0,
+				       type_suffix_index type1)
+{
+  m_arglist.pop ();
+  return resolve_to (mode, type0, type1);
+}
+
 /* Require argument ARGNO to be a pointer to a scalar type that has a
    corresponding type suffix.  Return that type suffix on success,
    otherwise report an error and return NUM_TYPE_SUFFIXES.  */
@@ -1200,7 +1299,7 @@ function_resolver::infer_vector_or_tuple_type (unsigned int argno,
 	tree type = acle_vector_types[size_i][type_i];
 	if (type && matches_type_p (type, actual))
 	  {
-	    if (size_i + 1 == num_vectors)
+	    if (size_i == (num_vectors >> 1))
 	      return type_suffix_index (suffix_i);
 
 	    if (num_vectors == 1)
@@ -1239,6 +1338,16 @@ type_suffix_index
 function_resolver::infer_vector_type (unsigned int argno)
 {
   return infer_vector_or_tuple_type (argno, 1);
+}
+
+/* If the function operates on tuples of vectors, require argument ARGNO to be
+   a tuple with the appropriate number of vectors, otherwise require it to be a
+   single vector.  Return the associated type suffix on success.  Report an
+   error and return NUM_TYPE_SUFFIXES on failure.  */
+type_suffix_index
+function_resolver::infer_tuple_type (unsigned int argno)
+{
+  return infer_vector_or_tuple_type (argno, vectors_per_tuple ());
 }
 
 /* Require argument ARGNO to be a vector or scalar argument.  Return true
@@ -1568,6 +1677,31 @@ function_resolver::require_pointer_type (unsigned int argno)
   return true;
 }
 
+/* Require argument ARGNO to be a pointer to EXPECTED type.  Return true on
+   success, otherwise report an error and return false.  */
+bool
+function_resolver::require_pointer_to_type (unsigned int argno, tree expected)
+{
+  tree actual = get_argument_type (argno);
+  if (TREE_CODE (actual) != POINTER_TYPE)
+    {
+      error_at (location, "passing %qT to argument %d of %qE, which"
+		" expects a pointer type", actual, argno + 1, fndecl);
+      return false;
+    }
+
+  tree target = TREE_TYPE (actual);
+  if (target != expected)
+    {
+      error_at (location, "passing %qT to argument %d of %qE, which"
+		" expects a pointer to %qT", actual, argno + 1, fndecl,
+		expected);
+      return false;
+    }
+
+  return true;
+}
+
 /* Require the function to have exactly EXPECTED arguments.  Return true
    if it does, otherwise report an appropriate error.  */
 bool
@@ -1608,6 +1742,7 @@ function_resolver::check_gp_argument (unsigned int nops,
 
 	case PRED_p:
 	case PRED_x:
+	case PRED_z:
 	  /* Add final predicate.  */
 	  nargs = nops + 1;
 	  break;
@@ -1903,6 +2038,26 @@ function_checker::require_immediate (unsigned int argno,
   return true;
 }
 
+/* Check that argument ARGNO is a signed integer constant expression and store
+   its value in VALUE_OUT if so.  The caller should first check that argument
+   ARGNO exists.  */
+bool
+function_checker::require_signed_immediate (unsigned int argno,
+					    HOST_WIDE_INT &value_out)
+{
+  gcc_assert (argno < m_nargs);
+  tree arg = m_args[argno];
+
+  if (!tree_fits_shwi_p (arg))
+    {
+      report_non_ice (location, fndecl, argno);
+      return false;
+    }
+
+  value_out = tree_to_shwi (arg);
+  return true;
+}
+
 /* Check that argument REL_ARGNO is an integer constant expression that has
    a valid value for enumeration type TYPE.  REL_ARGNO counts from the end
    of the predication arguments.  */
@@ -1932,6 +2087,36 @@ function_checker::require_immediate_enum (unsigned int rel_argno, tree type)
   return false;
 }
 
+/* Check that argument REL_ARGNO is an integer constant expression that
+   has one of the given values.  */
+bool
+function_checker::require_immediate_one_of (unsigned int rel_argno,
+					    HOST_WIDE_INT value0,
+					    HOST_WIDE_INT value1,
+					    HOST_WIDE_INT value2,
+					    HOST_WIDE_INT value3)
+{
+  unsigned int argno = m_base_arg + rel_argno;
+  if (!argument_exists_p (argno))
+    return true;
+
+  HOST_WIDE_INT actual;
+  if (!require_immediate (argno, actual))
+    return false;
+
+  if (actual != value0
+      && actual != value1
+      && actual != value2
+      && actual != value3)
+    {
+      report_not_one_of (location, fndecl, argno, actual,
+			 value0, value1, value2, value3);
+      return false;
+    }
+
+  return true;
+}
+
 /* Check that argument REL_ARGNO is an integer constant expression in the
    range [MIN, MAX].  REL_ARGNO counts from the end of the predication
    arguments.  */
@@ -1954,6 +2139,32 @@ function_checker::require_immediate_range (unsigned int rel_argno,
   if (!IN_RANGE (actual, min, max))
     {
       report_out_of_range (location, fndecl, argno, actual, min, max);
+      return false;
+    }
+
+  return true;
+}
+
+/* Check that argument REL_ARGNO is a signed integer constant expression in the
+   range [MIN, MAX].  Also check that REL_ARGNO is a multiple of MULT.  */
+bool
+function_checker::require_immediate_range_multiple (unsigned int rel_argno,
+						    HOST_WIDE_INT min,
+						    HOST_WIDE_INT max,
+						    HOST_WIDE_INT mult)
+{
+  unsigned int argno = m_base_arg + rel_argno;
+  if (!argument_exists_p (argno))
+    return true;
+
+  HOST_WIDE_INT actual;
+  if (!require_signed_immediate (argno, actual))
+    return false;
+
+  if (!IN_RANGE (actual, min, max)
+      || (actual % mult) != 0)
+    {
+      report_out_of_range_multiple (location, fndecl, argno, actual, min, max, mult);
       return false;
     }
 
@@ -2136,10 +2347,7 @@ function_expander::add_input_operand (insn_code icode, rtx x)
 	  x = gen_lowpart (mode, x);
 	}
       else
-	{
-	  auto byte = subreg_lowpart_offset (mode, GET_MODE (x));
-	  x = force_subreg (mode, x, GET_MODE (x), byte);
-	}
+	x = force_lowpart_subreg (mode, x, GET_MODE (x));
     }
 
   m_ops.safe_grow (m_ops.length () + 1, true);
@@ -2277,6 +2485,8 @@ function_expander::use_contiguous_load_insn (insn_code icode)
 
   add_output_operand (icode);
   add_mem_operand (mem_mode, get_contiguous_base ());
+  if (pred == PRED_z)
+    add_input_operand (icode, args[1]);
   return generate_insn (icode);
 }
 
@@ -2289,6 +2499,8 @@ function_expander::use_contiguous_store_insn (insn_code icode)
 
   add_mem_operand (mem_mode, get_contiguous_base ());
   add_input_operand (icode, args[1]);
+  if (pred == PRED_p)
+    add_input_operand (icode, args[2]);
   return generate_insn (icode);
 }
 

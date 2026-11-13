@@ -1,5 +1,5 @@
 // PR c++/118049
-// { dg-additional-options "-fmodules-ts -Wno-global-module" }
+// { dg-additional-options "-fmodules -Wno-global-module" }
 // { dg-module-cmi B }
 
 module;

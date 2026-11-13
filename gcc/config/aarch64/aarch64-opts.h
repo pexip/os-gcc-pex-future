@@ -1,4 +1,4 @@
-/* Copyright (C) 2011-2024 Free Software Foundation, Inc.
+/* Copyright (C) 2011-2026 Free Software Foundation, Inc.
    Contributed by ARM Ltd.
 
    This file is part of GCC.
@@ -23,17 +23,28 @@
 #define GCC_AARCH64_OPTS_H
 
 #ifndef USED_FOR_TARGET
-typedef uint64_t aarch64_feature_flags;
+#include "bbitmap.h"
+
+constexpr unsigned int AARCH64_NUM_ABI_ATTRIBUTES = 1;
+
+typedef uint64_t aarch64_isa_mode;
+
+constexpr unsigned int AARCH64_NUM_ISA_MODES = (0
+#define DEF_AARCH64_ISA_MODE(IDENT) + 1
+#include "aarch64-isa-modes.def"
+);
+
+typedef bbitmap<2> aarch64_feature_flags;
 #endif
 
 /* The various cores that implement AArch64.  */
-enum aarch64_processor
+enum aarch64_cpu
 {
 #define AARCH64_CORE(NAME, INTERNAL_IDENT, SCHED, ARCH, FLAGS, COSTS, IMP, PART, VARIANT) \
-  INTERNAL_IDENT,
+  AARCH64_CPU_##INTERNAL_IDENT,
 #include "aarch64-cores.def"
   /* Used to mark the end of the processor table.  */
-  aarch64_none
+  aarch64_no_cpu
 };
 
 enum aarch64_arch
@@ -106,6 +117,23 @@ enum aarch64_key_type {
   AARCH64_KEY_B
 };
 
+/* An enum for setting the auto-vectorization preference:
+   - AARCH64_AUTOVEC_DEFAULT: Use default heuristics
+   - AARCH64_AUTOVEC_ASIMD_ONLY: Use only Advanced SIMD (Neon)
+   for auto-vectorisation
+   - AARCH64_AUTOVEC_SVE_ONLY: Use only SVE for auto-vectorisation
+   - AARCH64_AUTOVEC_PREFER_ASIMD: Use both Neon and SVE,
+   but prefer Neon when the costs are equal
+   - AARCH64_AUTOVEC_PREFER_SVE: Use both Neon and SVE,
+   but prefer SVE when the costs are equal.  */
+enum aarch64_autovec_preference_enum {
+  AARCH64_AUTOVEC_DEFAULT,
+  AARCH64_AUTOVEC_ASIMD_ONLY,
+  AARCH64_AUTOVEC_SVE_ONLY,
+  AARCH64_AUTOVEC_PREFER_ASIMD,
+  AARCH64_AUTOVEC_PREFER_SVE
+};
+
 /* An enum specifying how to handle load and store pairs using
    a fine-grained policy:
    - LDP_STP_POLICY_DEFAULT: Use the policy defined in the tuning structure.
@@ -114,10 +142,8 @@ enum aarch64_key_type {
    - LDP_STP_POLICY_ALWAYS: Emit ldp/stp regardless of alignment.
    - LDP_STP_POLICY_NEVER: Do not emit ldp/stp.  */
 enum aarch64_ldp_stp_policy {
-  AARCH64_LDP_STP_POLICY_DEFAULT,
-  AARCH64_LDP_STP_POLICY_ALIGNED,
-  AARCH64_LDP_STP_POLICY_ALWAYS,
-  AARCH64_LDP_STP_POLICY_NEVER
+#define AARCH64_LDP_STP_POLICY(NAME, ENUM_VALUE) ENUM_VALUE,
+#include "aarch64-tuning-enums.def"
 };
 
 /* An enum specifying when the early-ra pass should be run:

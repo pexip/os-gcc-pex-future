@@ -1,4 +1,4 @@
-/* Copyright (C) 2016-2024 Free Software Foundation, Inc.
+/* Copyright (C) 2016-2026 Free Software Foundation, Inc.
 
    This file is free software; you can redistribute it and/or modify it under
    the terms of the GNU General Public License as published by the Free
@@ -16,49 +16,62 @@
 
 #include "config/gcn/gcn-opts.h"
 
+extern const struct gcn_device_def {
+  enum processor_type id;
+  const char *name;
+  const char *NAME;
+  enum gcn_isa isa;
+
+  /* Features.  */
+  enum hsaco_attr_type xnack_default;
+  enum hsaco_attr_type sramecc_default;
+  enum hsaco_attr_type wave64_default;
+  enum hsaco_attr_type cumode_default;
+  int max_isa_vgprs;
+  unsigned generic_version;
+  const char *arch_family;
+} gcn_devices[];
+
 #define TARGET_CPU_CPP_BUILTINS()                                              \
   do                                                                           \
     {                                                                          \
+      builtin_define ("__AMDGPU__");                                           \
       builtin_define ("__AMDGCN__");                                           \
-      if (TARGET_GCN3)                                                         \
-	builtin_define ("__GCN3__");                                           \
-      else if (TARGET_GCN5)                                                    \
+      if (TARGET_GCN5)                                                         \
 	builtin_define ("__GCN5__");                                           \
       else if (TARGET_CDNA1)                                                   \
 	builtin_define ("__CDNA1__");                                          \
       else if (TARGET_CDNA2)                                                   \
 	builtin_define ("__CDNA2__");                                          \
+      else if (TARGET_CDNA3)                                                   \
+	builtin_define ("__CDNA3__");                                          \
       else if (TARGET_RDNA2)                                                   \
 	builtin_define ("__RDNA2__");                                          \
       else if (TARGET_RDNA3)                                                   \
 	builtin_define ("__RDNA3__");                                          \
       else                                                                     \
 	gcc_unreachable ();                                                    \
-      if (TARGET_FIJI)                                                         \
-	{                                                                      \
-	  builtin_define ("__fiji__");                                         \
-	  builtin_define ("__gfx803__");                                       \
-	}                                                                      \
-      else if (TARGET_VEGA10)                                                  \
-	builtin_define ("__gfx900__");                                         \
-      else if (TARGET_VEGA20)                                                  \
-	builtin_define ("__gfx906__");                                         \
-      else if (TARGET_GFX908)                                                  \
-	builtin_define ("__gfx908__");                                         \
-      else if (TARGET_GFX90a)                                                  \
-	builtin_define ("__gfx90a__");                                         \
-      else if (TARGET_GFX90c)                                                  \
-	builtin_define ("__gfx90c__");                                         \
-      else if (TARGET_GFX1030)                                                 \
-	builtin_define ("__gfx1030__");                                        \
-      else if (TARGET_GFX1036)                                                 \
-	builtin_define ("__gfx1036__");                                        \
-      else if (TARGET_GFX1100)                                                 \
-	builtin_define ("__gfx1100__");                                        \
-      else if (TARGET_GFX1103)                                                 \
-	builtin_define ("__gfx1103__");                                        \
-      else                                                                     \
-	gcc_unreachable ();                                                    \
+      char *name = (char *)xmalloc (strlen (gcn_devices[gcn_arch].name) + 5);  \
+      sprintf (name, "__%s__", gcn_devices[gcn_arch].name);                    \
+      char *p;                                                                 \
+      if (gcn_devices[gcn_arch].generic_version)                               \
+	while ((p = strchr(name, '-')))                                        \
+	  *p = '_';                                                            \
+      builtin_define (name);                                                   \
+      name = (char *)xmalloc (strlen (gcn_devices[gcn_arch].arch_family) + 5); \
+      sprintf (name, "__%s__", gcn_devices[gcn_arch].arch_family);             \
+      builtin_define (name);                                                   \
+      name = (char *)xmalloc (strlen ("__amdgcn_target_id__") +                \
+			      strlen (gcn_devices[gcn_arch].name) + 4);        \
+      sprintf (name, "__amdgcn_target_id__=\"%s\"", gcn_devices[gcn_arch].name); \
+      builtin_define (name);                                                   \
+      name = (char *)xmalloc (strlen ("__amdgcn_processor__") +                \
+			      strlen (gcn_devices[gcn_arch].name) + 4);        \
+      sprintf (name, "__amdgcn_processor__=\"%s\"", gcn_devices[gcn_arch].name); \
+      if (gcn_devices[gcn_arch].generic_version)                               \
+	while ((p = strchr(name, '-')))                                        \
+	  *p = '_';                                                            \
+      builtin_define (name);                                                   \
   } while (0)
 
 #define ASSEMBLER_DIALECT (TARGET_RDNA2_PLUS ? 1 : 0)
@@ -111,9 +124,6 @@
 #define INT_TYPE_SIZE		  32
 #define LONG_TYPE_SIZE		  64
 #define LONG_LONG_TYPE_SIZE	  64
-#define FLOAT_TYPE_SIZE		  32
-#define DOUBLE_TYPE_SIZE	  64
-#define LONG_DOUBLE_TYPE_SIZE	  64
 #define DEFAULT_SIGNED_CHAR	  1
 #define PCC_BITFIELD_TYPE_MATTERS 1
 
@@ -159,7 +169,18 @@
 #define EXECZ_REG	    128
 #define SCC_REG		    129
 
-/* 132-159 are reserved to simplify masks.  */
+/* Memory aperture registers.  */
+#define SHARED_BASE_REG	    130
+#define SHARED_LIMT_REG	    131
+#define PRIVATE_BASE_REG    132
+#define PRIVATE_LIMT_REG    133
+#define MEMORY_APERTURE_REG_P(reg)		\
+  ((reg) == SHARED_BASE_REG			\
+   || (reg) == SHARED_LIMT_REG			\
+   || (reg) == PRIVATE_BASE_REG			\
+   || (reg) == PRIVATE_LIMT_REG)
+
+/* 134-159 are reserved to simplify masks.  */
 
 #define FIRST_VGPR_REG	    160
 #define VGPR_REGNO(N)	    ((N)+FIRST_VGPR_REG)
@@ -201,10 +222,10 @@ STATIC_ASSERT (LAST_AVGPR_REG + 1 - FIRST_AVGPR_REG == 256);
 #define HARD_FRAME_POINTER_IS_ARG_POINTER   0
 #define HARD_FRAME_POINTER_IS_FRAME_POINTER 0
 
-#define SGPR_REGNO_P(N)		((N) >= FIRST_SGPR_REG && (N) <= LAST_SGPR_REG)
+#define SGPR_REGNO_P(N)		(/*(N) >= FIRST_SGPR_REG &&*/ (N) <= LAST_SGPR_REG)
 #define VGPR_REGNO_P(N)		((N) >= FIRST_VGPR_REG && (N) <= LAST_VGPR_REG)
 #define AVGPR_REGNO_P(N)        ((N) >= FIRST_AVGPR_REG && (N) <= LAST_AVGPR_REG)
-#define SSRC_REGNO_P(N)		((N) <= SCC_REG && (N) != VCCZ_REG)
+#define SSRC_REGNO_P(N)		((N) <= PRIVATE_LIMT_REG && (N) != VCCZ_REG)
 #define SDST_REGNO_P(N)		((N) <= EXEC_HI_REG && (N) != VCCZ_REG)
 #define CC_REG_P(X)		(REG_P (X) && CC_REGNO_P (REGNO (X)))
 #define CC_REGNO_P(X)		((X) == SCC_REG || (X) == VCC_REG)
@@ -358,6 +379,12 @@ enum reg_class
   /* EXEC */
   EXEC_MASK_REG,
 
+  /* Memory aperture registers (SHARED_{BASE,LIM}, PRIVATE_{BASE,LIM}).
+     Though these are usable as sources to vector instructions (and ergo
+     nominally belong to Sv), they cannot be split into lower and upper half
+     accesses, and so, are left out of that constraint.  */
+  MEMORY_APERTURE_REGS,
+
   /* SGPR0-101 */
   SGPR_REGS,
 
@@ -401,6 +428,7 @@ enum reg_class
    "EXECZ_CONDITIONAL_REG", \
    "ALL_CONDITIONAL_REGS",  \
    "EXEC_MASK_REG",	    \
+   "MEMORY_APERTURE_REGS"   \
    "SGPR_REGS",		    \
    "SGPR_EXEC_REGS",	    \
    "SGPR_VOP3A_SRC_REGS",   \
@@ -419,6 +447,13 @@ enum reg_class
 
 #define NAMED_REG_MASK(N)  (1<<((N)-3*32))
 #define NAMED_REG_MASK2(N) (1<<((N)-4*32))
+
+#define MEMORY_APERTURE_REGS_MASK		\
+  (NAMED_REG_MASK2 (SHARED_BASE_REG)		\
+   | NAMED_REG_MASK2 (SHARED_LIMT_REG)		\
+   | NAMED_REG_MASK2 (PRIVATE_BASE_REG)		\
+   | NAMED_REG_MASK2 (PRIVATE_LIMT_REG))
+
 
 #define REG_CLASS_CONTENTS {						   \
     /* NO_REGS.  */							   \
@@ -463,6 +498,12 @@ enum reg_class
      0, 0, 0, 0,							   \
      0, 0, 0, 0,							   \
      0, 0, 0, 0, 0, 0},							   \
+    /* MEMORY_APERTURE_REGS.  */					   \
+    {0, 0, 0, 0,							   \
+     MEMORY_APERTURE_REGS_MASK,  0, 0, 0,				   \
+     0, 0, 0, 0,							   \
+     0, 0, 0, 0,							   \
+     0, 0, 0, 0, 0, 0},							   \
     /* SGPR_REGS.  */							   \
     {0xffffffff, 0xffffffff, 0xffffffff, 0xf1,				   \
      0, 0, 0, 0,							   \
@@ -500,7 +541,8 @@ enum reg_class
      0, 0, 0, 0, 0, 0},							   \
     /* SGPR_SRC_REGS.  */						   \
     {0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff,			   \
-     NAMED_REG_MASK2 (EXECZ_REG) | NAMED_REG_MASK2 (SCC_REG), 0, 0, 0,	   \
+     MEMORY_APERTURE_REGS_MASK | NAMED_REG_MASK2 (EXECZ_REG)		   \
+     | NAMED_REG_MASK2 (SCC_REG), 0, 0, 0,				   \
      0, 0, 0, 0,							   \
      0, 0, 0, 0,							   \
      0, 0, 0, 0, 0, 0},							   \
@@ -584,8 +626,7 @@ enum gcn_address_spaces
   c_register_addr_space ("__global", ADDR_SPACE_GLOBAL);             \
 } while (0);
 
-#define STACK_ADDR_SPACE \
-  (TARGET_GCN5_PLUS ? ADDR_SPACE_GLOBAL : ADDR_SPACE_FLAT)
+#define STACK_ADDR_SPACE ADDR_SPACE_GLOBAL
 #define DEFAULT_ADDR_SPACE \
   ((cfun && cfun->machine && !cfun->machine->use_flat_addressing) \
    ? ADDR_SPACE_GLOBAL : ADDR_SPACE_FLAT)
@@ -622,7 +663,8 @@ enum gcn_address_spaces
     "ttmp0", "ttmp1", "ttmp2", "ttmp3", "ttmp4", "ttmp5", "ttmp6", "ttmp7", \
     "ttmp8", "ttmp9", "ttmp10", "ttmp11", "m0", "exec_lo", "exec_hi",	    \
     "execz", "scc",							    \
-    "res130", "res131", "res132", "res133", "res134", "res135", "res136",   \
+    "shared_base", "shared_limit", "private_base", "private_limit",	    \
+    "res134", "res135", "res136",					    \
     "res137", "res138", "res139", "res140", "res141", "res142", "res143",   \
     "res144", "res145", "res146", "res147", "res148", "res149", "res150",   \
     "res151", "res152", "res153", "res154", "res155", "res156", "res157",   \
@@ -834,7 +876,7 @@ enum gcn_builtin_codes
 #define PROFILE_BEFORE_PROLOGUE 0
 
 /* Trampolines */
-#define TRAMPOLINE_SIZE 36
+#define TRAMPOLINE_SIZE 40  /* 36 + 4 padding for alignment.  */
 #define TRAMPOLINE_ALIGNMENT 64
 
 /* MD Optimization.
@@ -860,7 +902,3 @@ enum gcn_builtin_codes
       || M == V2SFmode || M == V2DImode || M == V2DFmode) \
    ? 2 \
    : 1)
-
-/* The C++ front end insists to link against libstdc++ -- which we don't build.
-   Tell it to instead link against the innocuous libgcc.  */
-#define LIBSTDCXX "gcc"

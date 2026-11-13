@@ -1,5 +1,5 @@
 /* Generic SSA value propagation engine.
-   Copyright (C) 2004-2024 Free Software Foundation, Inc.
+   Copyright (C) 2004-2026 Free Software Foundation, Inc.
    Contributed by Diego Novillo <dnovillo@redhat.com>
 
    This file is part of GCC.
@@ -85,7 +85,7 @@
 	    Blocks are added to this list if their incoming edges are
 	    found executable.
 
-	SSA_EDGE_WORKLIST contains the list of statements that we 
+	SSA_EDGE_WORKLIST contains the list of statements that we
 	    need to revisit.
 
    5- Simulation terminates when all three work lists are drained.
@@ -578,10 +578,6 @@ substitute_and_fold_engine::replace_uses_in (gimple *stmt)
       if (val == tuse || val == NULL_TREE)
 	continue;
 
-      if (gimple_code (stmt) == GIMPLE_ASM
-	  && !may_propagate_copy_into_asm (tuse))
-	continue;
-
       if (!may_propagate_copy (tuse, val))
 	continue;
 
@@ -789,6 +785,10 @@ substitute_and_fold_dom_walker::before_dom_children (basic_block bb)
 		  fprintf (dump_file, "\n");
 		}
 	      bitmap_set_bit (dceworklist, SSA_NAME_VERSION (res));
+	      /* As this now constitutes a copy duplicate points-to
+		 and range info appropriately.  */
+	      if (TREE_CODE (sprime) == SSA_NAME)
+		maybe_duplicate_ssa_info_at_copy (res, sprime);
 	      continue;
 	    }
 	}
@@ -831,6 +831,10 @@ substitute_and_fold_dom_walker::before_dom_children (basic_block bb)
 		  fprintf (dump_file, "\n");
 		}
 	      bitmap_set_bit (dceworklist, SSA_NAME_VERSION (lhs));
+	      /* As this now constitutes a copy duplicate points-to
+		 and range info appropriately.  */
+	      if (TREE_CODE (sprime) == SSA_NAME)
+		maybe_duplicate_ssa_info_at_copy (lhs, sprime);
 	      continue;
 	    }
 	}
@@ -856,13 +860,14 @@ substitute_and_fold_dom_walker::before_dom_children (basic_block bb)
       /* If we made a replacement, fold the statement.  */
       if (did_replace)
 	{
+	  update_stmt (stmt);
 	  fold_stmt (&i, follow_single_use_edges);
 	  stmt = gsi_stmt (i);
 	  gimple_set_modified (stmt, true);
 	}
       /* Also fold if we want to fold all statements.  */
       else if (substitute_and_fold_engine->fold_all_stmts
-	  && fold_stmt (&i, follow_single_use_edges))
+	       && fold_stmt (&i, follow_single_use_edges))
 	{
 	  did_replace = true;
 	  stmt = gsi_stmt (i);
@@ -1011,6 +1016,8 @@ substitute_and_fold_engine::substitute_and_fold (basic_block block)
   while (!walker.stmts_to_fixup.is_empty ())
     {
       gimple *stmt = walker.stmts_to_fixup.pop ();
+      if (!gimple_bb (stmt))
+	continue;
       if (dump_file && dump_flags & TDF_DETAILS)
 	{
 	  fprintf (dump_file, "Fixing up noreturn call ");
@@ -1073,6 +1080,13 @@ may_propagate_copy (tree dest, tree orig, bool dest_not_abnormal_phi_edge_p)
   if (TREE_CODE (dest) == SSA_NAME && virtual_operand_p (dest))
     return false;
 
+  /* Keep lhs of [[gnu::musttail]] calls as is, those need to be still
+     tail callable.  */
+  if (TREE_CODE (dest) == SSA_NAME
+      && is_gimple_call (SSA_NAME_DEF_STMT (dest))
+      && gimple_call_must_tail_p (as_a <gcall *> (SSA_NAME_DEF_STMT (dest))))
+    return false;
+
   /* Anything else is OK.  */
   return true;
 }
@@ -1124,15 +1138,6 @@ may_propagate_copy_into_stmt (gimple *dest, tree orig)
 
   return true;
 }
-
-/* Similarly, but we know that we're propagating into an ASM_EXPR.  */
-
-bool
-may_propagate_copy_into_asm (tree dest ATTRIBUTE_UNUSED)
-{
-  return true;
-}
-
 
 /* Replace *OP_P with value VAL (assumed to be a constant or another SSA_NAME).
 

@@ -1,5 +1,5 @@
 /* Subroutines used for code generation for eBPF.
-   Copyright (C) 2019-2024 Free Software Foundation, Inc.
+   Copyright (C) 2019-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -264,7 +264,7 @@ remove_parser_plugin ()
 
 /* Helper compare functions used to verify if multiple builtin calls contain
    the same argument as input.  In that case the builtin calls can be optimized
-   out by identifying redundat calls.  This happen since the internal
+   out by identifying redundant calls.  This happen since the internal
    __core_reloc builtin is marked as PURE.  */
 
 static inline bool
@@ -324,8 +324,13 @@ is_attr_preserve_access (tree t)
 			     TYPE_ATTRIBUTES (TREE_TYPE (base)));
 
   if (TREE_CODE (base) == MEM_REF)
-    return lookup_attribute ("preserve_access_index",
-			     TYPE_ATTRIBUTES (TREE_TYPE (base)));
+    {
+      tree type = TREE_TYPE (base);
+      if (POINTER_TYPE_P (type))
+	type = TREE_TYPE (type);
+      return lookup_attribute ("preserve_access_index",
+			       TYPE_ATTRIBUTES (type));
+    }
 
   if (TREE_CODE (t) == COMPONENT_REF)
     {
@@ -624,13 +629,20 @@ bpf_core_get_index (const tree node, bool *valid)
 
    ALLOW_ENTRY_CAST is an input arguments and specifies if the function should
    consider as valid expressions in which NODE entry is a cast expression (or
-   tree code nop_expr).  */
+   tree code nop_expr).
+
+   EXTRA_FN is a callback function to allow extra functionality with this
+   function traversal.  Currently used for marking used type during expand
+   pass.  */
+
+typedef void (*extra_fn) (tree);
 
 static unsigned char
 compute_field_expr (tree node, unsigned int *accessors,
 		    bool *valid,
 		    tree *access_node,
-		    bool allow_entry_cast = true)
+		    bool allow_entry_cast = true,
+		    extra_fn callback = NULL)
 {
   unsigned char n = 0;
   unsigned int fake_accessors[MAX_NR_ACCESSORS];
@@ -646,6 +658,9 @@ compute_field_expr (tree node, unsigned int *accessors,
     }
 
   *access_node = node;
+
+  if (callback != NULL)
+    callback (node);
 
   switch (TREE_CODE (node))
     {
@@ -664,17 +679,19 @@ compute_field_expr (tree node, unsigned int *accessors,
     case COMPONENT_REF:
       n = compute_field_expr (TREE_OPERAND (node, 0), accessors,
 			      valid,
-			      access_node, false);
+			      access_node, false, callback);
       accessors[n] = bpf_core_get_index (TREE_OPERAND (node, 1), valid);
       return n + 1;
     case ARRAY_REF:
     case ARRAY_RANGE_REF:
-    case MEM_REF:
       n = compute_field_expr (TREE_OPERAND (node, 0), accessors,
 			      valid,
-			      access_node, false);
+			      access_node, false, callback);
       accessors[n++] = bpf_core_get_index (node, valid);
       return n;
+    case MEM_REF:
+      accessors[0] = bpf_core_get_index (node, valid);
+      return 1;
     case NOP_EXPR:
       if (allow_entry_cast == true)
 	{
@@ -683,13 +700,16 @@ compute_field_expr (tree node, unsigned int *accessors,
 	}
       n = compute_field_expr (TREE_OPERAND (node, 0), accessors,
 			      valid,
-			      access_node, false);
+			      access_node, false, callback);
       return n;
+
+    case VAR_DECL:
+      accessors[0] = 0;
+      return 1;
 
     case ADDR_EXPR:
     case CALL_EXPR:
     case SSA_NAME:
-    case VAR_DECL:
     case PARM_DECL:
       return 0;
     default:
@@ -784,7 +804,7 @@ process_field_expr (struct cr_builtins *data)
       for (int i = 0; i < nr_accessors; i++)
 	n += snprintf (str + n, sizeof (str) - n,
 		       i == 0 ? "%u" : ":%u", accessors[i]);
-      ret.str = CONST_CAST (char *, ggc_strdup (str));
+      ret.str = const_cast<char *> (ggc_strdup (str));
     }
   else
     gcc_unreachable ();
@@ -901,7 +921,7 @@ process_enum_value (struct cr_builtins *data)
      in 6 chars.  */
   char tmp[6];
   sprintf (tmp, "%u", index);
-  ret.str = CONST_CAST (char *, ggc_strdup(tmp));
+  ret.str = const_cast<char *> (ggc_strdup (tmp));
 
   return ret;
 }
@@ -1021,7 +1041,8 @@ process_type (struct cr_builtins *data)
       && data->default_value != NULL)
   {
     ctf_container_ref ctfc = ctf_get_tu_ctfc ();
-    unsigned int btf_id = get_btf_id (ctf_lookup_tree_type (ctfc, ret.type));
+    ctf_dtdef_ref dtd = ctf_lookup_tree_type (ctfc, ret.type);
+    unsigned int btf_id = dtd ? dtd->dtd_type : BTF_VOID_TYPEID;
     data->rtx_default_value = expand_normal (build_int_cst (integer_type_node,
 							    btf_id));
   }
@@ -1042,13 +1063,13 @@ bpf_require_core_support ()
 
 /* BPF Compile Once - Run Everywhere (CO-RE) support.  Construct a CO-RE
    relocation record in DATA to be emitted in the .BTF.ext
-   section.  Does nothing if we are not targetting BPF CO-RE, or if the
+   section.  Does nothing if we are not targeting BPF CO-RE, or if the
    constructed relocation would be a no-op.  */
 
 static void
 make_core_relo (struct cr_final *data, rtx_code_label *label)
 {
-  /* If we are not targetting BPF CO-RE, do not make a relocation.  We
+  /* If we are not targeting BPF CO-RE, do not make a relocation.  We
      might not be generating any debug info at all.  */
   if (!bpf_require_core_support ())
     return;
@@ -1186,7 +1207,7 @@ bpf_handle_plugin_finish_type (void *event_data,
 
 /* Initializes support information to process CO-RE builtins.
    Defines information for the builtin processing, such as helper functions to
-   support the builtin convertion.  */
+   support the builtin conversion.  */
 
 void
 bpf_init_core_builtins (void)
@@ -1548,6 +1569,51 @@ bpf_resolve_overloaded_core_builtin (location_t loc, tree fndecl,
   return construct_builtin_core_reloc (loc, fndecl, args, argsvec->length ());
 }
 
+/* Callback function for bpf_mark_field_expr_types_as_used.  */
+
+static void
+mark_component_type_as_used (tree node)
+{
+  if (TREE_CODE (node) == COMPONENT_REF)
+    btf_mark_type_used (TREE_TYPE (TREE_OPERAND (node, 0)));
+}
+
+/* Mark types needed for BPF CO-RE relocations as used.  Doing so ensures that
+   these types do not get pruned from the BTF information.  */
+
+static void
+bpf_mark_types_as_used (struct cr_builtins *data)
+{
+  tree expr = data->expr;
+  switch (data->kind)
+    {
+    case BPF_RELO_FIELD_BYTE_OFFSET:
+    case BPF_RELO_FIELD_BYTE_SIZE:
+    case BPF_RELO_FIELD_EXISTS:
+    case BPF_RELO_FIELD_SIGNED:
+    case BPF_RELO_FIELD_LSHIFT_U64:
+    case BPF_RELO_FIELD_RSHIFT_U64:
+      if (TREE_CODE (expr) == ADDR_EXPR)
+	expr = TREE_OPERAND (expr, 0);
+
+      expr = root_for_core_field_info (expr);
+      compute_field_expr (data->expr, NULL, NULL, NULL, false,
+			  mark_component_type_as_used);
+      break;
+    case BPF_RELO_TYPE_ID_LOCAL:
+    case BPF_RELO_TYPE_ID_TARGET:
+    case BPF_RELO_TYPE_EXISTS:
+    case BPF_RELO_TYPE_SIZE:
+    case BPF_RELO_ENUMVAL_EXISTS:
+    case BPF_RELO_ENUMVAL_VALUE:
+    case BPF_RELO_TYPE_MATCHES:
+      btf_mark_type_used (data->type);
+      break;
+    default:
+      gcc_unreachable ();
+    }
+}
+
 /* Used in bpf_expand_builtin.  This function is called in RTL expand stage to
    convert the internal __builtin_core_reloc in unspec:UNSPEC_CORE_RELOC RTL,
    which will contain a third argument that is the index in the vec collected
@@ -1565,6 +1631,8 @@ bpf_expand_core_builtin (tree exp, enum bpf_builtins code)
       {
 	tree index = CALL_EXPR_ARG (exp, 0);
 	struct cr_builtins *data = get_builtin_data (TREE_INT_CST_LOW (index));
+
+	bpf_mark_types_as_used (data);
 
 	rtx v = expand_normal (data->default_value);
 	rtx i = expand_normal (index);
@@ -1592,7 +1660,7 @@ void
 bpf_output_core_reloc (rtx *operands, int nr_ops)
 {
   /* Search for an UNSPEC_CORE_RELOC within the operands of the emitting
-     intructions.  */
+     instructions.  */
   rtx unspec_exp = NULL_RTX;
   for (int i = 0; i < nr_ops; i++)
     {
@@ -1647,136 +1715,241 @@ bpf_output_core_reloc (rtx *operands, int nr_ops)
     }
 }
 
-static tree
-maybe_get_base_for_field_expr (tree expr)
-{
-  poly_int64 bitsize, bitpos;
-  tree var_off;
-  machine_mode mode;
-  int sign, reverse, vol;
-
-  if (expr == NULL_TREE)
-    return NULL_TREE;
-
-  return get_inner_reference (expr, &bitsize, &bitpos, &var_off, &mode,
-			      &sign, &reverse, &vol);
-}
-
-/* Access functions to mark sub expressions as attributed with
-   __preserve_access_index.
-   This is required since in gimple format, in order to convert an expression as
-   CO-RE safe, we must create multiple gimple statements.
-   Also, only the type of the base of the expression might be attributed with
-   __preserve_access_index.  Nevertheless all the consecutive accesses to this
-   attributed node should also be converted to CO-RE safe.
-   Any LHS assigned values with CO-RE converted expressions are marked and
-   any uses of these values are later checked for further convertion.
-   The core_access_index_map functions allow to mark this nodes for later
-   convertion to CO-RE.
-   This mechanism are used by make_gimple_core_safe_access_index.  */
-
-static GTY(()) hash_map<tree, tree> *core_access_index_map = NULL;
-
-static void
-core_access_clean (void)
-{
-  if (core_access_index_map == NULL)
-    core_access_index_map = hash_map<tree, tree>::create_ggc (10);
-  core_access_index_map->empty ();
-}
+/* This function verifies if the passed tree node t is a struct field
+   expression and if at this location is is necessary to break the expression
+   in order to split CO-RE and non CO-RE required field/union accesses.  */
 
 static bool
-core_is_access_index (tree expr)
+core_should_split_expr (tree t)
 {
-  if (TREE_CODE (expr) == MEM_REF
-      || TREE_CODE (expr) == INDIRECT_REF)
-    expr = TREE_OPERAND (expr, 0);
+  tree type = TREE_TYPE (t);
+  if (TREE_CODE (type) != RECORD_TYPE
+      && TREE_CODE (type) != UNION_TYPE)
+    return false;
 
-  tree *def = core_access_index_map->get (expr);
-  if (def)
-    return true;
+  if (TREE_CODE (t) == COMPONENT_REF)
+    {
+      tree base = TREE_OPERAND (t, 0);
+
+      bool base_is_attr = lookup_attribute ("preserve_access_index",
+			     TYPE_ATTRIBUTES (TREE_TYPE (base))) != NULL_TREE;
+      bool cur_is_attr = lookup_attribute ("preserve_access_index",
+			     TYPE_ATTRIBUTES (TREE_TYPE (t))) != NULL_TREE;
+
+      if (base_is_attr != cur_is_attr)
+	return true;
+    }
   return false;
 }
 
-static void
-core_mark_as_access_index (tree expr)
-{
-  if (TREE_CODE (expr) == MEM_REF
-      || TREE_CODE (expr) == INDIRECT_REF)
-    expr = TREE_OPERAND (expr, 0);
-
-  if (core_access_index_map->get (expr) == NULL)
-    core_access_index_map->put (expr, NULL_TREE);
-}
-
-/* This function is an adaptation of make_core_safe_access_index but to be used
-   in gimple format trees.  It is used by execute_lower_bpf_core, when
-   traversing the gimple tree looking for nodes that would have its type
-   attributed with __preserve_access_index.  In this particular cases any of
-   the expressions using such attributed types must be made CO-RE safe.  */
+struct walker_data {
+  bool is_root;
+  tree *core_base_pointer;
+};
 
 static tree
-make_gimple_core_safe_access_index (tree *tp,
-				    int *walk_subtrees ATTRIBUTE_UNUSED,
-				    void *data)
+callback_find_next_split_location (tree *tp,
+				   int *walk_subtrees ATTRIBUTE_UNUSED,
+				   void *data)
+{
+  struct walker_data *d = (struct walker_data *) data;
+
+  if (d->is_root == true && TREE_CODE (*tp) == ADDR_EXPR)
+    return NULL_TREE;
+
+  if (d->is_root == false && core_should_split_expr (*tp))
+    {
+      d->core_base_pointer = tp;
+      return *tp;
+    }
+  else
+    {
+      /* Keep walking the expression.  */
+      d->is_root = false;
+      return NULL_TREE;
+    }
+}
+
+/* Walk an expression and return the node at any location in the expression
+   where we should break the expression in its CO-RE and non CO-RE parts.  */
+
+static tree *
+find_next_split_location (tree *tp, bool is_first)
+{
+  struct walker_data data = { is_first, NULL };
+  walk_tree (tp, callback_find_next_split_location, &data, NULL);
+  return data.core_base_pointer;
+}
+
+
+static tree
+callback_should_do_core_access (tree *tp,
+				int *walk_subtrees ATTRIBUTE_UNUSED,
+				void *data ATTRIBUTE_UNUSED)
+{
+/* TODO NOTE: This might have to be removed later as it is an exception
+   to mimic clang behavior.  We need to confirm if the attribute "packed"
+   should disable any CO-RE access in any of its children fields.  */
+  if (lookup_attribute ("packed", TYPE_ATTRIBUTES (TREE_TYPE (*tp))))
+  {
+    warning_at (EXPR_LOC_OR_LOC (*tp, UNKNOWN_LOCATION), OPT_Wbpf_core,
+	"Access through packed struct may not be possible to patch for CO-RE");
+    return *tp;
+  }
+  return NULL_TREE;
+}
+
+
+static bool
+should_do_core_access (tree *tp)
+{
+  tree tfail = walk_tree (tp, callback_should_do_core_access, NULL, NULL);
+  return tfail == NULL_TREE;
+}
+
+/* This is the main callback function to the gimple traversal that will split
+   any field/union accesses in their CO-RE and non CO-RE parts.
+   An early version of this callback would allow also allow its walker function
+   to traverse the parent tree expression on any initial expression (children
+   tree node), by not setting walk_subtrees to false.  In current version only
+   the main tree node of an expression is reached by the traversal function
+   that uses this callback.  The sub traversal of the main tree nodes is done in
+   find_next_split_location call.  The function iterates on the parent
+   expressions within the loop that call find_next_split_location function.  */
+
+static tree
+gimple_core_early_split_expr (tree *tp,
+			      int *walk_subtrees,
+			      void *data)
 {
   struct walk_stmt_info *wi = (struct walk_stmt_info *) data;
-  bool valid = true;
+  tree *split_loc = tp;
+
+  if (!should_do_core_access (tp))
+    {
+      *walk_subtrees = false;
+      return NULL_TREE;
+    }
+
+  /* Find the next split location within expression tree.  */
+  tree *expr = NULL;
+  bool is_first = true;
+  while ((expr = find_next_split_location (split_loc, is_first)) != NULL)
+  {
+    gimple_seq before = NULL;
+
+    if (*expr == *split_loc && is_first == true)
+      break;
+    is_first = false;
+
+    push_gimplify_context ();
+    split_loc = &TREE_OPERAND (*expr, 0);
+
+    tree rhs = *expr;
+    bool pointer_base = false;
+    if (!POINTER_TYPE_P (TREE_TYPE (rhs)))
+      {
+	rhs = fold_build1 (ADDR_EXPR,
+			   build_pointer_type (TREE_TYPE (*expr)),
+			   *expr);
+	pointer_base = true;
+      }
+    tree lhs = create_tmp_var_raw (TREE_TYPE (rhs), "core_split");
+    gimple_add_tmp_var (lhs);
+    gimplify_assign (lhs, rhs, &before);
+
+    if (pointer_base == true)
+      lhs = fold_build2 (MEM_REF, TREE_TYPE (lhs), lhs,
+			 build_int_cst (ptr_type_node, 0));
+    *expr = lhs;
+
+    gsi_insert_seq_before (&(wi->gsi), before, GSI_NEW_STMT);
+    pop_gimplify_context (NULL);
+  }
+
+  /* Never traverse subtrees, as find_next_split_location already does it.  */
+  *walk_subtrees = false;
+
+  /* Keep traverse all the other tree expressions in gimple.  */
+  return NULL_TREE;
+}
+
+static tree
+core_make_builtins (tree *tp, int *walk_subtrees, void *data)
+{
+  struct walk_stmt_info *wi = (struct walk_stmt_info *) data;
   int n = 0;
+  bool valid = true;
+  tree expr = *tp;
+  bool is_addr_expr = false;
 
-  tree *patch = tp;
-  if (TREE_CODE (*patch) == ADDR_EXPR)
-    patch = &(TREE_OPERAND (*tp, 0));
-  tree orig_type = TREE_TYPE (*patch);
+  if (!should_do_core_access (tp))
+    {
+      *walk_subtrees = false;
+      return NULL_TREE;
+    }
 
-  if ((is_attr_preserve_access (*patch)
-      || core_is_access_index (maybe_get_base_for_field_expr (*patch)))
-      && (n = compute_field_expr (*patch, NULL, &valid, NULL)) > 0
+  /* Skip ADDR_EXPR node since we will convert to pointer anyway.  */
+  if (TREE_CODE (*tp) == ADDR_EXPR)
+    {
+      is_addr_expr = true;
+      expr = TREE_OPERAND (*tp, 0);
+    }
+
+  if (is_attr_preserve_access (expr)
+      && (n = compute_field_expr (expr, NULL, &valid, NULL)) > 0
       && valid == true)
     {
-      bool changed = false;
-      tree expr_test = make_core_safe_access_index (*patch, &changed);
+      poly_int64 bitsize, bitpos;
+      tree var_off;
+      machine_mode mode;
+      int sign, reverse, vol;
 
+      tree base = get_inner_reference (expr, &bitsize, &bitpos, &var_off, &mode,
+				       &sign, &reverse, &vol);
 
-      gimple_seq before = NULL;
-      push_gimplify_context ();
-      gimplify_expr (&expr_test, &before, NULL, is_gimple_val, fb_rvalue);
+      tree new_expr = core_expr_with_field_expr_plus_base (base, expr, true);
 
-      /* In case the ADDR_EXPR bypassed above is no longer needed.  */
-      if (patch != tp && TREE_TYPE (expr_test) == TREE_TYPE (*tp))
-	*tp = expr_test;
-      /* For non pointer value accesses.  */
-      else if (TREE_TYPE (expr_test) == build_pointer_type (orig_type))
-	*patch = fold_build2 (MEM_REF, TREE_TYPE (*patch),
-			      expr_test, build_int_cst (ptr_type_node, 0));
-      else
-	*patch = expr_test;
+      /* Abort conversion if it is just a pointer or a reference to an
+	 attributed type.  */
+      if (new_expr != expr)
+	{
 
-      *tp = fold (*tp);
+	  gimple_seq before = NULL;
+	  push_gimplify_context ();
 
-      gsi_insert_seq_before (&(wi->gsi), before, GSI_LAST_NEW_STMT);
-      pop_gimplify_context (NULL);
+	  gimplify_expr (&new_expr, &before, NULL, is_gimple_val, fb_rvalue);
 
-      wi->changed = true;
-      *walk_subtrees = false;
+	  tree new_expr_type = TREE_TYPE (new_expr);
 
-      tree lhs;
-      if (!wi->is_lhs
-	  && (lhs = gimple_get_lhs (wi->stmt)) != NULL_TREE)
-	core_mark_as_access_index (lhs);
+	  /* Replace original expression by new_expr.  If the type is the same
+	     tree node, good!  If it is a pointer type, we need to dereference
+	     the type within the pointer to guarantee it is the same.  */
+	  if (TREE_TYPE (new_expr) == TREE_TYPE (*tp)
+	      || (is_addr_expr
+		  && TREE_TYPE (new_expr_type) == TREE_TYPE (expr)))
+	    *tp = fold (new_expr);
+	  else if (TREE_TYPE (new_expr) == build_pointer_type (TREE_TYPE (*tp)))
+	    *tp = fold_build2 (MEM_REF, TREE_TYPE (*tp),
+			       new_expr, build_int_cst (ptr_type_node, 0));
+	  else
+	    gcc_assert (0);
+
+	  gsi_insert_seq_before (&(wi->gsi), before, GSI_SAME_STMT);
+	  pop_gimplify_context (NULL);
+
+	  *walk_subtrees = false;
+	}
     }
   return NULL_TREE;
 }
 
 /* This is the entry point for the pass_data_lower_bpg_core.  It walks all the
    statements in gimple, looking for expressions that are suppose to be CO-RE
-   preserve_access_index attributed.
-   Those expressions are processed and split by
-   make_gimple_core_safe_access_index function, which will both create the
-   calls to __build_core_reloc and split the expression in smaller parts in
-   case it cannot be represented CO-RE safeguarded by a single CO-RE
-   relocation.  */
-
+   preserve_access_index attributed, and should not.
+   It first splits CO-RE expressions from non CO-RE ones.
+   Then the CO-RE expressions are processed by core_make_builtins which will
+   create the required builtins that will result in the CO-RE relocations.  */
 static unsigned int
 execute_lower_bpf_core (void)
 {
@@ -1787,13 +1960,14 @@ execute_lower_bpf_core (void)
   gimple_seq body = gimple_body (current_function_decl);
 
   struct walk_stmt_info wi;
-  core_access_clean ();
-
   memset (&wi, 0, sizeof (wi));
-  wi.info = NULL;
 
-  /* Split preserve_access_index expressions when needed.  */
-  walk_gimple_seq_mod (&body, NULL, make_gimple_core_safe_access_index, &wi);
+  /* Early split to guarantee base of expression is a preserve_access_index
+     structure.  */
+  walk_gimple_seq_mod (&body, NULL, gimple_core_early_split_expr, &wi);
+
+  /* Add CO-RE builtins for all expressions that need them.  */
+  walk_gimple_seq_mod (&body, NULL, core_make_builtins, &wi);
   return 0;
 }
 

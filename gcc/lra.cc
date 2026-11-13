@@ -1,5 +1,5 @@
 /* LRA (local register allocator) driver and LRA utilities.
-   Copyright (C) 2010-2024 Free Software Foundation, Inc.
+   Copyright (C) 2010-2026 Free Software Foundation, Inc.
    Contributed by Vladimir Makarov <vmakarov@redhat.com>.
 
 This file is part of GCC.
@@ -69,9 +69,9 @@ along with GCC; see the file COPYING3.	If not see
          | Spilled pseudo |      -------------------
          |    to memory   |<----| Rematerialization |
          |  substitution  |      -------------------
-          ----------------        
+          ----------------
                   | No susbtitions
-                  V                
+                  V
       -------------------------
      | Hard regs substitution, |
      |  devirtalization, and   |------> Finish
@@ -260,6 +260,7 @@ lra_invalidate_insn_data (rtx_insn *insn)
 void
 lra_set_insn_deleted (rtx_insn *insn)
 {
+  bitmap_clear_bit (&lra_postponed_insns, INSN_UID (insn));
   lra_invalidate_insn_data (insn);
   SET_INSN_DELETED (insn);
 }
@@ -463,7 +464,7 @@ lra_emit_add (rtx x, rtx y, rtx z)
 	      if (! ok_p)
 		{
 		  rtx_insn *insn;
-		  
+
 		  delete_insns_since (last);
 		  /* Generate x = disp; x = x + base; x = x + index_scale.  */
 		  emit_move_insn (x, disp);
@@ -489,16 +490,25 @@ int lra_curr_reload_num;
 
 static void remove_insn_scratches (rtx_insn *insn);
 
-/* Emit x := y, processing special case when y = u + v or y = u + v *
-   scale + w through emit_add (Y can be an address which is base +
-   index reg * scale + displacement in general case).  X may be used
-   as intermediate result therefore it should be not in Y.  */
+/* Emit x := y, processing special case when y = u + v or y = u + v * scale + w
+   through emit_add (Y can be an address which is base + index reg * scale +
+   displacement in general case).  X may be used as intermediate result
+   therefore it should be not in Y.  Set up pointer flag of X if Y is
+   equivalence whose original target has setup pointer flag.  */
 void
 lra_emit_move (rtx x, rtx y)
 {
   int old;
   rtx_insn *insn;
-  
+
+  if ((REG_P (x) || MEM_P (x)) && lra_pointer_equiv_set_in (y))
+     {
+       /* Set up pointer flag from original equivalence target: */
+       if (REG_P (x))
+	 REG_POINTER (x) = 1;
+       else
+	 MEM_POINTER (x) = 1;
+     }
   if (GET_CODE (y) != PLUS)
     {
       if (rtx_equal_p (x, y))
@@ -549,7 +559,8 @@ lra_asm_insn_error (rtx_insn *insn)
   if (JUMP_P (insn))
     {
       ira_nullify_asm_goto (insn);
-      lra_update_insn_regno_info (insn);
+      lra_invalidate_insn_data (insn);
+      bitmap_clear_bit (&lra_postponed_insns, INSN_UID (insn));
     }
   else
     {
@@ -1650,7 +1661,7 @@ lra_update_insn_regno_info (rtx_insn *insn)
   struct lra_static_insn_data *static_data;
   enum rtx_code code;
   rtx link;
-  
+
   if (! INSN_P (insn))
     return;
   data = lra_get_insn_recog_data (insn);
@@ -1730,6 +1741,12 @@ lra_rtx_hash (rtx x)
     case CONST_INT:
       return val + UINTVAL (x);
 
+    case SUBREG:
+      val += lra_rtx_hash (SUBREG_REG (x));
+      for (int i = 0; i < NUM_POLY_INT_COEFFS; ++i)
+	val += SUBREG_BYTE (x).coeffs[i];
+      return val;
+
     default:
       break;
     }
@@ -1747,6 +1764,10 @@ lra_rtx_hash (rtx x)
 	case 'n':
 	case 'i':
 	  val += XINT (x, i);
+	  break;
+
+	case 'L':
+	  val += XLOC (x, i);
 	  break;
 
 	case 'V':
@@ -1863,14 +1884,17 @@ push_insns (rtx_insn *from, rtx_insn *to)
 }
 
 /* Set up and return sp offset for insns in range [FROM, LAST].  The offset is
-   taken from the next BB insn after LAST or zero if there in such
-   insn.  */
+   taken from the BB insn before FROM after simulating its effects,
+   or zero if there is no such insn.  */
 static poly_int64
 setup_sp_offset (rtx_insn *from, rtx_insn *last)
 {
-  rtx_insn *before = next_nonnote_nondebug_insn_bb (last);
-  poly_int64 offset = (before == NULL_RTX || ! INSN_P (before)
-		       ? 0 : lra_get_insn_recog_data (before)->sp_offset);
+  rtx_insn *before = prev_nonnote_nondebug_insn_bb (from);
+  poly_int64 offset = 0;
+
+  if (before && INSN_P (before))
+    offset = lra_update_sp_offset (PATTERN (before),
+				   lra_get_insn_recog_data (before)->sp_offset);
 
   for (rtx_insn *insn = from; insn != NEXT_INSN (last); insn = NEXT_INSN (insn))
     {
@@ -1880,7 +1904,7 @@ setup_sp_offset (rtx_insn *from, rtx_insn *last)
   return offset;
 }
 
-/* Dump all func insns in a slim form.  */ 
+/* Dump all func insns in a slim form.  */
 void
 lra_dump_insns (FILE *f)
 {
@@ -1888,7 +1912,7 @@ lra_dump_insns (FILE *f)
 }
 
 /* Dump all func insns in a slim form with TITLE when the dump file is open and
-   lra_verbose >=7.  */ 
+   lra_verbose >=7.  */
 void
 lra_dump_insns_if_possible (const char *title)
 {
@@ -1898,12 +1922,12 @@ lra_dump_insns_if_possible (const char *title)
   lra_dump_insns (lra_dump_file);
 }
 
-/* Emit insns BEFORE before INSN and insns AFTER after INSN.  Put the
-   insns onto the stack.  Print about emitting the insns with
-   TITLE.  */
+/* Emit insns BEFORE before INSN and insns AFTER after INSN.  Put the insns
+   onto the stack.  Print about emitting the insns with TITLE.  Move insn
+   REG_ARGS_SIZE note to AFTER insns if FIXUP_REG_ARGS_SIZE.  */
 void
 lra_process_new_insns (rtx_insn *insn, rtx_insn *before, rtx_insn *after,
-		       const char *title)
+		       const char *title, bool fixup_reg_args_size)
 {
   if (before == NULL_RTX && after == NULL_RTX)
     return;
@@ -1948,7 +1972,7 @@ lra_process_new_insns (rtx_insn *insn, rtx_insn *before, rtx_insn *after,
       if (! JUMP_P (insn))
 	{
 	  rtx_insn *last;
-	  
+
 	  if (lra_dump_file != NULL)
 	    {
 	      fprintf (lra_dump_file, "    %s after:\n", title);
@@ -1961,19 +1985,38 @@ lra_process_new_insns (rtx_insn *insn, rtx_insn *before, rtx_insn *after,
 	  emit_insn_after (after, insn);
 	  push_insns (last, insn);
 	  setup_sp_offset (after, last);
+	  if (fixup_reg_args_size)
+	    {
+	      rtx note = find_reg_note (insn, REG_ARGS_SIZE, NULL_RTX);
+	      if (note)
+		{
+		  remove_note (insn, note);
+		  fixup_args_size_notes (insn, last,
+					 get_args_size (note));
+		  if (lra_dump_file != NULL)
+		    {
+		      fprintf (lra_dump_file,
+			       "    fixing up REG_SIZE_NOTE for:\n");
+		      dump_rtl_slim (lra_dump_file, insn, insn, -1, 0);
+		      fprintf (lra_dump_file, "    fixed insns after:\n");
+		      dump_rtl_slim (lra_dump_file,
+				     NEXT_INSN (insn), last, -1, 0);
+		    }
+		}
+	    }
 	}
       else
 	{
 	  /* Put output reload insns on successor BBs: */
 	  edge_iterator ei;
 	  edge e;
-	  
+
 	  FOR_EACH_EDGE (e, ei, BLOCK_FOR_INSN (insn)->succs)
 	    if (e->dest != EXIT_BLOCK_PTR_FOR_FN (cfun))
 	      {
 		/* We already made the edge no-critical in ira.cc::ira */
 		lra_assert (!EDGE_CRITICAL_P (e));
-		rtx_insn *curr, *tmp = BB_HEAD (e->dest);
+		rtx_insn *tmp = BB_HEAD (e->dest);
 		if (LABEL_P (tmp))
 		  tmp = NEXT_INSN (tmp);
 		if (NOTE_INSN_BASIC_BLOCK_P (tmp))
@@ -1983,8 +2026,14 @@ lra_process_new_insns (rtx_insn *insn, rtx_insn *before, rtx_insn *after,
 		if (tmp == NULL)
 		  continue;
 		start_sequence ();
-		for (curr = after; curr != NULL_RTX; curr = NEXT_INSN (curr))
-		  emit_insn (copy_insn (PATTERN (curr)));
+		for (rtx_insn *curr = after; curr != NULL_RTX; curr = NEXT_INSN (curr))
+		  {
+		    rtx pat = copy_insn (PATTERN (curr));
+		    rtx_insn *copy = emit_insn (pat);
+		    if (bitmap_bit_p (&lra_postponed_insns, INSN_UID (curr)))
+		      /* Propagate flags of postponed insns.  */
+		      bitmap_set_bit (&lra_postponed_insns, INSN_UID (copy));
+		  }
 		rtx_insn *copy = get_insns (), *last = get_last_insn ();
 		end_sequence ();
 		if (lra_dump_file != NULL)
@@ -2004,6 +2053,10 @@ lra_process_new_insns (rtx_insn *insn, rtx_insn *before, rtx_insn *after,
 		   will be updated before the next assignment
 		   sub-pass. */
 	      }
+	  for (rtx_insn *curr = after; curr != NULL_RTX; curr = NEXT_INSN (curr))
+	    /* Clear flags of postponed insns which will be absent in the
+	       result code.  */
+	    bitmap_clear_bit (&lra_postponed_insns, INSN_UID (curr));
 	}
     }
   if (lra_dump_file != NULL)
@@ -2049,7 +2102,7 @@ lra_substitute_pseudo (rtx *loc, int old_regno, rtx new_reg, bool subreg_p,
 	  *loc = subst;
 	  return true;
 	}
-      
+
     }
   else if (code == REG && (int) REGNO (x) == old_regno)
     {
@@ -2313,6 +2366,14 @@ bitmap_head lra_optional_reload_pseudos;
    pass.  */
 bitmap_head lra_subreg_reload_pseudos;
 
+/* UIDs of reload insns which should be processed after assigning the reload
+   pseudos.  We need to do this when reload pseudo should be a general reg but
+   we have different mov insns for different subsets of general regs, e.g. hi
+   and lo regs of arm thumb.  Such way we can guarantee finding regs for the
+   reload pseudos of asm insn which can have a lot of operands (general regs in
+   our example).  */
+bitmap_head lra_postponed_insns;
+
 /* File used for output of LRA debug information.  */
 FILE *lra_dump_file;
 
@@ -2365,7 +2426,7 @@ lra (FILE *f, int verbose)
   lra_verbose = verbose;
   lra_asm_error_p = false;
   lra_pmode_pseudo = gen_reg_rtx (Pmode);
-  
+
   timevar_push (TV_LRA);
 
   /* Make sure that the last insn is a note.  Some subsequent passes
@@ -2428,6 +2489,7 @@ lra (FILE *f, int verbose)
   bitmap_initialize (&lra_split_regs, &reg_obstack);
   bitmap_initialize (&lra_optional_reload_pseudos, &reg_obstack);
   bitmap_initialize (&lra_subreg_reload_pseudos, &reg_obstack);
+  bitmap_initialize (&lra_postponed_insns, &reg_obstack);
   live_p = false;
   if (maybe_ne (get_frame_size (), 0) && crtl->stack_alignment_needed)
     /* If we have a stack frame, we must align it now.  The stack size
@@ -2473,6 +2535,7 @@ lra (FILE *f, int verbose)
 	    lra_clear_live_ranges ();
 	  bool fails_p;
 	  lra_hard_reg_split_p = false;
+	  int split_fails_num = 0;
 	  do
 	    {
 	      /* We need live ranges for lra_assign -- so build them.
@@ -2486,12 +2549,12 @@ lra (FILE *f, int verbose)
 		 coalescing.  If inheritance pseudos were spilled, the
 		 memory-memory moves involving them will be removed by
 		 pass undoing inheritance.  */
-	      if (lra_simple_p)
+	      if (lra_simple_p || lra_hard_reg_split_p)
 		lra_assign (fails_p);
 	      else
 		{
 		  bool spill_p = !lra_assign (fails_p);
-		  
+
 		  if (lra_undo_inheritance ())
 		    live_p = false;
 		  if (spill_p && ! fails_p)
@@ -2515,8 +2578,15 @@ lra (FILE *f, int verbose)
 		  if (live_p)
 		    lra_clear_live_ranges ();
 		  live_p = false;
-		  if (! lra_split_hard_reg_for ())
-		    break;
+		  /* See a comment for LRA_MAX_FAILED_SPLITS definition.  */
+		  bool last_failed_split_p
+		    = split_fails_num > LRA_MAX_FAILED_SPLITS;
+		  if (! lra_split_hard_reg_for (last_failed_split_p))
+		    {
+		      if (last_failed_split_p)
+			break;
+		      split_fails_num++;
+		    }
 		  lra_hard_reg_split_p = true;
 		}
 	    }
@@ -2526,6 +2596,11 @@ lra (FILE *f, int verbose)
 	    lra_create_live_ranges (true, true);
 	    live_p = true;
 	  }
+	  bitmap_iterator bi;
+	  unsigned int uid;
+	  EXECUTE_IF_SET_IN_BITMAP (&lra_postponed_insns, 0, uid, bi)
+	    lra_push_insn_by_uid (uid);
+	  bitmap_clear (&lra_postponed_insns);
 	}
       /* Don't clear optional reloads bitmap until all constraints are
 	 satisfied as we need to differ them from regular reloads.  */
@@ -2548,8 +2623,11 @@ lra (FILE *f, int verbose)
 	 rematerialize them first.  */
       if (lra_remat ())
 	{
-	  /* We need full live info -- see the comment above.  */
-	  lra_create_live_ranges (lra_reg_spill_p, true);
+	  /* We need full live info -- see the comment above.  We also might
+	     need live info if we have a pseudo assigned to hard frame pointer
+	     reg and will need FP for usual purposes.  */
+	  lra_create_live_ranges (lra_reg_spill_p || lra_fp_pseudo_p (),
+				  true);
 	  live_p = true;
 	  if (! lra_need_for_spills_p ())
 	    {
@@ -2584,6 +2662,7 @@ lra (FILE *f, int verbose)
   sbitmap_free (lra_constraint_insn_stack_bitmap);
   lra_constraint_insn_stack.release ();
   finish_insn_recog_data ();
+  lra_finish_equiv ();
   regstat_free_n_sets_and_refs ();
   regstat_free_ri ();
   reload_completed = 1;
@@ -2591,8 +2670,10 @@ lra (FILE *f, int verbose)
 
   inserted_p = fixup_abnormal_edges ();
 
-  /* We've possibly turned single trapping insn into multiple ones.  */
-  if (cfun->can_throw_non_call_exceptions)
+  /* Split basic blocks if we've possibly turned single trapping insn
+     into multiple ones or otherwise the backend requested to do so.  */
+  if (cfun->can_throw_non_call_exceptions
+      || cfun->split_basic_blocks_after_reload)
     {
       auto_sbitmap blocks (last_basic_block_for_fn (cfun));
       bitmap_ones (blocks);

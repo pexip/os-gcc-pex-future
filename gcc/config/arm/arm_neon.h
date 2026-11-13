@@ -1,6 +1,6 @@
 /* ARM NEON intrinsics include file.
 
-   Copyright (C) 2006-2024 Free Software Foundation, Inc.
+   Copyright (C) 2006-2026 Free Software Foundation, Inc.
    Contributed by CodeSourcery.
 
    This file is part of GCC.
@@ -27,7 +27,21 @@
 #ifndef _GCC_ARM_NEON_H
 #define _GCC_ARM_NEON_H 1
 
+/* This header is only useful if we're compiling with -mfloat-abi=hard or
+   -mfloat-abi=softfp.  But we can't detect that directly here as the
+   compiler does not provide a pre-define for it.  However, we can check
+   whether forcing VFP will cause __ARM_FP to become defined and use that.  */
+
+#pragma GCC push_options
+#pragma GCC target ("fpu=vfp")
 #ifndef __ARM_FP
+#define __ARM_SOFT_ABI 1
+#else
+#define __ARM_SOFT_ABI 0
+#endif
+#pragma GCC pop_options
+
+#if __ARM_SOFT_ABI
 #error "NEON intrinsics not available with the soft-float ABI.  Please use -mfloat-abi=softfp or -mfloat-abi=hard"
 #else
 
@@ -20924,11 +20938,6 @@ vbfdotq_lane_f32 (float32x4_t __r, bfloat16x8_t __a, bfloat16x4_t __b,
   return __builtin_neon_vbfdot_lanev4bfv4sf (__r, __a, __b, __index);
 }
 
-#pragma GCC pop_options
-
-#pragma GCC push_options
-#pragma GCC target ("arch=armv8.2-a+bf16")
-
 typedef struct bfloat16x4x2_t
 {
   bfloat16x4_t val[2];
@@ -21489,4 +21498,7 @@ vst4q_lane_bf16 (bfloat16_t * __a, bfloat16x8x4_t __b, const int __c)
 #pragma GCC pop_options
 
 #endif
+
+#undef __ARM_SOFT_ABI
+
 #endif

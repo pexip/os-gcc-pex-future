@@ -1,5 +1,5 @@
 /* Dependency generator for Makefile fragments.
-   Copyright (C) 2000-2024 Free Software Foundation, Inc.
+   Copyright (C) 2000-2026 Free Software Foundation, Inc.
    Contributed by Zack Weinberg, Mar 2000
 
 This program is free software; you can redistribute it and/or modify it
@@ -81,8 +81,9 @@ public:
   };
 
   mkdeps ()
-    : primary_output (NULL), module_name (NULL), cmi_name (NULL)
-    , is_header_unit (false), is_exported (false), quote_lwm (0)
+    : primary_output (NULL), module_name (NULL), cmi_name (NULL),
+      is_header_unit (false), is_exported (false), quote_lwm (0),
+      first_phony_dep (1)
   {
   }
   ~mkdeps ()
@@ -118,6 +119,7 @@ public:
   bool is_header_unit;
   bool is_exported;
   unsigned short quote_lwm;
+  unsigned int first_phony_dep;
 };
 
 /* Apply Make quoting to STR, TRAIL.  Note that it's not possible to
@@ -318,11 +320,17 @@ fdeps_add_target (struct mkdeps *d, const char *o, bool is_primary)
 void
 deps_add_dep (class mkdeps *d, const char *t)
 {
-  gcc_assert (*t);
+  if (*t)
+    {
+      t = apply_vpath (d, t);
 
-  t = apply_vpath (d, t);
-
-  d->deps.push (xstrdup (t));
+      d->deps.push (xstrdup (t));
+    }
+  /* When called first with "", remember we should
+     emit for -MP all dependencies rather than just
+     second and following dependency.  See PR105412.  */
+  else if (d->deps.size () == 0)
+    d->first_phony_dep = 0;
 }
 
 void
@@ -355,7 +363,7 @@ deps_add_module_target (struct mkdeps *d, const char *m,
 			const char *cmi, bool is_header_unit, bool is_exported)
 {
   gcc_assert (!d->module_name);
-  
+
   d->module_name = xstrdup (m);
   d->is_header_unit = is_header_unit;
   d->is_exported = is_exported;
@@ -411,8 +419,7 @@ make_write_vec (const mkdeps::vec<const char *> &vec, FILE *fp,
   return col;
 }
 
-/* Write the dependencies to a Makefile.  If PHONY is true, add
-   .PHONY targets for all the dependencies too.  */
+/* Write the dependencies to a Makefile.  */
 
 static void
 make_write (const cpp_reader *pfile, FILE *fp, unsigned int colmax)
@@ -439,7 +446,7 @@ make_write (const cpp_reader *pfile, FILE *fp, unsigned int colmax)
       make_write_vec (d->deps, fp, column, colmax);
       fputs ("\n", fp);
       if (CPP_OPTION (pfile, deps.phony_targets))
-	for (unsigned i = 1; i < d->deps.size (); i++)
+	for (unsigned i = d->first_phony_dep; i < d->deps.size (); i++)
 	  fprintf (fp, "%s:\n", munge (d->deps[i]));
     }
 
@@ -453,7 +460,7 @@ make_write (const cpp_reader *pfile, FILE *fp, unsigned int colmax)
 	column = make_write_name (d->cmi_name, fp, column, colmax);
       fputs (":", fp);
       column++;
-      column = make_write_vec (d->modules, fp, column, colmax, 0, ".c++m");
+      column = make_write_vec (d->modules, fp, column, colmax, 0, ".c++-module");
       fputs ("\n", fp);
     }
 
@@ -463,7 +470,20 @@ make_write (const cpp_reader *pfile, FILE *fp, unsigned int colmax)
 	{
 	  /* module-name : cmi-name */
 	  column = make_write_name (d->module_name, fp, 0, colmax,
-				    true, ".c++m");
+				    true, ".c++-module");
+	  const char *module_basename = nullptr;
+	  if (d->is_header_unit)
+	    {
+	      /* Also emit a target for the include name, so for #include
+		 <iostream> you'd make iostream.c++-header-unit, regardless of
+		 what actual directory iostream lives in.  We reconstruct the
+		 include name by skipping the directory where we found it.  */
+	      auto *dir = _cpp_get_file_dir (pfile->main_file);
+	      gcc_assert (!strncmp (d->module_name, dir->name, dir->len));
+	      module_basename = (d->module_name + dir->len + 1);
+	      column = make_write_name (module_basename, fp, column, colmax,
+					true, ".c++-header-unit");
+	    }
 	  fputs (":", fp);
 	  column++;
 	  column = make_write_name (d->cmi_name, fp, column, colmax);
@@ -471,7 +491,10 @@ make_write (const cpp_reader *pfile, FILE *fp, unsigned int colmax)
 
 	  column = fprintf (fp, ".PHONY:");
 	  column = make_write_name (d->module_name, fp, column, colmax,
-				    true, ".c++m");
+				    true, ".c++-module");
+	  if (module_basename)
+	    column = make_write_name (module_basename, fp, column, colmax,
+				      true, ".c++-header-unit");
 	  fputs ("\n", fp);
 	}
 
@@ -488,11 +511,11 @@ make_write (const cpp_reader *pfile, FILE *fp, unsigned int colmax)
 	  fputs ("\n", fp);
 	}
     }
-  
+
   if (d->modules.size ())
     {
       column = fprintf (fp, "CXX_IMPORTS +=");
-      make_write_vec (d->modules, fp, column, colmax, 0, ".c++m");
+      make_write_vec (d->modules, fp, column, colmax, 0, ".c++-module");
       fputs ("\n", fp);
     }
 }

@@ -1,14 +1,67 @@
-2025-05-23  Release Manager
+2026-08-07  Release Manager
 
-	* GCC 14.3.0 released.
+	* GCC 16.2.0 released.
 
-2024-08-01  Release Manager
+2026-04-30  Release Manager
 
-	* GCC 14.2.0 released.
+	* GCC 16.1.0 released.
 
-2024-05-07  Release Manager
+2026-01-29  Pietro Monteiro  <pietro@sociotechnical.xyz>
 
-	* GCC 14.1.0 released.
+	PR libffi/117635
+	* merge.sh: Delete .allow-ai-service and .gail-labels when
+	merging new upstream versions.
+
+2026-01-29  Pietro Monteiro  <pietro@sociotechnical.xyz>
+
+	PR libffi/117635
+	* LOCAL_PATCHES: Add missing patches.
+
+2025-12-29  Rainer Orth  <ro@CeBiTec.Uni-Bielefeld.DE>
+
+	* configure: Regenerate.
+
+2025-11-03  Sam James  <sam@gentoo.org>
+
+	* configure: Regenerate.
+
+2025-10-05  Sam James  <sam@gentoo.org>
+
+	* Makefile.in: Regenerate.
+	* aclocal.m4: Regenerate.
+	* configure: Regenerate.
+	* include/Makefile.in: Regenerate.
+	* man/Makefile.in: Regenerate.
+	* testsuite/Makefile.in: Regenerate.
+
+2024-10-24  Yang Yujie  <yangyujie@loongson.cn>
+
+	* src/loongarch64/ffi.c: Avoid defining floats
+	in struct call_context if the ABI is soft-float.
+
+2024-10-16  Joseph Myers  <josmyers@redhat.com>
+
+	* testsuite/libffi.call/va_struct2.c (test_fn): Cast n to void.
+	* testsuite/libffi.call/va_struct3.c (test_fn): Likewise.
+	Backported from <https://github.com/libffi/libffi/pull/861>.
+
+2024-09-23  Matthieu Longo  <matthieu.longo@arm.com>
+
+	* include/ffi_cfi.h (cfi_negate_ra_state): Declare AArch64 cfi
+	directive.
+
+2024-07-01  Rainer Orth  <ro@CeBiTec.Uni-Bielefeld.DE>
+
+	PR libffi/115681
+	* src/sparc/ffi.c (ffi_call_int): Copy structure arguments to
+	maintain call-by-value semantics.
+
+2024-05-07  Rainer Orth  <ro@CeBiTec.Uni-Bielefeld.DE>
+
+	* Makefile.am [LIBFFI_BUILD_VERSIONED_SHLIB_SUN] (libffi.map-sun):
+	Pass $(libffi_la_OBJECTS), $(libffi_la_LIBADD) to make_sunver.pl
+	unmodified.
+	* Makefile.in: Regenerate.
 
 2023-10-26  Thomas Schwinge  <thomas@codesourcery.com>
 

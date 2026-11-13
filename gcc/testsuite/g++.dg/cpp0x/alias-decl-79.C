@@ -14,22 +14,22 @@ template<class T> struct A;
 template<class T>
 void f() {
   using B [[gnu::vector_size(16)]] = T;
-  static_assert(!is_same<T, B>::value, "");        // { dg-bogus "" "" { xfail *-*-* } }
-  static_assert(!is_same<A<T>, A<B>>::value, "");  // { dg-bogus "" "" { xfail *-*-* } }
+  static_assert(!is_same<T, B>::value, "");
+  static_assert(!is_same<A<T>, A<B>>::value, "");
 #if __cpp_variable_templates
-  static_assert(!is_same_v<T, B>, "");             // { dg-bogus "" "" { xfail c++14 } }
-  static_assert(!is_same_v<A<T>, A<B>>, "");       // { dg-bogus "" "" { xfail c++14 } }
+  static_assert(!is_same_v<T, B>, "");
+  static_assert(!is_same_v<A<T>, A<B>>, "");
 #endif
 };
 
 template<class T>
 void g() {
   using C [[gnu::vector_size(16)]] = T*;
-  static_assert(!is_same<T*, C>::value, "");       // { dg-bogus "" "" { xfail *-*-* } }
-  static_assert(!is_same<A<T*>, A<C>>::value, ""); // { dg-bogus "" "" { xfail *-*-* } }
+  static_assert(!is_same<T*, C>::value, "");
+  static_assert(!is_same<A<T*>, A<C>>::value, "");
 #if __cpp_variable_templates
-  static_assert(!is_same_v<T*, C>, "");            // { dg-bogus "" "" { xfail c++14 } }
-  static_assert(!is_same_v<A<T*>, A<C>>, "");      // { dg-bogus "" "" { xfail c++14 } }
+  static_assert(!is_same_v<T*, C>, "");
+  static_assert(!is_same_v<A<T*>, A<C>>, "");
 #endif
 };
 

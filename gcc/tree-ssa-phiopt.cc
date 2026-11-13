@@ -1,5 +1,5 @@
 /* Optimization of PHI nodes by converting them into straightline code.
-   Copyright (C) 2004-2024 Free Software Foundation, Inc.
+   Copyright (C) 2004-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -55,6 +55,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-ssa-propagate.h"
 #include "tree-ssa-dce.h"
 #include "tree-ssa-loop-niter.h"
+#include "gimple-predict.h"
 
 /* Return the singleton PHI in the SEQ of PHIs for edges E0 and E1. */
 
@@ -63,14 +64,6 @@ single_non_singleton_phi_for_edges (gimple_seq seq, edge e0, edge e1)
 {
   gimple_stmt_iterator i;
   gphi *phi = NULL;
-  if (gimple_seq_singleton_p (seq))
-    {
-      phi = as_a <gphi *> (gsi_stmt (gsi_start (seq)));
-      /* Never return virtual phis.  */
-      if (virtual_operand_p (gimple_phi_result (phi)))
-	return NULL;
-      return phi;
-    }
   for (i = gsi_start (seq); !gsi_end_p (i); gsi_next (&i))
     {
       gphi *p = as_a <gphi *> (gsi_stmt (i));
@@ -104,7 +97,7 @@ replace_phi_edge_with_variable (basic_block cond_block,
 {
   basic_block bb = gimple_bb (phi);
   gimple_stmt_iterator gsi;
-  tree phi_result = PHI_RESULT (phi);
+  tree phi_result = gimple_phi_result (phi);
   bool deleteboth = false;
 
   /* Duplicate range info if they are the only things setting the target PHI.
@@ -230,29 +223,122 @@ replace_phi_edge_with_variable (basic_block cond_block,
 	      bb->index);
 }
 
-/* PR66726: Factor operations out of COND_EXPR.  If the arguments of the PHI
-   stmt are CONVERT_STMT, factor out the conversion and perform the conversion
-   to the result of PHI stmt.  COND_STMT is the controlling predicate.
-   Return the newly-created PHI, if any.  */
-
-static gphi *
-factor_out_conditional_operation (edge e0, edge e1, gphi *phi,
-				   tree arg0, tree arg1, gimple *cond_stmt)
+/* Returns true if the ARG used from DEF_STMT is profitable to move
+   to a PHI node of the basic block MERGE where the new statement
+   will be located.  */
+static bool
+is_factor_profitable (gimple *def_stmt, basic_block merge, tree arg)
 {
-  gimple *arg0_def_stmt = NULL, *arg1_def_stmt = NULL, *new_stmt;
-  tree new_arg0 = NULL_TREE, new_arg1 = NULL_TREE;
+  /* The defining statement should be conditional.  */
+  if (dominated_by_p (CDI_DOMINATORS, merge,
+		      gimple_bb (def_stmt)))
+    return false;
+
+  /* If the arg is invariant, then there is
+     no extending of the live range. */
+  if (is_gimple_min_invariant (arg))
+    return true;
+
+  /* Otherwise, the arg needs to be a ssa name. */
+  if (TREE_CODE (arg) != SSA_NAME)
+    return false;
+
+  /* We should not increase the live range of arg
+     across too many statements or calls.  */
+  gimple_stmt_iterator gsi = gsi_for_stmt (def_stmt);
+  gsi_next_nondebug (&gsi);
+
+  /* Skip past nops and predicates. */
+  while (!gsi_end_p (gsi)
+	 && (gimple_code (gsi_stmt (gsi)) == GIMPLE_NOP
+	     || gimple_code (gsi_stmt (gsi)) == GIMPLE_PREDICT))
+    gsi_next_nondebug (&gsi);
+
+  /* If the defining statement is at the end of the bb, then it is
+     always profitable to be to move.  */
+  if (gsi_end_p (gsi))
+    return true;
+
+  /* Check if the uses of arg is dominated by merge block, this is a quick and
+     rough estimate if arg is still alive at the merge bb.  */
+  /* FIXME: extend to a more complete live range detection.  */
+  use_operand_p use_p;
+  imm_use_iterator iter;
+  FOR_EACH_IMM_USE_FAST (use_p, iter, arg)
+    {
+      gimple *use_stmt = USE_STMT (use_p);
+      if (is_gimple_debug (use_stmt))
+	continue;
+      basic_block use_bb = gimple_bb (use_stmt);
+      if (dominated_by_p (CDI_DOMINATORS, merge, use_bb))
+	return true;
+    }
+
+  /* If there are a few (non-call/asm) statements between
+     the old defining statement and end of the bb, then
+     the live range of new arg does not increase enough.  */
+  int max_statements = param_phiopt_factor_max_stmts_live;
+
+  while (!gsi_end_p (gsi))
+    {
+      gimple *stmt = gsi_stmt (gsi);
+      auto gcode = gimple_code (stmt);
+      /* Skip over NOPs and predicts. */
+      if (gcode == GIMPLE_NOP
+	  || gcode == GIMPLE_PREDICT)
+	{
+	  gsi_next_nondebug (&gsi);
+	  continue;
+	}
+      /* Non-assigns will extend the live range too much.  */
+      if (gcode != GIMPLE_ASSIGN)
+	return false;
+      max_statements --;
+      if (max_statements == 0)
+	return false;
+      gsi_next_nondebug (&gsi);
+    }
+  return true;
+}
+
+/* PR66726: Factor operations out of COND_EXPR.  If the arguments of the PHI
+   stmt are Unary operator, factor out the operation and perform the operation
+   to the result of PHI stmt.  COND_STMT is the controlling predicate.
+   Return true if the operation was factored out; false otherwise.  */
+
+static bool
+factor_out_conditional_operation (edge e0, edge e1, basic_block merge,
+				  gphi *phi, gimple *cond_stmt)
+{
+  gimple *arg0_def_stmt = NULL, *arg1_def_stmt = NULL;
   tree temp, result;
   gphi *newphi;
   gimple_stmt_iterator gsi, gsi_for_def;
   location_t locus = gimple_location (phi);
-  enum tree_code op_code;
+  gimple_match_op arg0_op, arg1_op;
 
-  /* Handle only PHI statements with two arguments.  TODO: If all
-     other arguments to PHI are INTEGER_CST or if their defining
-     statement have the same unary operation, we can handle more
-     than two arguments too.  */
-  if (gimple_phi_num_args (phi) != 2)
-    return NULL;
+  /* We should only get here if the phi had two arguments.  */
+  gcc_assert (gimple_phi_num_args (phi) == 2);
+
+  /* Virtual operands are never handled. */
+  if (virtual_operand_p (gimple_phi_result (phi)))
+    return false;
+
+  tree arg0 = gimple_phi_arg_def (phi, e0->dest_idx);
+  tree arg1 = gimple_phi_arg_def (phi, e1->dest_idx);
+  location_t narg0_loc = gimple_location (phi);
+  location_t narg1_loc = gimple_location (phi);
+  if (gimple_phi_arg_location (phi, e0->dest_idx) != UNKNOWN_LOCATION)
+    narg0_loc = gimple_phi_arg_location (phi, e0->dest_idx);
+  if (gimple_phi_arg_location (phi, e1->dest_idx) != UNKNOWN_LOCATION)
+    narg1_loc = gimple_phi_arg_location (phi, e1->dest_idx);
+
+  gcc_assert (arg0 != NULL_TREE && arg1 != NULL_TREE);
+
+  /* Arugments that are the same don't have anything to be
+     done to them. */
+  if (operand_equal_for_phi_arg_p (arg0, arg1))
+    return false;
 
   /* First canonicalize to simplify tests.  */
   if (TREE_CODE (arg0) != SSA_NAME)
@@ -264,143 +350,186 @@ factor_out_conditional_operation (edge e0, edge e1, gphi *phi,
   if (TREE_CODE (arg0) != SSA_NAME
       || (TREE_CODE (arg1) != SSA_NAME
 	  && TREE_CODE (arg1) != INTEGER_CST))
-    return NULL;
+    return false;
 
   /* Check if arg0 is an SSA_NAME and the stmt which defines arg0 is
      an unary operation.  */
   arg0_def_stmt = SSA_NAME_DEF_STMT (arg0);
-  if (!is_gimple_assign (arg0_def_stmt)
-      || (gimple_assign_rhs_class (arg0_def_stmt) != GIMPLE_UNARY_RHS
-	  && gimple_assign_rhs_code (arg0_def_stmt) != VIEW_CONVERT_EXPR))
-    return NULL;
+  if (!gimple_extract_op (arg0_def_stmt, &arg0_op))
+    return false;
 
-  /* Use the RHS as new_arg0.  */
-  op_code = gimple_assign_rhs_code (arg0_def_stmt);
-  new_arg0 = gimple_assign_rhs1 (arg0_def_stmt);
-  if (op_code == VIEW_CONVERT_EXPR)
-    {
-      new_arg0 = TREE_OPERAND (new_arg0, 0);
-      if (!is_gimple_reg_type (TREE_TYPE (new_arg0)))
-	return NULL;
-    }
-  if (TREE_CODE (new_arg0) == SSA_NAME
-      && SSA_NAME_OCCURS_IN_ABNORMAL_PHI (new_arg0))
-    return NULL;
+  /* Check to make sure none of the operands are in abnormal phis.  */
+  if (arg0_op.operands_occurs_in_abnormal_phi ())
+   return false;
+
+  /* Currently just support one operand expressions. */
+  if (arg0_op.num_ops != 1)
+    return false;
+
+  tree new_arg0 = arg0_op.ops[0];
+  tree new_arg1;
+
+  /* If arg0 have > 1 use, then this transformation actually increases
+     the number of expressions evaluated at runtime.  */
+  if (!has_single_use (arg0))
+    return false;
+  if (!is_factor_profitable (arg0_def_stmt, merge, new_arg0))
+    return false;
+  if (gimple_has_location (arg0_def_stmt))
+    narg0_loc = gimple_location (arg0_def_stmt);
 
   if (TREE_CODE (arg1) == SSA_NAME)
     {
-      /* Check if arg1 is an SSA_NAME and the stmt which defines arg1
-	 is an unary operation.  */
+      /* Check if arg1 is an SSA_NAME.  */
       arg1_def_stmt = SSA_NAME_DEF_STMT (arg1);
-       if (!is_gimple_assign (arg1_def_stmt)
-	   || gimple_assign_rhs_code (arg1_def_stmt) != op_code)
-	return NULL;
+      if (!gimple_extract_op (arg1_def_stmt, &arg1_op))
+	return false;
+      if (arg1_op.code != arg0_op.code)
+	return false;
+      if (arg1_op.num_ops != arg0_op.num_ops)
+	return false;
+      if (arg1_op.operands_occurs_in_abnormal_phi ())
+	return false;
 
-      /* Either arg1_def_stmt or arg0_def_stmt should be conditional.  */
-      if (dominated_by_p (CDI_DOMINATORS, gimple_bb (phi), gimple_bb (arg0_def_stmt))
-	  && dominated_by_p (CDI_DOMINATORS,
-			     gimple_bb (phi), gimple_bb (arg1_def_stmt)))
-	return NULL;
+      /* If arg1 have > 1 use, then this transformation actually increases
+	 the number of expressions evaluated at runtime.  */
+      if (!has_single_use (arg1))
+	return false;
 
-      /* Use the RHS as new_arg1.  */
-      new_arg1 = gimple_assign_rhs1 (arg1_def_stmt);
-      if (op_code == VIEW_CONVERT_EXPR)
-	new_arg1 = TREE_OPERAND (new_arg1, 0);
-      if (TREE_CODE (new_arg1) == SSA_NAME
-	  && SSA_NAME_OCCURS_IN_ABNORMAL_PHI (new_arg1))
-	return NULL;
+      new_arg1 = arg1_op.ops[0];
+      if (!is_factor_profitable (arg1_def_stmt, merge, new_arg1))
+	return false;
+      if (gimple_has_location (arg1_def_stmt))
+	narg1_loc = gimple_location (arg1_def_stmt);
+
+      /* Chose the location for the new statement if the phi location is unknown.  */
+      if (locus == UNKNOWN_LOCATION)
+	{
+	  if (narg0_loc == UNKNOWN_LOCATION
+	      && narg1_loc != UNKNOWN_LOCATION)
+	    locus = narg1_loc;
+	  else if (narg0_loc != UNKNOWN_LOCATION
+		   && narg1_loc == UNKNOWN_LOCATION)
+	    locus = narg0_loc;
+	}
     }
   else
     {
+      /* For constants only handle if the phi was the only one. */
+      if (single_non_singleton_phi_for_edges (phi_nodes (merge), e0, e1) == NULL)
+	return false;
       /* TODO: handle more than just casts here. */
       if (!gimple_assign_cast_p (arg0_def_stmt))
-	return NULL;
+	return false;
 
       /* arg0_def_stmt should be conditional.  */
       if (dominated_by_p (CDI_DOMINATORS, gimple_bb (phi), gimple_bb (arg0_def_stmt)))
-	return NULL;
+	return false;
 
       /* If arg1 is an INTEGER_CST, fold it to new type if it fits, or else
 	 if the bits will not be modified during the conversion, except for
 	 boolean types whose precision is not 1 (see int_fits_type_p).  */
-      if (INTEGRAL_TYPE_P (TREE_TYPE (new_arg0))
-	  && (int_fits_type_p (arg1, TREE_TYPE (new_arg0))
-	      || (TYPE_PRECISION (TREE_TYPE (new_arg0))
+      if (!INTEGRAL_TYPE_P (TREE_TYPE (new_arg0))
+	  || !(int_fits_type_p (arg1, TREE_TYPE (new_arg0))
+	       || (TYPE_PRECISION (TREE_TYPE (new_arg0))
 		   == TYPE_PRECISION (TREE_TYPE (arg1))
-		  && (TREE_CODE (TREE_TYPE (new_arg0)) != BOOLEAN_TYPE
-		      || TYPE_PRECISION (TREE_TYPE (new_arg0)) == 1))))
+		   && (TREE_CODE (TREE_TYPE (new_arg0)) != BOOLEAN_TYPE
+		       || TYPE_PRECISION (TREE_TYPE (new_arg0)) == 1))))
+	return false;
+
+      /* For the INTEGER_CST case, we are just moving the
+	 conversion from one place to another, which can often
+	 hurt as the conversion moves further away from the
+	 statement that computes the value.  So, perform this
+	 only if new_arg0 is an operand of COND_STMT, or
+	 if arg0_def_stmt is the only non-debug stmt in
+	 its basic block, because then it is possible this
+	 could enable further optimizations (minmax replacement
+	 etc.).  See PR71016.
+	 Note no-op conversions don't have this issue as
+	 it will not generate any zero/sign extend in that case.  */
+      if ((TYPE_PRECISION (TREE_TYPE (new_arg0))
+	   != TYPE_PRECISION (TREE_TYPE (arg1)))
+	  && new_arg0 != gimple_cond_lhs (cond_stmt)
+	  && new_arg0 != gimple_cond_rhs (cond_stmt)
+	  && gimple_bb (arg0_def_stmt) == e0->src)
 	{
-	  if (gimple_assign_cast_p (arg0_def_stmt))
+	  gsi = gsi_for_stmt (arg0_def_stmt);
+	  gsi_prev_nondebug (&gsi);
+	  /* Ignore nops, predicates and labels. */
+	  while (!gsi_end_p (gsi)
+		  && (gimple_code (gsi_stmt (gsi)) == GIMPLE_NOP
+		      || gimple_code (gsi_stmt (gsi)) == GIMPLE_PREDICT
+		      || gimple_code (gsi_stmt (gsi)) == GIMPLE_LABEL))
+	    gsi_prev_nondebug (&gsi);
+
+	  if (!gsi_end_p (gsi))
 	    {
-	      /* For the INTEGER_CST case, we are just moving the
-		 conversion from one place to another, which can often
-		 hurt as the conversion moves further away from the
-		 statement that computes the value.  So, perform this
-		 only if new_arg0 is an operand of COND_STMT, or
-		 if arg0_def_stmt is the only non-debug stmt in
-		 its basic block, because then it is possible this
-		 could enable further optimizations (minmax replacement
-		 etc.).  See PR71016.
-		 Note no-op conversions don't have this issue as
-		 it will not generate any zero/sign extend in that case.  */
-	      if ((TYPE_PRECISION (TREE_TYPE (new_arg0))
-		    != TYPE_PRECISION (TREE_TYPE (arg1)))
-		  && new_arg0 != gimple_cond_lhs (cond_stmt)
-		  && new_arg0 != gimple_cond_rhs (cond_stmt)
-		  && gimple_bb (arg0_def_stmt) == e0->src)
+	      gimple *stmt = gsi_stmt (gsi);
+	      if (gassign *assign = dyn_cast <gassign *> (stmt))
 		{
-		  gsi = gsi_for_stmt (arg0_def_stmt);
+		  tree lhs = gimple_assign_lhs (assign);
+		  tree lhst = TREE_TYPE (lhs);
+		  enum tree_code ass_code
+		    = gimple_assign_rhs_code (assign);
+		  if (ass_code != MAX_EXPR && ass_code != MIN_EXPR
+		      /* Conversions from boolean like types is ok
+			 as `a?1:b` and `a?0:b` will always simplify
+			 to `a & b` or `a | b`.
+			 See PR 116890.  */
+		      && !(INTEGRAL_TYPE_P (lhst)
+			   && TYPE_UNSIGNED (lhst)
+			   && TYPE_PRECISION (lhst) == 1))
+		    return false;
+		  if (lhs != gimple_assign_rhs1 (arg0_def_stmt))
+		    return false;
 		  gsi_prev_nondebug (&gsi);
 		  if (!gsi_end_p (gsi))
-		    {
-		      if (gassign *assign
-			    = dyn_cast <gassign *> (gsi_stmt (gsi)))
-			{
-			  tree lhs = gimple_assign_lhs (assign);
-			  enum tree_code ass_code
-			    = gimple_assign_rhs_code (assign);
-			  if (ass_code != MAX_EXPR && ass_code != MIN_EXPR)
-			    return NULL;
-			  if (lhs != gimple_assign_rhs1 (arg0_def_stmt))
-			    return NULL;
-			  gsi_prev_nondebug (&gsi);
-			  if (!gsi_end_p (gsi))
-			    return NULL;
-			}
-		      else
-			return NULL;
-		    }
-		  gsi = gsi_for_stmt (arg0_def_stmt);
-		  gsi_next_nondebug (&gsi);
-		  if (!gsi_end_p (gsi))
-		    return NULL;
+		    return false;
 		}
-	      new_arg1 = fold_convert (TREE_TYPE (new_arg0), arg1);
-
-	      /* Drop the overlow that fold_convert might add. */
-	      if (TREE_OVERFLOW (new_arg1))
-		new_arg1 = drop_tree_overflow (new_arg1);
+	      else
+		return false;
 	    }
-	  else
-	    return NULL;
 	}
-      else
-	return NULL;
-    }
+      new_arg1 = fold_convert (TREE_TYPE (new_arg0), arg1);
 
-  /*  If arg0/arg1 have > 1 use, then this transformation actually increases
-      the number of expressions evaluated at runtime.  */
-  if (!has_single_use (arg0)
-      || (arg1_def_stmt && !has_single_use (arg1)))
-    return NULL;
+      /* Drop the overlow that fold_convert might add. */
+      if (TREE_OVERFLOW (new_arg1))
+	new_arg1 = drop_tree_overflow (new_arg1);
+
+      /* The locus of the new statement is arg0 defining statement. */
+      if (gimple_has_location (arg0_def_stmt))
+	locus = gimple_location (arg0_def_stmt);
+    }
 
   /* If types of new_arg0 and new_arg1 are different bailout.  */
   if (!types_compatible_p (TREE_TYPE (new_arg0), TREE_TYPE (new_arg1)))
-    return NULL;
+    return false;
 
   /* Create a new PHI stmt.  */
-  result = PHI_RESULT (phi);
+  result = gimple_phi_result (phi);
   temp = make_ssa_name (TREE_TYPE (new_arg0), NULL);
+
+  gimple_match_op new_op = arg0_op;
+
+  /* Create the operation stmt if possible and insert it.  */
+  new_op.ops[0] = temp;
+  gimple_seq seq = NULL;
+  result = maybe_push_res_to_seq (&new_op, &seq, result);
+
+  /* If we can't create the new statement, release the temp name
+     and return back.  */
+  if (!result)
+    {
+      release_ssa_name (temp);
+      return false;
+    }
+
+  if (locus != UNKNOWN_LOCATION)
+    annotate_all_with_location (seq, locus);
+  gsi = gsi_after_labels (gimple_bb (phi));
+  gsi_insert_seq_before (&gsi, seq, GSI_CONTINUE_LINKING);
+
   newphi = create_phi_node (temp, gimple_bb (phi));
 
   if (dump_file && (dump_flags & TDF_DETAILS))
@@ -426,19 +555,8 @@ factor_out_conditional_operation (edge e0, edge e1, gphi *phi,
       release_defs (arg1_def_stmt);
     }
 
-  add_phi_arg (newphi, new_arg0, e0, locus);
-  add_phi_arg (newphi, new_arg1, e1, locus);
-
-  /* Create the operation stmt and insert it.  */
-  if (op_code == VIEW_CONVERT_EXPR)
-    {
-      temp = fold_build1 (VIEW_CONVERT_EXPR, TREE_TYPE (result), temp);
-      new_stmt = gimple_build_assign (result, temp);
-    }
-  else
-    new_stmt = gimple_build_assign (result, op_code, temp);
-  gsi = gsi_after_labels (gimple_bb (phi));
-  gsi_insert_before (&gsi, new_stmt, GSI_SAME_STMT);
+  add_phi_arg (newphi, new_arg0, e0, narg0_loc);
+  add_phi_arg (newphi, new_arg1, e1, narg1_loc);
 
   /* Remove the original PHI stmt.  */
   gsi = gsi_for_stmt (phi);
@@ -446,7 +564,7 @@ factor_out_conditional_operation (edge e0, edge e1, gphi *phi,
 
   statistics_counter_event (cfun, "factored out operation", 1);
 
-  return newphi;
+  return true;
 }
 
 
@@ -461,8 +579,7 @@ phiopt_early_allow (gimple_seq &seq, gimple_match_op &op)
   tree_code code = (tree_code)op.code;
 
   /* For non-empty sequence, only allow one statement
-     except for MIN/MAX, allow max 2 statements,
-     each with MIN/MAX.  */
+     a MIN/MAX and an original MIN/MAX.  */
   if (!gimple_seq_empty_p (seq))
     {
       if (code == MIN_EXPR || code == MAX_EXPR)
@@ -477,18 +594,7 @@ phiopt_early_allow (gimple_seq &seq, gimple_match_op &op)
 	  code = gimple_assign_rhs_code (stmt);
 	  return code == MIN_EXPR || code == MAX_EXPR;
 	}
-      /* Check to make sure op was already a SSA_NAME.  */
-      if (code != SSA_NAME)
-	return false;
-      if (!gimple_seq_singleton_p (seq))
-	return false;
-      gimple *stmt = gimple_seq_first_stmt (seq);
-      /* Only allow assignments.  */
-      if (!is_gimple_assign (stmt))
-	return false;
-      if (gimple_assign_lhs (stmt) != op.ops[0])
-	return false;
-      code = gimple_assign_rhs_code (stmt);
+      return false;
     }
 
   switch (code)
@@ -762,33 +868,13 @@ move_stmt (gimple *stmt, gimple_stmt_iterator *gsi, auto_bitmap &inserted_exprs)
   // Mark the name to be renamed if there is one.
   bitmap_set_bit (inserted_exprs, SSA_NAME_VERSION (name));
   gimple_stmt_iterator gsi1 = gsi_for_stmt (stmt);
-  gsi_move_before (&gsi1, gsi);
+  gsi_move_before (&gsi1, gsi, GSI_NEW_STMT);
   reset_flow_sensitive_info (name);
 
   /* Rewrite some code which might be undefined when
      unconditionalized. */
-  if (gimple_assign_single_p (stmt))
-    {
-      tree rhs = gimple_assign_rhs1 (stmt);
-      /* VCE from integral types to another integral types but with
-	 different precisions need to be changed into casts
-	 to be well defined when unconditional. */
-      if (gimple_assign_rhs_code (stmt) == VIEW_CONVERT_EXPR
-	  && INTEGRAL_TYPE_P (TREE_TYPE (name))
-	  && INTEGRAL_TYPE_P (TREE_TYPE (TREE_OPERAND (rhs, 0))))
-	{
-	  if (dump_file && (dump_flags & TDF_DETAILS))
-	    {
-	      fprintf (dump_file, "rewriting stmt with maybe undefined VCE ");
-	      print_gimple_stmt (dump_file, stmt, 0, TDF_SLIM);
-	    }
-	  tree new_rhs = TREE_OPERAND (rhs, 0);
-	  gcc_assert (is_gimple_val (new_rhs));
-	  gimple_assign_set_rhs_code (stmt, NOP_EXPR);
-	  gimple_assign_set_rhs1 (stmt, new_rhs);
-	  update_stmt (stmt);
-	}
-    }
+  if (gimple_needing_rewrite_undefined (stmt))
+    rewrite_to_defined_unconditional (gsi);
 }
 
 /* RAII style class to temporarily remove flow sensitive
@@ -830,6 +916,27 @@ auto_flow_sensitive::~auto_flow_sensitive ()
     p.second.restore (p.first);
 }
 
+/* Returns true if BB contains an user provided predictor
+   (PRED_HOT_LABEL/PRED_COLD_LABEL).  */
+
+static bool
+contains_hot_cold_predict (basic_block bb)
+{
+  gimple_stmt_iterator gsi;
+  gsi = gsi_start_nondebug_after_labels_bb (bb);
+  for (; !gsi_end_p (gsi); gsi_next_nondebug (&gsi))
+    {
+      gimple *s = gsi_stmt (gsi);
+      if (gimple_code (s) != GIMPLE_PREDICT)
+	continue;
+      auto predict = gimple_predict_predictor (s);
+      if (predict == PRED_HOT_LABEL
+	  || predict == PRED_COLD_LABEL)
+	return true;
+    }
+  return false;
+}
+
 /*  The function match_simplify_replacement does the main work of doing the
     replacement using match and simplify.  Return true if the replacement is done.
     Otherwise return false.
@@ -865,6 +972,13 @@ match_simplify_replacement (basic_block cond_bb, basic_block middle_bb,
       && middle_bb != middle_bb_alt
       && !empty_bb_or_one_feeding_into_p (middle_bb_alt, phi,
 					  stmt_to_move_alt))
+    return false;
+
+  /* Do not make conditional undefs unconditional.  */
+  if ((TREE_CODE (arg0) == SSA_NAME
+       && ssa_name_maybe_undef_p (arg0))
+      || (TREE_CODE (arg1) == SSA_NAME
+	  && ssa_name_maybe_undef_p (arg1)))
     return false;
 
     /* At this point we know we have a GIMPLE_COND with two successors.
@@ -906,13 +1020,6 @@ match_simplify_replacement (basic_block cond_bb, basic_block middle_bb,
       arg_false = arg0;
     }
 
-  /* Do not make conditional undefs unconditional.  */
-  if ((TREE_CODE (arg_true) == SSA_NAME
-       && ssa_name_maybe_undef_p (arg_true))
-      || (TREE_CODE (arg_false) == SSA_NAME
-	  && ssa_name_maybe_undef_p (arg_false)))
-    return false;
-
   tree type = TREE_TYPE (gimple_phi_result (phi));
   {
     auto_flow_sensitive s1(stmt_to_move);
@@ -923,8 +1030,65 @@ match_simplify_replacement (basic_block cond_bb, basic_block middle_bb,
 				    &seq);
   }
 
+  /* For early phiopt, we don't want to lose user generated predictors
+     if the phiopt is converting `if (a)` into `a` as that might
+     be jump threaded later on so we want to keep around the
+     predictors.  */
+  if (early_p && result && TREE_CODE (result) == SSA_NAME)
+    {
+      bool check_it = false;
+      tree cmp0 = gimple_cond_lhs (stmt);
+      tree cmp1 = gimple_cond_rhs (stmt);
+      if (result == cmp0 || result == cmp1)
+	check_it = true;
+      else if (gimple_seq_singleton_p (seq))
+        {
+	  gimple *stmt = gimple_seq_first_stmt (seq);
+	  if (is_gimple_assign (stmt)
+	      && result == gimple_assign_lhs (stmt)
+	      && TREE_CODE_CLASS (gimple_assign_rhs_code (stmt))
+		   == tcc_comparison)
+	    check_it = true;
+        }
+      if (!check_it)
+	;
+      else if (contains_hot_cold_predict (middle_bb))
+	return false;
+      else if (threeway_p
+	       && middle_bb != middle_bb_alt
+	       && contains_hot_cold_predict (middle_bb_alt))
+	return false;
+    }
+
   if (!result)
-    return false;
+    {
+      /* If we don't get back a MIN/MAX_EXPR still make sure the expression
+	 stays in a form to be recognized by ISA that map to IEEE x > y ? x : y
+	 semantics (that's not IEEE max semantics).  */
+      if (!HONOR_NANS (type) && !HONOR_SIGNED_ZEROS (type))
+        return false;
+      if (stmt_to_move || stmt_to_move_alt)
+	return false;
+      tree_code cmp = gimple_cond_code (stmt);
+      if (cmp != LT_EXPR && cmp != LE_EXPR
+	  && cmp != GT_EXPR && cmp != GE_EXPR)
+	return false;
+      tree lhs = gimple_cond_lhs (stmt);
+      tree rhs = gimple_cond_rhs (stmt);
+      /* `lhs CMP rhs ? lhs : rhs` or `lhs CMP rhs ? rhs : lhs`
+	 are only acceptable case here.  */
+      if ((!operand_equal_for_phi_arg_p (lhs, arg_false)
+	   || !operand_equal_for_phi_arg_p (rhs, arg_true))
+	  && (!operand_equal_for_phi_arg_p (rhs, arg_false)
+	       || !operand_equal_for_phi_arg_p (lhs, arg_true)))
+	return false;
+      seq = nullptr;
+      result = gimple_build (&seq, cmp, boolean_type_node, lhs, rhs);
+      result = gimple_build (&seq, COND_EXPR, type, result,
+			     arg_true, arg_false);
+      statistics_counter_event (cfun, "Non-IEEE FP MIN/MAX PHI replacement",
+				1);
+    }
   if (dump_file && (dump_flags & TDF_FOLDING))
     fprintf (dump_file, "accepted the phiopt match-simplify.\n");
 
@@ -945,16 +1109,9 @@ match_simplify_replacement (basic_block cond_bb, basic_block middle_bb,
   if (seq)
     {
       // Mark the lhs of the new statements maybe for dce
-      gimple_stmt_iterator gsi1 = gsi_start (seq);
-      for (; !gsi_end_p (gsi1); gsi_next (&gsi1))
-	{
-	  gimple *stmt = gsi_stmt (gsi1);
-	  tree name = gimple_get_lhs (stmt);
-	  if (name && TREE_CODE (name) == SSA_NAME)
-	    bitmap_set_bit (exprs_maybe_dce, SSA_NAME_VERSION (name));
-	}
-    gsi_insert_seq_before (&gsi, seq, GSI_CONTINUE_LINKING);
-  }
+      mark_lhs_in_seq_for_dce (exprs_maybe_dce, seq);
+      gsi_insert_seq_before (&gsi, seq, GSI_CONTINUE_LINKING);
+    }
 
   /* If there was a statement to move, move it to right before
      the original conditional.  */
@@ -1002,17 +1159,18 @@ jump_function_from_stmt (tree *arg, gimple *stmt)
   return false;
 }
 
-/* RHS is a source argument in a BIT_AND_EXPR which feeds a conditional
-   of the form SSA_NAME NE 0.
+/* RHS is a source argument in a BIT_AND_EXPR or BIT_IOR_EXPR which feeds
+   a conditional of the form SSA_NAME NE 0.
 
-   If RHS is fed by a simple EQ_EXPR comparison of two values, see if
-   the two input values of the EQ_EXPR match arg0 and arg1.
+   If RHS is fed by a simple EQ_EXPR or NE_EXPR comparison of two values,
+   see if the two input values of the comparison match arg0 and arg1.
 
    If so update *code and return TRUE.  Otherwise return FALSE.  */
 
 static bool
 rhs_is_fed_for_value_replacement (const_tree arg0, const_tree arg1,
-				  enum tree_code *code, const_tree rhs)
+				  enum tree_code *code, const_tree rhs,
+				  enum tree_code bit_expression_code)
 {
   /* Obviously if RHS is not an SSA_NAME, we can't look at the defining
      statement.  */
@@ -1020,11 +1178,15 @@ rhs_is_fed_for_value_replacement (const_tree arg0, const_tree arg1,
     {
       gimple *def1 = SSA_NAME_DEF_STMT (rhs);
 
-      /* Verify the defining statement has an EQ_EXPR on the RHS.  */
-      if (is_gimple_assign (def1) && gimple_assign_rhs_code (def1) == EQ_EXPR)
+      /* Verify the defining statement has an EQ_EXPR or NE_EXPR on the RHS.  */
+      if (is_gimple_assign (def1)
+	  && ((bit_expression_code == BIT_AND_EXPR
+	       && gimple_assign_rhs_code (def1) == EQ_EXPR)
+	      || (bit_expression_code == BIT_IOR_EXPR
+		  && gimple_assign_rhs_code (def1) == NE_EXPR)))
 	{
-	  /* Finally verify the source operands of the EQ_EXPR are equal
-	     to arg0 and arg1.  */
+	  /* Finally verify the source operands of the EQ_EXPR or NE_EXPR
+	     are equal to arg0 and arg1.  */
 	  tree op0 = gimple_assign_rhs1 (def1);
 	  tree op1 = gimple_assign_rhs2 (def1);
 	  if ((operand_equal_for_phi_arg_p (arg0, op0)
@@ -1041,10 +1203,11 @@ rhs_is_fed_for_value_replacement (const_tree arg0, const_tree arg1,
   return false;
 }
 
-/* Return TRUE if arg0/arg1 are equal to the rhs/lhs or lhs/rhs of COND. 
+/* Return TRUE if arg0/arg1 are equal to the rhs/lhs or lhs/rhs of COND.
 
-   Also return TRUE if arg0/arg1 are equal to the source arguments of a
-   an EQ comparison feeding a BIT_AND_EXPR which feeds COND. 
+   Also return TRUE if arg0/arg1 are equal to the source arguments of an
+   EQ comparison feeding a BIT_AND_EXPR, or NE comparison feeding a
+   BIT_IOR_EXPR which feeds COND.
 
    Return FALSE otherwise.  */
 
@@ -1063,27 +1226,33 @@ operand_equal_for_value_replacement (const_tree arg0, const_tree arg1,
     return true;
 
   /* Now handle more complex case where we have an EQ comparison
-     which feeds a BIT_AND_EXPR which feeds COND.
+     feeding a BIT_AND_EXPR, or a NE comparison feeding a BIT_IOR_EXPR,
+     which then feeds into COND.
 
      First verify that COND is of the form SSA_NAME NE 0.  */
   if (*code != NE_EXPR || !integer_zerop (rhs)
       || TREE_CODE (lhs) != SSA_NAME)
     return false;
 
-  /* Now ensure that SSA_NAME is set by a BIT_AND_EXPR.  */
+  /* Now ensure that SSA_NAME is set by a BIT_AND_EXPR or BIT_OR_EXPR.  */
   def = SSA_NAME_DEF_STMT (lhs);
-  if (!is_gimple_assign (def) || gimple_assign_rhs_code (def) != BIT_AND_EXPR)
+  if (!is_gimple_assign (def)
+      || (gimple_assign_rhs_code (def) != BIT_AND_EXPR
+	  && gimple_assign_rhs_code (def) != BIT_IOR_EXPR))
     return false;
 
-  /* Now verify arg0/arg1 correspond to the source arguments of an 
-     EQ comparison feeding the BIT_AND_EXPR.  */
-     
+  /* Now verify arg0/arg1 correspond to the source arguments of an EQ
+     comparison feeding the BIT_AND_EXPR or a NE comparison feeding the
+     BIT_IOR_EXPR.  */
+
   tree tmp = gimple_assign_rhs1 (def);
-  if (rhs_is_fed_for_value_replacement (arg0, arg1, code, tmp))
+  if (rhs_is_fed_for_value_replacement (arg0, arg1, code, tmp,
+					gimple_assign_rhs_code (def)))
     return true;
 
   tmp = gimple_assign_rhs2 (def);
-  if (rhs_is_fed_for_value_replacement (arg0, arg1, code, tmp))
+  if (rhs_is_fed_for_value_replacement (arg0, arg1, code, tmp,
+					gimple_assign_rhs_code (def)))
     return true;
 
   return false;
@@ -1181,6 +1350,28 @@ value_replacement (basic_block cond_bb, basic_block middle_bb,
   enum tree_code code;
   bool empty_or_with_defined_p = true;
 
+  /* Virtual operands don't need to be handled. */
+  if (virtual_operand_p (arg1))
+    return 0;
+
+  /* Special case A ? B : B as this will always simplify to B. */
+  if (operand_equal_for_phi_arg_p (arg0, arg1))
+    return 0;
+
+  gcond *cond = as_a <gcond *> (*gsi_last_bb (cond_bb));
+  code = gimple_cond_code (cond);
+
+  /* This transformation is only valid for equality comparisons.  */
+  if (code != NE_EXPR && code != EQ_EXPR)
+    return 0;
+
+  /* Do not make conditional undefs unconditional.  */
+  if ((TREE_CODE (arg0) == SSA_NAME
+       && ssa_name_maybe_undef_p (arg0))
+      || (TREE_CODE (arg1) == SSA_NAME
+	  && ssa_name_maybe_undef_p (arg1)))
+    return false;
+
   /* If the type says honor signed zeros we cannot do this
      optimization.  */
   if (HONOR_SIGNED_ZEROS (arg1))
@@ -1214,13 +1405,6 @@ value_replacement (basic_block cond_bb, basic_block middle_bb,
   /* The middle bb is not empty if there are any phi nodes. */
   if (phi_nodes (middle_bb))
     empty_or_with_defined_p = false;
-
-  gcond *cond = as_a <gcond *> (*gsi_last_bb (cond_bb));
-  code = gimple_cond_code (cond);
-
-  /* This transformation is only valid for equality comparisons.  */
-  if (code != NE_EXPR && code != EQ_EXPR)
-    return 0;
 
   /* We need to know which is the true edge and which is the false
       edge so that we know if have abs or negative abs.  */
@@ -1365,12 +1549,11 @@ value_replacement (basic_block cond_bb, basic_block middle_bb,
 		    {
 		      /* After the optimization PHI result can have value
 			 which it couldn't have previously.  */
-		      int_range_max r;
+		      value_range r (TREE_TYPE (phires));
 		      if (get_global_range_query ()->range_of_expr (r, phires,
 								    phi))
 			{
-			  wide_int warg = wi::to_wide (carg);
-			  int_range<2> tmp (TREE_TYPE (carg), warg, warg);
+			  value_range tmp (carg, carg);
 			  r.union_ (tmp);
 			  reset_flow_sensitive_info (phires);
 			  set_range_info (phires, r);
@@ -1665,622 +1848,6 @@ value_replacement (basic_block cond_bb, basic_block middle_bb,
   return 0;
 }
 
-/* If VAR is an SSA_NAME that points to a BIT_NOT_EXPR then return the TREE for
-   the value being inverted.  */
-
-static tree
-strip_bit_not (tree var)
-{
-  if (TREE_CODE (var) != SSA_NAME)
-    return NULL_TREE;
-
-  gimple *assign = SSA_NAME_DEF_STMT (var);
-  if (gimple_code (assign) != GIMPLE_ASSIGN)
-    return NULL_TREE;
-
-  if (gimple_assign_rhs_code (assign) != BIT_NOT_EXPR)
-    return NULL_TREE;
-
-  return gimple_assign_rhs1 (assign);
-}
-
-/* Invert a MIN to a MAX or a MAX to a MIN expression CODE.  */
-
-enum tree_code
-invert_minmax_code (enum tree_code code)
-{
-  switch (code) {
-  case MIN_EXPR:
-    return MAX_EXPR;
-  case MAX_EXPR:
-    return MIN_EXPR;
-  default:
-    gcc_unreachable ();
-  }
-}
-
-/*  The function minmax_replacement does the main work of doing the minmax
-    replacement.  Return true if the replacement is done.  Otherwise return
-    false.
-    BB is the basic block where the replacement is going to be done on.  ARG0
-    is argument 0 from the PHI.  Likewise for ARG1.
-
-    If THREEWAY_P then expect the BB to be laid out in diamond shape with each
-    BB containing only a MIN or MAX expression.  */
-
-static bool
-minmax_replacement (basic_block cond_bb, basic_block middle_bb, basic_block alt_middle_bb,
-		    edge e0, edge e1, gphi *phi, tree arg0, tree arg1, bool threeway_p)
-{
-  tree result;
-  edge true_edge, false_edge;
-  enum tree_code minmax, ass_code;
-  tree smaller, larger, arg_true, arg_false;
-  gimple_stmt_iterator gsi, gsi_from;
-
-  tree type = TREE_TYPE (PHI_RESULT (phi));
-
-  gcond *cond = as_a <gcond *> (*gsi_last_bb (cond_bb));
-  enum tree_code cmp = gimple_cond_code (cond);
-  tree rhs = gimple_cond_rhs (cond);
-
-  /* Turn EQ/NE of extreme values to order comparisons.  */
-  if ((cmp == NE_EXPR || cmp == EQ_EXPR)
-      && TREE_CODE (rhs) == INTEGER_CST
-      && INTEGRAL_TYPE_P (TREE_TYPE (rhs)))
-    {
-      if (wi::eq_p (wi::to_wide (rhs), wi::min_value (TREE_TYPE (rhs))))
-	{
-	  cmp = (cmp == EQ_EXPR) ? LT_EXPR : GE_EXPR;
-	  rhs = wide_int_to_tree (TREE_TYPE (rhs),
-				  wi::min_value (TREE_TYPE (rhs)) + 1);
-	}
-      else if (wi::eq_p (wi::to_wide (rhs), wi::max_value (TREE_TYPE (rhs))))
-	{
-	  cmp = (cmp == EQ_EXPR) ? GT_EXPR : LE_EXPR;
-	  rhs = wide_int_to_tree (TREE_TYPE (rhs),
-				  wi::max_value (TREE_TYPE (rhs)) - 1);
-	}
-    }
-
-  /* This transformation is only valid for order comparisons.  Record which
-     operand is smaller/larger if the result of the comparison is true.  */
-  tree alt_smaller = NULL_TREE;
-  tree alt_larger = NULL_TREE;
-  if (cmp == LT_EXPR || cmp == LE_EXPR)
-    {
-      smaller = gimple_cond_lhs (cond);
-      larger = rhs;
-      /* If we have smaller < CST it is equivalent to smaller <= CST-1.
-	 Likewise smaller <= CST is equivalent to smaller < CST+1.  */
-      if (TREE_CODE (larger) == INTEGER_CST
-	  && INTEGRAL_TYPE_P (TREE_TYPE (larger)))
-	{
-	  if (cmp == LT_EXPR)
-	    {
-	      wi::overflow_type overflow;
-	      wide_int alt = wi::sub (wi::to_wide (larger), 1,
-				      TYPE_SIGN (TREE_TYPE (larger)),
-				      &overflow);
-	      if (! overflow)
-		alt_larger = wide_int_to_tree (TREE_TYPE (larger), alt);
-	    }
-	  else
-	    {
-	      wi::overflow_type overflow;
-	      wide_int alt = wi::add (wi::to_wide (larger), 1,
-				      TYPE_SIGN (TREE_TYPE (larger)),
-				      &overflow);
-	      if (! overflow)
-		alt_larger = wide_int_to_tree (TREE_TYPE (larger), alt);
-	    }
-	}
-    }
-  else if (cmp == GT_EXPR || cmp == GE_EXPR)
-    {
-      smaller = rhs;
-      larger = gimple_cond_lhs (cond);
-      /* If we have larger > CST it is equivalent to larger >= CST+1.
-	 Likewise larger >= CST is equivalent to larger > CST-1.  */
-      if (TREE_CODE (smaller) == INTEGER_CST
-	  && INTEGRAL_TYPE_P (TREE_TYPE (smaller)))
-	{
-	  wi::overflow_type overflow;
-	  if (cmp == GT_EXPR)
-	    {
-	      wide_int alt = wi::add (wi::to_wide (smaller), 1,
-				      TYPE_SIGN (TREE_TYPE (smaller)),
-				      &overflow);
-	      if (! overflow)
-		alt_smaller = wide_int_to_tree (TREE_TYPE (smaller), alt);
-	    }
-	  else
-	    {
-	      wide_int alt = wi::sub (wi::to_wide (smaller), 1,
-				      TYPE_SIGN (TREE_TYPE (smaller)),
-				      &overflow);
-	      if (! overflow)
-		alt_smaller = wide_int_to_tree (TREE_TYPE (smaller), alt);
-	    }
-	}
-    }
-  else
-    return false;
-
-  /* Handle the special case of (signed_type)x < 0 being equivalent
-     to x > MAX_VAL(signed_type) and (signed_type)x >= 0 equivalent
-     to x <= MAX_VAL(signed_type).  */
-  if ((cmp == GE_EXPR || cmp == LT_EXPR)
-      && INTEGRAL_TYPE_P (type)
-      && TYPE_UNSIGNED (type)
-      && integer_zerop (rhs))
-    {
-      tree op = gimple_cond_lhs (cond);
-      if (TREE_CODE (op) == SSA_NAME
-	  && INTEGRAL_TYPE_P (TREE_TYPE (op))
-	  && !TYPE_UNSIGNED (TREE_TYPE (op)))
-	{
-	  gimple *def_stmt = SSA_NAME_DEF_STMT (op);
-	  if (gimple_assign_cast_p (def_stmt))
-	    {
-	      tree op1 = gimple_assign_rhs1 (def_stmt);
-	      if (INTEGRAL_TYPE_P (TREE_TYPE (op1))
-		  && TYPE_UNSIGNED (TREE_TYPE (op1))
-		  && (TYPE_PRECISION (TREE_TYPE (op))
-		      == TYPE_PRECISION (TREE_TYPE (op1)))
-		  && useless_type_conversion_p (type, TREE_TYPE (op1)))
-		{
-		  wide_int w1 = wi::max_value (TREE_TYPE (op));
-		  wide_int w2 = wi::add (w1, 1);
-		  if (cmp == LT_EXPR)
-		    {
-		      larger = op1;
-		      smaller = wide_int_to_tree (TREE_TYPE (op1), w1);
-		      alt_smaller = wide_int_to_tree (TREE_TYPE (op1), w2);
-		      alt_larger = NULL_TREE;
-		    }
-		  else
-		    {
-		      smaller = op1;
-		      larger = wide_int_to_tree (TREE_TYPE (op1), w1);
-		      alt_larger = wide_int_to_tree (TREE_TYPE (op1), w2);
-		      alt_smaller = NULL_TREE;
-		    }
-		}
-	    }
-	}
-    }
-
-  /* We need to know which is the true edge and which is the false
-      edge so that we know if have abs or negative abs.  */
-  extract_true_false_edges_from_block (cond_bb, &true_edge, &false_edge);
-
-  /* Forward the edges over the middle basic block.  */
-  if (true_edge->dest == middle_bb)
-    true_edge = EDGE_SUCC (true_edge->dest, 0);
-  if (false_edge->dest == middle_bb)
-    false_edge = EDGE_SUCC (false_edge->dest, 0);
-
-  /* When THREEWAY_P then e1 will point to the edge of the final transition
-     from middle-bb to end.  */
-  if (true_edge == e0)
-    {
-      if (!threeway_p)
-	gcc_assert (false_edge == e1);
-      arg_true = arg0;
-      arg_false = arg1;
-    }
-  else
-    {
-      gcc_assert (false_edge == e0);
-      if (!threeway_p)
-	gcc_assert (true_edge == e1);
-      arg_true = arg1;
-      arg_false = arg0;
-    }
-
-  if (empty_block_p (middle_bb)
-      && (!threeway_p
-	  || empty_block_p (alt_middle_bb)))
-    {
-      if ((operand_equal_for_phi_arg_p (arg_true, smaller)
-	   || (alt_smaller
-	       && operand_equal_for_phi_arg_p (arg_true, alt_smaller)))
-	  && (operand_equal_for_phi_arg_p (arg_false, larger)
-	      || (alt_larger
-		  && operand_equal_for_phi_arg_p (arg_true, alt_larger))))
-	{
-	  /* Case
-
-	     if (smaller < larger)
-	     rslt = smaller;
-	     else
-	     rslt = larger;  */
-	  minmax = MIN_EXPR;
-	}
-      else if ((operand_equal_for_phi_arg_p (arg_false, smaller)
-		|| (alt_smaller
-		    && operand_equal_for_phi_arg_p (arg_false, alt_smaller)))
-	       && (operand_equal_for_phi_arg_p (arg_true, larger)
-		   || (alt_larger
-		       && operand_equal_for_phi_arg_p (arg_true, alt_larger))))
-	minmax = MAX_EXPR;
-      else
-	return false;
-    }
-  else if (HONOR_NANS (type) || HONOR_SIGNED_ZEROS (type))
-    /* The optimization may be unsafe due to NaNs.  */
-    return false;
-  else if (middle_bb != alt_middle_bb && threeway_p)
-    {
-      /* Recognize the following case:
-
-	 if (smaller < larger)
-	   a = MIN (smaller, c);
-	 else
-	   b = MIN (larger, c);
-	 x = PHI <a, b>
-
-	 This is equivalent to
-
-	 a = MIN (smaller, c);
-	 x = MIN (larger, a);  */
-
-      gimple *assign = last_and_only_stmt (middle_bb);
-      tree lhs, op0, op1, bound;
-      tree alt_lhs, alt_op0, alt_op1;
-      bool invert = false;
-
-      /* When THREEWAY_P then e1 will point to the edge of the final transition
-	 from middle-bb to end.  */
-      if (true_edge == e0)
-	gcc_assert (false_edge == EDGE_PRED (e1->src, 0));
-      else
-	gcc_assert (true_edge == EDGE_PRED (e1->src, 0));
-
-      bool valid_minmax_p = false;
-      gimple_stmt_iterator it1
-	= gsi_start_nondebug_after_labels_bb (middle_bb);
-      gimple_stmt_iterator it2
-	= gsi_start_nondebug_after_labels_bb (alt_middle_bb);
-      if (gsi_one_nondebug_before_end_p (it1)
-	  && gsi_one_nondebug_before_end_p (it2))
-	{
-	  gimple *stmt1 = gsi_stmt (it1);
-	  gimple *stmt2 = gsi_stmt (it2);
-	  if (is_gimple_assign (stmt1) && is_gimple_assign (stmt2))
-	    {
-	      enum tree_code code1 = gimple_assign_rhs_code (stmt1);
-	      enum tree_code code2 = gimple_assign_rhs_code (stmt2);
-	      valid_minmax_p = (code1 == MIN_EXPR || code1 == MAX_EXPR)
-			       && (code2 == MIN_EXPR || code2 == MAX_EXPR);
-	    }
-	}
-
-      if (!valid_minmax_p)
-	return false;
-
-      if (!assign
-	  || gimple_code (assign) != GIMPLE_ASSIGN)
-	return false;
-
-      /* There cannot be any phi nodes in the middle bb. */
-      if (!gimple_seq_empty_p (phi_nodes (middle_bb)))
-	return false;
-
-      lhs = gimple_assign_lhs (assign);
-      ass_code = gimple_assign_rhs_code (assign);
-      if (ass_code != MAX_EXPR && ass_code != MIN_EXPR)
-	return false;
-
-      op0 = gimple_assign_rhs1 (assign);
-      op1 = gimple_assign_rhs2 (assign);
-
-      assign = last_and_only_stmt (alt_middle_bb);
-      if (!assign
-	  || gimple_code (assign) != GIMPLE_ASSIGN)
-	return false;
-
-      /* There cannot be any phi nodes in the alt middle bb. */
-      if (!gimple_seq_empty_p (phi_nodes (alt_middle_bb)))
-	return false;
-
-      alt_lhs = gimple_assign_lhs (assign);
-      if (ass_code != gimple_assign_rhs_code (assign))
-	return false;
-
-      if (!operand_equal_for_phi_arg_p (lhs, arg_true)
-	 || !operand_equal_for_phi_arg_p (alt_lhs, arg_false))
-	return false;
-
-      alt_op0 = gimple_assign_rhs1 (assign);
-      alt_op1 = gimple_assign_rhs2 (assign);
-
-      if ((operand_equal_for_phi_arg_p (op0, smaller)
-		|| (alt_smaller
-		    && operand_equal_for_phi_arg_p (op0, alt_smaller)))
-	       && (operand_equal_for_phi_arg_p (alt_op0, larger)
-		   || (alt_larger
-		       && operand_equal_for_phi_arg_p (alt_op0, alt_larger))))
-	{
-	  /* We got here if the condition is true, i.e., SMALLER < LARGER.  */
-	  if (!operand_equal_for_phi_arg_p (op1, alt_op1))
-	    return false;
-
-	  if ((arg0 = strip_bit_not (op0)) != NULL
-	      && (arg1 = strip_bit_not (alt_op0)) != NULL
-	      && (bound = strip_bit_not (op1)) != NULL)
-	    {
-	      minmax = MAX_EXPR;
-	      ass_code = invert_minmax_code (ass_code);
-	      invert = true;
-	    }
-	  else
-	    {
-	      bound = op1;
-	      minmax = MIN_EXPR;
-	      arg0 = op0;
-	      arg1 = alt_op0;
-	     }
-	}
-      else if ((operand_equal_for_phi_arg_p (op0, larger)
-		|| (alt_larger
-		    && operand_equal_for_phi_arg_p (op0, alt_larger)))
-	       && (operand_equal_for_phi_arg_p (alt_op0, smaller)
-		   || (alt_smaller
-		       && operand_equal_for_phi_arg_p (alt_op0, alt_smaller))))
-	{
-	  /* We got here if the condition is true, i.e., SMALLER > LARGER.  */
-	  if (!operand_equal_for_phi_arg_p (op1, alt_op1))
-	    return false;
-
-	  if ((arg0 = strip_bit_not (op0)) != NULL
-	      && (arg1 = strip_bit_not (alt_op0)) != NULL
-	      && (bound = strip_bit_not (op1)) != NULL)
-	    {
-	      minmax = MIN_EXPR;
-	      ass_code = invert_minmax_code (ass_code);
-	      invert = true;
-	    }
-	  else
-	    {
-	      bound = op1;
-	      minmax = MAX_EXPR;
-	      arg0 = op0;
-	      arg1 = alt_op0;
-	     }
-	}
-      else
-	return false;
-
-      /* Emit the statement to compute min/max.  */
-      location_t locus = gimple_location (last_nondebug_stmt (cond_bb));
-      gimple_seq stmts = NULL;
-      tree phi_result = PHI_RESULT (phi);
-      result = gimple_build (&stmts, locus, minmax, TREE_TYPE (phi_result),
-			     arg0, arg1);
-      result = gimple_build (&stmts, locus, ass_code, TREE_TYPE (phi_result),
-			     result, bound);
-      if (invert)
-	result = gimple_build (&stmts, locus, BIT_NOT_EXPR, TREE_TYPE (phi_result),
-			       result);
-
-      gsi = gsi_last_bb (cond_bb);
-      gsi_insert_seq_before (&gsi, stmts, GSI_NEW_STMT);
-
-      replace_phi_edge_with_variable (cond_bb, e1, phi, result);
-
-      return true;
-    }
-  else if (!threeway_p
-	   || empty_block_p (alt_middle_bb))
-    {
-      /* Recognize the following case, assuming d <= u:
-
-	 if (a <= u)
-	   b = MAX (a, d);
-	 x = PHI <b, u>
-
-	 This is equivalent to
-
-	 b = MAX (a, d);
-	 x = MIN (b, u);  */
-
-      gimple *assign = last_and_only_stmt (middle_bb);
-      tree lhs, op0, op1, bound;
-
-      if (!single_pred_p (middle_bb))
-	return false;
-
-      if (!assign
-	  || gimple_code (assign) != GIMPLE_ASSIGN)
-	return false;
-
-      /* There cannot be any phi nodes in the middle bb. */
-      if (!gimple_seq_empty_p (phi_nodes (middle_bb)))
-	return false;
-
-      lhs = gimple_assign_lhs (assign);
-      ass_code = gimple_assign_rhs_code (assign);
-      if (ass_code != MAX_EXPR && ass_code != MIN_EXPR)
-	return false;
-      op0 = gimple_assign_rhs1 (assign);
-      op1 = gimple_assign_rhs2 (assign);
-
-      if (true_edge->src == middle_bb)
-	{
-	  /* We got here if the condition is true, i.e., SMALLER < LARGER.  */
-	  if (!operand_equal_for_phi_arg_p (lhs, arg_true))
-	    return false;
-
-	  if (operand_equal_for_phi_arg_p (arg_false, larger)
-	      || (alt_larger
-		  && operand_equal_for_phi_arg_p (arg_false, alt_larger)))
-	    {
-	      /* Case
-
-		 if (smaller < larger)
-		   {
-		     r' = MAX_EXPR (smaller, bound)
-		   }
-		 r = PHI <r', larger>  --> to be turned to MIN_EXPR.  */
-	      if (ass_code != MAX_EXPR)
-		return false;
-
-	      minmax = MIN_EXPR;
-	      if (operand_equal_for_phi_arg_p (op0, smaller)
-		  || (alt_smaller
-		      && operand_equal_for_phi_arg_p (op0, alt_smaller)))
-		bound = op1;
-	      else if (operand_equal_for_phi_arg_p (op1, smaller)
-		       || (alt_smaller
-			   && operand_equal_for_phi_arg_p (op1, alt_smaller)))
-		bound = op0;
-	      else
-		return false;
-
-	      /* We need BOUND <= LARGER.  */
-	      if (!integer_nonzerop (fold_build2 (LE_EXPR, boolean_type_node,
-						  bound, arg_false)))
-		return false;
-	    }
-	  else if (operand_equal_for_phi_arg_p (arg_false, smaller)
-		   || (alt_smaller
-		       && operand_equal_for_phi_arg_p (arg_false, alt_smaller)))
-	    {
-	      /* Case
-
-		 if (smaller < larger)
-		   {
-		     r' = MIN_EXPR (larger, bound)
-		   }
-		 r = PHI <r', smaller>  --> to be turned to MAX_EXPR.  */
-	      if (ass_code != MIN_EXPR)
-		return false;
-
-	      minmax = MAX_EXPR;
-	      if (operand_equal_for_phi_arg_p (op0, larger)
-		  || (alt_larger
-		      && operand_equal_for_phi_arg_p (op0, alt_larger)))
-		bound = op1;
-	      else if (operand_equal_for_phi_arg_p (op1, larger)
-		       || (alt_larger
-			   && operand_equal_for_phi_arg_p (op1, alt_larger)))
-		bound = op0;
-	      else
-		return false;
-
-	      /* We need BOUND >= SMALLER.  */
-	      if (!integer_nonzerop (fold_build2 (GE_EXPR, boolean_type_node,
-						  bound, arg_false)))
-		return false;
-	    }
-	  else
-	    return false;
-	}
-      else
-	{
-	  /* We got here if the condition is false, i.e., SMALLER > LARGER.  */
-	  if (!operand_equal_for_phi_arg_p (lhs, arg_false))
-	    return false;
-
-	  if (operand_equal_for_phi_arg_p (arg_true, larger)
-	      || (alt_larger
-		  && operand_equal_for_phi_arg_p (arg_true, alt_larger)))
-	    {
-	      /* Case
-
-		 if (smaller > larger)
-		   {
-		     r' = MIN_EXPR (smaller, bound)
-		   }
-		 r = PHI <r', larger>  --> to be turned to MAX_EXPR.  */
-	      if (ass_code != MIN_EXPR)
-		return false;
-
-	      minmax = MAX_EXPR;
-	      if (operand_equal_for_phi_arg_p (op0, smaller)
-		  || (alt_smaller
-		      && operand_equal_for_phi_arg_p (op0, alt_smaller)))
-		bound = op1;
-	      else if (operand_equal_for_phi_arg_p (op1, smaller)
-		       || (alt_smaller
-			   && operand_equal_for_phi_arg_p (op1, alt_smaller)))
-		bound = op0;
-	      else
-		return false;
-
-	      /* We need BOUND >= LARGER.  */
-	      if (!integer_nonzerop (fold_build2 (GE_EXPR, boolean_type_node,
-						  bound, arg_true)))
-		return false;
-	    }
-	  else if (operand_equal_for_phi_arg_p (arg_true, smaller)
-		   || (alt_smaller
-		       && operand_equal_for_phi_arg_p (arg_true, alt_smaller)))
-	    {
-	      /* Case
-
-		 if (smaller > larger)
-		   {
-		     r' = MAX_EXPR (larger, bound)
-		   }
-		 r = PHI <r', smaller>  --> to be turned to MIN_EXPR.  */
-	      if (ass_code != MAX_EXPR)
-		return false;
-
-	      minmax = MIN_EXPR;
-	      if (operand_equal_for_phi_arg_p (op0, larger))
-		bound = op1;
-	      else if (operand_equal_for_phi_arg_p (op1, larger))
-		bound = op0;
-	      else
-		return false;
-
-	      /* We need BOUND <= SMALLER.  */
-	      if (!integer_nonzerop (fold_build2 (LE_EXPR, boolean_type_node,
-						  bound, arg_true)))
-		return false;
-	    }
-	  else
-	    return false;
-	}
-
-      /* Move the statement from the middle block.  */
-      gsi = gsi_last_bb (cond_bb);
-      gsi_from = gsi_last_nondebug_bb (middle_bb);
-      reset_flow_sensitive_info (SINGLE_SSA_TREE_OPERAND (gsi_stmt (gsi_from),
-							  SSA_OP_DEF));
-      gsi_move_before (&gsi_from, &gsi);
-    }
-  else
-    return false;
-
-  /* Emit the statement to compute min/max.  */
-  gimple_seq stmts = NULL;
-  tree phi_result = PHI_RESULT (phi);
-
-  /* When we can't use a MIN/MAX_EXPR still make sure the expression
-     stays in a form to be recognized by ISA that map to IEEE x > y ? x : y
-     semantics (that's not IEEE max semantics).  */
-  if (HONOR_NANS (type) || HONOR_SIGNED_ZEROS (type))
-    {
-      result = gimple_build (&stmts, cmp, boolean_type_node,
-			     gimple_cond_lhs (cond), rhs);
-      result = gimple_build (&stmts, COND_EXPR, TREE_TYPE (phi_result),
-			     result, arg_true, arg_false);
-    }
-  else
-    result = gimple_build (&stmts, minmax, TREE_TYPE (phi_result), arg0, arg1);
-
-  gsi = gsi_last_bb (cond_bb);
-  gsi_insert_seq_before (&gsi, stmts, GSI_NEW_STMT);
-
-  replace_phi_edge_with_variable (cond_bb, e1, phi, result);
-
-  return true;
-}
-
 /* Attempt to optimize (x <=> y) cmp 0 and similar comparisons.
    For strong ordering <=> try to match something like:
     <bb 2> :  // cond3_bb (== cond2_bb)
@@ -2324,7 +1891,7 @@ minmax_replacement (basic_block cond_bb, basic_block middle_bb, basic_block alt_
     <bb 5> [local count: 134217728]:  // middle_bb
 
     <bb 6> [local count: 1073741824]:  // phi_bb
-    # SR.27_4 = PHI <0(2), -1(3), 1(4), 2(5)>
+    # SR.27_4 = PHI <0(2), -1(3), 1(4), -128(5)>
     _2 = SR.27_4 > 0;  */
 
 static bool
@@ -2332,13 +1899,15 @@ spaceship_replacement (basic_block cond_bb, basic_block middle_bb,
 		       edge e0, edge e1, gphi *phi,
 		       tree arg0, tree arg1)
 {
-  tree phires = PHI_RESULT (phi);
+  tree phires = gimple_phi_result (phi);
   if (!INTEGRAL_TYPE_P (TREE_TYPE (phires))
       || TYPE_UNSIGNED (TREE_TYPE (phires))
       || !tree_fits_shwi_p (arg0)
       || !tree_fits_shwi_p (arg1)
-      || !IN_RANGE (tree_to_shwi (arg0), -1, 2)
-      || !IN_RANGE (tree_to_shwi (arg1), -1, 2))
+      || (!IN_RANGE (tree_to_shwi (arg0), -1, 1)
+	  && tree_to_shwi (arg0) != -128)
+      || (!IN_RANGE (tree_to_shwi (arg1), -1, 1)
+	  && tree_to_shwi (arg1) != -128))
     return false;
 
   basic_block phi_bb = gimple_bb (phi);
@@ -2356,40 +1925,48 @@ spaceship_replacement (basic_block cond_bb, basic_block middle_bb,
   tree lhs, rhs;
   gimple *orig_use_stmt = use_stmt;
   tree orig_use_lhs = NULL_TREE;
-  int prec = TYPE_PRECISION (TREE_TYPE (phires));
-  bool is_cast = false;
+  tree temps[2] = { NULL_TREE, NULL_TREE };
 
-  /* Deal with the case when match.pd has rewritten the (res & ~1) == 0
-     into res <= 1 and has left a type-cast for signed types.  */
+  /* Handle std::partial_ordering::_M_reverse(), i.e.
+     _1 = (unsigned char) phires;
+     _2 = -_1;
+     _3 = (signed char) _2;
+     and uses of _3 in comparison instead of phires.  */
   if (gimple_assign_cast_p (use_stmt))
     {
       orig_use_lhs = gimple_assign_lhs (use_stmt);
-      /* match.pd would have only done this for a signed type,
-	 so the conversion must be to an unsigned one.  */
+      temps[0] = orig_use_lhs;
       tree ty1 = TREE_TYPE (gimple_assign_rhs1 (use_stmt));
       tree ty2 = TREE_TYPE (orig_use_lhs);
 
       if (!TYPE_UNSIGNED (ty2) || !INTEGRAL_TYPE_P (ty2))
 	return false;
-      if (TYPE_PRECISION (ty1) > TYPE_PRECISION (ty2))
+      if (TYPE_PRECISION (ty2) != 8 || TYPE_PRECISION (ty1) < 8)
 	return false;
       if (SSA_NAME_OCCURS_IN_ABNORMAL_PHI (orig_use_lhs))
 	return false;
       if (!single_imm_use (orig_use_lhs, &use_p, &use_stmt))
 	return false;
 
-      is_cast = true;
-    }
-  else if (is_gimple_assign (use_stmt)
-	   && gimple_assign_rhs_code (use_stmt) == BIT_AND_EXPR
-	   && TREE_CODE (gimple_assign_rhs2 (use_stmt)) == INTEGER_CST
-	   && (wi::to_wide (gimple_assign_rhs2 (use_stmt))
-	       == wi::shifted_mask (1, prec - 1, false, prec)))
-    {
-      /* For partial_ordering result operator>= with unspec as second
-	 argument is (res & 1) == res, folded by match.pd into
-	 (res & ~1) == 0.  */
+      if (!is_gimple_assign (use_stmt)
+	  || gimple_assign_rhs_code (use_stmt) != NEGATE_EXPR)
+	return false;
+
       orig_use_lhs = gimple_assign_lhs (use_stmt);
+      temps[1] = orig_use_lhs;
+      if (SSA_NAME_OCCURS_IN_ABNORMAL_PHI (orig_use_lhs))
+	return false;
+      if (!single_imm_use (orig_use_lhs, &use_p, &use_stmt))
+	return false;
+
+      if (!gimple_assign_cast_p (use_stmt))
+	return false;
+
+      orig_use_lhs = gimple_assign_lhs (use_stmt);
+      tree ty3 = TREE_TYPE (orig_use_lhs);
+
+      if (!useless_type_conversion_p (ty3, ty1))
+	return false;
       if (SSA_NAME_OCCURS_IN_ABNORMAL_PHI (orig_use_lhs))
 	return false;
       if (!single_imm_use (orig_use_lhs, &use_p, &use_stmt))
@@ -2440,51 +2017,6 @@ spaceship_replacement (basic_block cond_bb, basic_block middle_bb,
       || !IN_RANGE (tree_to_shwi (rhs), -1, 1))
     return false;
 
-  if (is_cast)
-    {
-      if (TREE_CODE (rhs) != INTEGER_CST)
-	return false;
-      /* As for -ffast-math we assume the 2 return to be
-	 impossible, canonicalize (unsigned) res <= 1U or
-	 (unsigned) res < 2U into res >= 0 and (unsigned) res > 1U
-	 or (unsigned) res >= 2U as res < 0.  */
-      switch (cmp)
-	{
-	case LE_EXPR:
-	  if (!integer_onep (rhs))
-	    return false;
-	  cmp = GE_EXPR;
-	  break;
-	case LT_EXPR:
-	  if (wi::ne_p (wi::to_widest (rhs), 2))
-	    return false;
-	  cmp = GE_EXPR;
-	  break;
-	case GT_EXPR:
-	  if (!integer_onep (rhs))
-	    return false;
-	  cmp = LT_EXPR;
-	  break;
-	case GE_EXPR:
-	  if (wi::ne_p (wi::to_widest (rhs), 2))
-	    return false;
-	  cmp = LT_EXPR;
-	  break;
-	default:
-	  return false;
-	}
-      rhs = build_zero_cst (TREE_TYPE (phires));
-    }
-  else if (orig_use_lhs)
-    {
-      if ((cmp != EQ_EXPR && cmp != NE_EXPR) || !integer_zerop (rhs))
-	return false;
-      /* As for -ffast-math we assume the 2 return to be
-	 impossible, canonicalize (res & ~1) == 0 into
-	 res >= 0 and (res & ~1) != 0 as res < 0.  */
-      cmp = cmp == EQ_EXPR ? GE_EXPR : LT_EXPR;
-    }
-
   if (!empty_block_p (middle_bb))
     return false;
 
@@ -2502,9 +2034,6 @@ spaceship_replacement (basic_block cond_bb, basic_block middle_bb,
     }
   tree lhs1 = gimple_cond_lhs (cond1);
   tree rhs1 = gimple_cond_rhs (cond1);
-  /* The optimization may be unsafe due to NaNs.  */
-  if (HONOR_NANS (TREE_TYPE (lhs1)))
-    return false;
   if (TREE_CODE (lhs1) == SSA_NAME && SSA_NAME_OCCURS_IN_ABNORMAL_PHI (lhs1))
     return false;
   if (TREE_CODE (rhs1) == SSA_NAME && SSA_NAME_OCCURS_IN_ABNORMAL_PHI (rhs1))
@@ -2595,14 +2124,17 @@ spaceship_replacement (basic_block cond_bb, basic_block middle_bb,
     {
       if (absu_hwi (tree_to_shwi (arg2)) != 1)
 	return false;
+      if ((cond2_phi_edge->flags & EDGE_FALSE_VALUE)
+	  && HONOR_NANS (TREE_TYPE (lhs1)))
+	return false;
       if (e1->flags & EDGE_TRUE_VALUE)
 	{
-	  if (tree_to_shwi (arg0) != 2
+	  if (tree_to_shwi (arg0) != -128
 	      || absu_hwi (tree_to_shwi (arg1)) != 1
 	      || wi::to_widest (arg1) == wi::to_widest (arg2))
 	    return false;
 	}
-      else if (tree_to_shwi (arg1) != 2
+      else if (tree_to_shwi (arg1) != -128
 	       || absu_hwi (tree_to_shwi (arg0)) != 1
 	       || wi::to_widest (arg0) == wi::to_widest (arg2))
 	return false;
@@ -2622,14 +2154,20 @@ spaceship_replacement (basic_block cond_bb, basic_block middle_bb,
 	 phi_bb:;
 	 is ok, but if x and y are swapped in one of the comparisons,
 	 or the comparisons are the same and operands not swapped,
-	 or the true and false edges are swapped, it is not.  */
+	 or the true and false edges are swapped, it is not.
+	 For HONOR_NANS, the edge flags are irrelevant and the comparisons
+	 must be different for non-swapped operands and same for swapped
+	 operands.  */
       if ((lhs2 == lhs1)
-	  ^ (((cond2_phi_edge->flags
-	       & ((cmp2 == LT_EXPR || cmp2 == LE_EXPR)
-		  ? EDGE_TRUE_VALUE : EDGE_FALSE_VALUE)) != 0)
-	     != ((e1->flags
-		  & ((cmp1 == LT_EXPR || cmp1 == LE_EXPR)
-		     ? EDGE_TRUE_VALUE : EDGE_FALSE_VALUE)) != 0)))
+	  ^ (HONOR_NANS (TREE_TYPE (lhs1))
+	     ? ((cmp2 == LT_EXPR || cmp2 == LE_EXPR)
+		!= (cmp1 == LT_EXPR || cmp1 == LE_EXPR))
+	     : (((cond2_phi_edge->flags
+		  & ((cmp2 == LT_EXPR || cmp2 == LE_EXPR)
+		     ? EDGE_TRUE_VALUE : EDGE_FALSE_VALUE)) != 0)
+		!= ((e1->flags
+		     & ((cmp1 == LT_EXPR || cmp1 == LE_EXPR)
+			 ? EDGE_TRUE_VALUE : EDGE_FALSE_VALUE)) != 0))))
 	return false;
       if (!single_pred_p (cond2_bb) || !cond_only_block_p (cond2_bb))
 	return false;
@@ -2668,7 +2206,8 @@ spaceship_replacement (basic_block cond_bb, basic_block middle_bb,
     }
   else if (absu_hwi (tree_to_shwi (arg0)) != 1
 	   || absu_hwi (tree_to_shwi (arg1)) != 1
-	   || wi::to_widest (arg0) == wi::to_widest (arg1))
+	   || wi::to_widest (arg0) == wi::to_widest (arg1)
+	   || HONOR_NANS (TREE_TYPE (lhs1)))
     return false;
 
   if (!integer_zerop (arg3) || (cmp3 != EQ_EXPR && cmp3 != NE_EXPR))
@@ -2686,10 +2225,11 @@ spaceship_replacement (basic_block cond_bb, basic_block middle_bb,
     one_cmp = GT_EXPR;
 
   enum tree_code res_cmp;
+  bool negate_p = false;
   switch (cmp)
     {
     case EQ_EXPR:
-      if (integer_zerop (rhs))
+      if (integer_zerop (rhs) && !HONOR_NANS (TREE_TYPE (lhs1)))
 	res_cmp = EQ_EXPR;
       else if (integer_minus_onep (rhs))
 	res_cmp = one_cmp == LT_EXPR ? GT_EXPR : LT_EXPR;
@@ -2699,7 +2239,7 @@ spaceship_replacement (basic_block cond_bb, basic_block middle_bb,
 	return false;
       break;
     case NE_EXPR:
-      if (integer_zerop (rhs))
+      if (integer_zerop (rhs) && !HONOR_NANS (TREE_TYPE (lhs1)))
 	res_cmp = NE_EXPR;
       else if (integer_minus_onep (rhs))
 	res_cmp = one_cmp == LT_EXPR ? LE_EXPR : GE_EXPR;
@@ -2707,6 +2247,8 @@ spaceship_replacement (basic_block cond_bb, basic_block middle_bb,
 	res_cmp = one_cmp == LT_EXPR ? GE_EXPR : LE_EXPR;
       else
 	return false;
+      if (HONOR_NANS (TREE_TYPE (lhs1)))
+	negate_p = true;
       break;
     case LT_EXPR:
       if (integer_onep (rhs))
@@ -2715,6 +2257,8 @@ spaceship_replacement (basic_block cond_bb, basic_block middle_bb,
 	res_cmp = one_cmp == LT_EXPR ? GT_EXPR : LT_EXPR;
       else
 	return false;
+      if (HONOR_NANS (TREE_TYPE (lhs1)))
+	negate_p = true;
       break;
     case LE_EXPR:
       if (integer_zerop (rhs))
@@ -2723,6 +2267,8 @@ spaceship_replacement (basic_block cond_bb, basic_block middle_bb,
 	res_cmp = one_cmp == LT_EXPR ? GT_EXPR : LT_EXPR;
       else
 	return false;
+      if (HONOR_NANS (TREE_TYPE (lhs1)))
+	negate_p = true;
       break;
     case GT_EXPR:
       if (integer_minus_onep (rhs))
@@ -2743,24 +2289,40 @@ spaceship_replacement (basic_block cond_bb, basic_block middle_bb,
     default:
       gcc_unreachable ();
     }
+  if (orig_use_lhs)
+    res_cmp = swap_tree_comparison (res_cmp);
+
+  tree clhs1 = lhs1, crhs1 = rhs1;
+  if (negate_p)
+    {
+      if (cfun->can_throw_non_call_exceptions)
+	return false;
+      res_cmp = invert_tree_comparison (res_cmp, false);
+      clhs1 = make_ssa_name (boolean_type_node);
+      gimple *g = gimple_build_assign (clhs1, res_cmp, lhs1, rhs1);
+      gimple_stmt_iterator gsi = gsi_for_stmt (use_stmt);
+      gsi_insert_before (&gsi, g, GSI_SAME_STMT);
+      crhs1 = boolean_false_node;
+      res_cmp = EQ_EXPR;
+    }  
 
   if (gimple_code (use_stmt) == GIMPLE_COND)
     {
       gcond *use_cond = as_a <gcond *> (use_stmt);
       gimple_cond_set_code (use_cond, res_cmp);
-      gimple_cond_set_lhs (use_cond, lhs1);
-      gimple_cond_set_rhs (use_cond, rhs1);
+      gimple_cond_set_lhs (use_cond, clhs1);
+      gimple_cond_set_rhs (use_cond, crhs1);
     }
   else if (gimple_assign_rhs_class (use_stmt) == GIMPLE_BINARY_RHS)
     {
       gimple_assign_set_rhs_code (use_stmt, res_cmp);
-      gimple_assign_set_rhs1 (use_stmt, lhs1);
-      gimple_assign_set_rhs2 (use_stmt, rhs1);
+      gimple_assign_set_rhs1 (use_stmt, clhs1);
+      gimple_assign_set_rhs2 (use_stmt, crhs1);
     }
   else
     {
       tree cond = build2 (res_cmp, TREE_TYPE (gimple_assign_rhs1 (use_stmt)),
-			  lhs1, rhs1);
+			  clhs1, crhs1);
       gimple_assign_set_rhs1 (use_stmt, cond);
     }
   update_stmt (use_stmt);
@@ -2770,31 +2332,68 @@ spaceship_replacement (basic_block cond_bb, basic_block middle_bb,
       use_operand_p use_p;
       imm_use_iterator iter;
       bool has_debug_uses = false;
-      bool has_cast_debug_uses = false;
+      bool has_cast1_debug_uses = false;
+      bool has_neg_debug_uses = false;
+      bool has_cast2_debug_uses = false;
       FOR_EACH_IMM_USE_FAST (use_p, iter, phires)
 	{
 	  gimple *use_stmt = USE_STMT (use_p);
-	  if (orig_use_lhs && use_stmt == orig_use_stmt)
-	    continue;
-	  gcc_assert (is_gimple_debug (use_stmt));
-	  has_debug_uses = true;
-	  break;
+	  if (is_gimple_debug (use_stmt))
+	    {
+	      has_debug_uses = true;
+	      break;
+	    }
 	}
       if (orig_use_lhs)
 	{
-	  if (!has_debug_uses || is_cast)
-	    FOR_EACH_IMM_USE_FAST (use_p, iter, orig_use_lhs)
-	      {
-		gimple *use_stmt = USE_STMT (use_p);
-		gcc_assert (is_gimple_debug (use_stmt));
-		has_debug_uses = true;
-		if (is_cast)
-		  has_cast_debug_uses = true;
-	      }
-	  gimple_stmt_iterator gsi = gsi_for_stmt (orig_use_stmt);
-	  tree zero = build_zero_cst (TREE_TYPE (orig_use_lhs));
-	  gimple_assign_set_rhs_with_ops (&gsi, INTEGER_CST, zero);
-	  update_stmt (orig_use_stmt);
+	  FOR_EACH_IMM_USE_FAST (use_p, iter, temps[0])
+	    {
+	      gimple *use_stmt = USE_STMT (use_p);
+	      if (is_gimple_debug (use_stmt))
+		{
+		  has_debug_uses = true;
+		  has_cast1_debug_uses = true;
+		  break;
+		}
+	    }
+	  FOR_EACH_IMM_USE_FAST (use_p, iter, temps[1])
+	    {
+	      gimple *use_stmt = USE_STMT (use_p);
+	      if (is_gimple_debug (use_stmt))
+		{
+		  has_debug_uses = true;
+		  has_cast1_debug_uses = true;
+		  has_neg_debug_uses = true;
+		  break;
+		}
+	    }
+	  FOR_EACH_IMM_USE_FAST (use_p, iter, orig_use_lhs)
+	    {
+	      gimple *use_stmt = USE_STMT (use_p);
+	      if (is_gimple_debug (use_stmt))
+		{
+		  has_debug_uses = true;
+		  has_cast1_debug_uses = true;
+		  has_neg_debug_uses = true;
+		  has_cast2_debug_uses = true;
+		  break;
+		}
+	    }
+	  if (has_debug_uses)
+	    {
+	      gimple_stmt_iterator gsi = gsi_for_stmt (orig_use_stmt);
+	      tree zero = build_zero_cst (TREE_TYPE (temps[0]));
+	      gimple_assign_set_rhs_with_ops (&gsi, INTEGER_CST, zero);
+	      update_stmt (orig_use_stmt);
+	      gsi = gsi_for_stmt (SSA_NAME_DEF_STMT (temps[1]));
+	      zero = build_zero_cst (TREE_TYPE (temps[1]));
+	      gimple_assign_set_rhs_with_ops (&gsi, INTEGER_CST, zero);
+	      update_stmt (SSA_NAME_DEF_STMT (temps[1]));
+	      gsi = gsi_for_stmt (SSA_NAME_DEF_STMT (orig_use_lhs));
+	      zero = build_zero_cst (TREE_TYPE (orig_use_lhs));
+	      gimple_assign_set_rhs_with_ops (&gsi, INTEGER_CST, zero);
+	      update_stmt (SSA_NAME_DEF_STMT (orig_use_lhs));
+	    }
 	}
 
       if (has_debug_uses)
@@ -2804,14 +2403,31 @@ spaceship_replacement (basic_block cond_bb, basic_block middle_bb,
 	     # DEBUG D#2 => i_2(D) == j_3(D) ? 0 : D#1
 	     where > stands for the comparison that yielded 1
 	     and replace debug uses of phi result with that D#2.
-	     Ignore the value of 2, because if NaNs aren't expected,
-	     all floating point numbers should be comparable.  */
+	     Ignore the value of -128 if !HONOR_NANS, because if NaNs
+	     aren't expected, all floating point numbers should be
+	     comparable.  If HONOR_NANS, emit something like:
+	     # DEBUG D#1 => i_2(D) < j_3(D) ? -1 : -128
+	     # DEBUG D#2 => i_2(D) > j_3(D) ? 1 : D#1
+	     # DEBUG D#3 => i_2(D) == j_3(D) ? 0 : D#2
+	     instead.  */
 	  gimple_stmt_iterator gsi = gsi_after_labels (gimple_bb (phi));
 	  tree type = TREE_TYPE (phires);
+	  tree minus_one = build_int_cst (type, -1);
+	  if (HONOR_NANS (TREE_TYPE (lhs1)))
+	    {
+	      tree temp3 = build_debug_expr_decl (type);
+	      tree t = build2 (one_cmp == LT_EXPR ? GT_EXPR : LT_EXPR,
+			       boolean_type_node, lhs1, rhs2);
+	      t = build3 (COND_EXPR, type, t, minus_one,
+			  build_int_cst (type, -128));
+	      gimple *g = gimple_build_debug_bind (temp3, t, phi);
+	      gsi_insert_before (&gsi, g, GSI_SAME_STMT);
+	      minus_one = temp3;
+	    }
 	  tree temp1 = build_debug_expr_decl (type);
 	  tree t = build2 (one_cmp, boolean_type_node, lhs1, rhs2);
 	  t = build3 (COND_EXPR, type, t, build_one_cst (type),
-		      build_int_cst (type, -1));
+		      minus_one);
 	  gimple *g = gimple_build_debug_bind (temp1, t, phi);
 	  gsi_insert_before (&gsi, g, GSI_SAME_STMT);
 	  tree temp2 = build_debug_expr_decl (type);
@@ -2820,29 +2436,46 @@ spaceship_replacement (basic_block cond_bb, basic_block middle_bb,
 	  g = gimple_build_debug_bind (temp2, t, phi);
 	  gsi_insert_before (&gsi, g, GSI_SAME_STMT);
 	  replace_uses_by (phires, temp2);
-	  if (orig_use_lhs)
+	  if (has_cast1_debug_uses)
 	    {
-	      if (has_cast_debug_uses)
-		{
-		  tree temp3 = make_node (DEBUG_EXPR_DECL);
-		  DECL_ARTIFICIAL (temp3) = 1;
-		  TREE_TYPE (temp3) = TREE_TYPE (orig_use_lhs);
-		  SET_DECL_MODE (temp3, TYPE_MODE (type));
-		  t = fold_convert (TREE_TYPE (temp3), temp2);
-		  g = gimple_build_debug_bind (temp3, t, phi);
-		  gsi_insert_before (&gsi, g, GSI_SAME_STMT);
-		  replace_uses_by (orig_use_lhs, temp3);
-		}
-	      else
-		replace_uses_by (orig_use_lhs, temp2);
+	      tree temp3 = build_debug_expr_decl (TREE_TYPE (temps[0]));
+	      t = fold_convert (TREE_TYPE (temps[0]), temp2);
+	      g = gimple_build_debug_bind (temp3, t, phi);
+	      gsi_insert_before (&gsi, g, GSI_SAME_STMT);
+	      replace_uses_by (temps[0], temp3);
+	      temp2 = temp3;
+	    }
+	  if (has_neg_debug_uses)
+	    {
+	      tree temp3 = build_debug_expr_decl (TREE_TYPE (temps[1]));
+	      t = fold_build1 (NEGATE_EXPR, TREE_TYPE (temps[1]), temp2);
+	      g = gimple_build_debug_bind (temp3, t, phi);
+	      gsi_insert_before (&gsi, g, GSI_SAME_STMT);
+	      replace_uses_by (temps[1], temp3);
+	      temp2 = temp3;
+	    }
+	  if (has_cast2_debug_uses)
+	    {
+	      tree temp3 = build_debug_expr_decl (TREE_TYPE (orig_use_lhs));
+	      t = fold_convert (TREE_TYPE (orig_use_lhs), temp2);
+	      g = gimple_build_debug_bind (temp3, t, phi);
+	      gsi_insert_before (&gsi, g, GSI_SAME_STMT);
+	      replace_uses_by (orig_use_lhs, temp3);
 	    }
 	}
     }
 
   if (orig_use_lhs)
     {
-      gimple_stmt_iterator gsi = gsi_for_stmt (orig_use_stmt);
+      gimple_stmt_iterator gsi = gsi_for_stmt (SSA_NAME_DEF_STMT (orig_use_lhs));
       gsi_remove (&gsi, true);
+      gsi = gsi_for_stmt (SSA_NAME_DEF_STMT (temps[1]));
+      gsi_remove (&gsi, true);
+      gsi = gsi_for_stmt (orig_use_stmt);
+      gsi_remove (&gsi, true);
+      release_ssa_name (orig_use_lhs);
+      release_ssa_name (temps[1]);
+      release_ssa_name (temps[0]);
     }
 
   gimple_stmt_iterator psi = gsi_for_stmt (phi);
@@ -3048,15 +2681,35 @@ cond_removal_in_builtin_zero_pattern (basic_block cond_bb,
       || arg != gimple_cond_lhs (cond))
     return false;
 
-  /* Canonicalize.  */
-  if ((e2->flags & EDGE_TRUE_VALUE
-       && gimple_cond_code (cond) == NE_EXPR)
-      || (e1->flags & EDGE_TRUE_VALUE
-	  && gimple_cond_code (cond) == EQ_EXPR))
+  edge true_edge, false_edge;
+  /* We need to know which is the true edge and which is the false
+     edge so that we know when to invert the condition below.  */
+  extract_true_false_edges_from_block (cond_bb, &true_edge, &false_edge);
+
+  /* Forward the edges over the middle basic block.  */
+  if (true_edge->dest == middle_bb)
+    true_edge = EDGE_SUCC (true_edge->dest, 0);
+  if (false_edge->dest == middle_bb)
+    false_edge = EDGE_SUCC (false_edge->dest, 0);
+
+  /* Canonicalize the args with respect to the edges,
+     arg0 is from the true edge and arg1 is from the
+     false edge.
+     That is `cond ? arg0 : arg1`.*/
+  if (true_edge == e1)
+    gcc_assert (false_edge == e2);
+  else
     {
+      gcc_assert (false_edge == e1);
+      gcc_assert (true_edge == e2);
       std::swap (arg0, arg1);
-      std::swap (e1, e2);
     }
+
+  /* Canonicalize the args such that we get:
+     `arg != 0 ? arg0 : arg1`. So swap arg0/arg1
+     around if cond was an equals.  */
+  if (gimple_cond_code (cond) == EQ_EXPR)
+    std::swap (arg0, arg1);
 
   /* Check PHI arguments.  */
   if (lhs != arg0
@@ -3383,10 +3036,15 @@ cond_store_replacement (basic_block middle_bb, basic_block join_bb,
       /* If LHS is an access to a local variable without address-taken
 	 (or when we allow data races) and known not to trap, we could
 	 always safely move down the store.  */
-      tree base = get_base_address (lhs);
-      if (!auto_var_p (base)
-	  || (TREE_ADDRESSABLE (base) && !flag_store_data_races)
-	  || tree_could_trap_p (lhs))
+      tree base;
+      if (ref_can_have_store_data_races (lhs)
+	  || tree_could_trap_p (lhs)
+	  /* tree_could_trap_p is a predicate for rvalues, so check
+	     for readonly memory explicitly.  */
+	  || ((base = get_base_address (lhs))
+	      && ((DECL_P (base)
+		   && TREE_READONLY (base))
+		  || TREE_CODE (base) == STRING_CST)))
 	return false;
     }
 
@@ -3435,7 +3093,7 @@ cond_store_replacement (basic_block middle_bb, basic_block join_bb,
   add_phi_arg (newphi, rhs, e0, locus);
   add_phi_arg (newphi, name, e1, locus);
 
-  new_stmt = gimple_build_assign (lhs, PHI_RESULT (newphi));
+  new_stmt = gimple_build_assign (lhs, gimple_phi_result (newphi));
 
   /* 4) Insert that PHI node.  */
   gsi = gsi_after_labels (join_bb);
@@ -3464,29 +3122,33 @@ cond_store_replacement (basic_block middle_bb, basic_block join_bb,
 static bool
 cond_if_else_store_replacement_1 (basic_block then_bb, basic_block else_bb,
 				  basic_block join_bb, gimple *then_assign,
-				  gimple *else_assign)
+				  gimple *else_assign,
+				  gphi *vphi)
 {
   tree lhs_base, lhs, then_rhs, else_rhs, name;
   location_t then_locus, else_locus;
   gimple_stmt_iterator gsi;
-  gphi *newphi;
+  gphi *newphi = nullptr;
   gassign *new_stmt;
 
   if (then_assign == NULL
       || !gimple_assign_single_p (then_assign)
-      || gimple_clobber_p (then_assign)
-      || gimple_has_volatile_ops (then_assign)
       || else_assign == NULL
       || !gimple_assign_single_p (else_assign)
-      || gimple_clobber_p (else_assign)
-      || gimple_has_volatile_ops (else_assign)
       || stmt_references_abnormal_ssa_name (then_assign)
       || stmt_references_abnormal_ssa_name (else_assign))
     return false;
 
+  /* Allow both being clobbers but no other volatile operations. */
+  if (gimple_clobber_p (then_assign)
+      && gimple_clobber_p (else_assign))
+    ;
+  else if (gimple_has_volatile_ops (then_assign)
+	   || gimple_has_volatile_ops (else_assign))
+   return false;
+
   lhs = gimple_assign_lhs (then_assign);
-  if (!is_gimple_reg_type (TREE_TYPE (lhs))
-      || !operand_equal_p (lhs, gimple_assign_lhs (else_assign), 0))
+  if (!operand_equal_p (lhs, gimple_assign_lhs (else_assign), 0))
     return false;
 
   lhs_base = get_base_address (lhs);
@@ -3498,6 +3160,36 @@ cond_if_else_store_replacement_1 (basic_block then_bb, basic_block else_bb,
   else_rhs = gimple_assign_rhs1 (else_assign);
   then_locus = gimple_location (then_assign);
   else_locus = gimple_location (else_assign);
+
+  if (!is_gimple_reg_type (TREE_TYPE (lhs)))
+    {
+      /* Handle clobbers seperately as operand_equal_p does not check
+	 the kind of the clobbers being the same. */
+      if (TREE_CLOBBER_P (then_rhs) && TREE_CLOBBER_P (else_rhs))
+	{
+	  if (CLOBBER_KIND (then_rhs) != CLOBBER_KIND  (else_rhs))
+	    return false;
+	}
+      else if (!operand_equal_p (then_rhs, else_rhs))
+	return false;
+      /* Currently only handle commoning of `= {}`.   */
+      if (TREE_CODE (then_rhs) != CONSTRUCTOR)
+	return false;
+    }
+
+  if (dump_file && (dump_flags & TDF_DETAILS))
+    {
+      if (TREE_CLOBBER_P (then_rhs))
+	fprintf(dump_file, "factoring out clobber:\n\tthen:\n");
+      else
+	fprintf(dump_file, "factoring out stores:\n\tthen:\n");
+      print_gimple_stmt (dump_file, then_assign, 0,
+			 TDF_VOPS|TDF_MEMSYMS);
+      fprintf(dump_file, "\telse:\n");
+      print_gimple_stmt (dump_file, else_assign, 0,
+			 TDF_VOPS|TDF_MEMSYMS);
+      fprintf (dump_file, "\n");
+    }
 
   /* Now we've checked the constraints, so do the transformation:
      1) Remove the stores.  */
@@ -3514,14 +3206,42 @@ cond_if_else_store_replacement_1 (basic_block then_bb, basic_block else_bb,
   /* 2) Create a PHI node at the join block, with one argument
 	holding the old RHS, and the other holding the temporary
 	where we stored the old memory contents.  */
-  name = make_temp_ssa_name (TREE_TYPE (lhs), NULL, "cstore");
-  newphi = create_phi_node (name, join_bb);
-  add_phi_arg (newphi, then_rhs, EDGE_SUCC (then_bb, 0), then_locus);
-  add_phi_arg (newphi, else_rhs, EDGE_SUCC (else_bb, 0), else_locus);
+  if (operand_equal_p (then_rhs, else_rhs))
+    name = then_rhs;
+  else
+    {
+      name = make_temp_ssa_name (TREE_TYPE (lhs), NULL, "cstore");
+      newphi = create_phi_node (name, join_bb);
+      add_phi_arg (newphi, then_rhs, EDGE_SUCC (then_bb, 0), then_locus);
+      add_phi_arg (newphi, else_rhs, EDGE_SUCC (else_bb, 0), else_locus);
+    }
 
-  new_stmt = gimple_build_assign (lhs, PHI_RESULT (newphi));
+  new_stmt = gimple_build_assign (lhs, name);
+  /* Update the vdef for the new store statement. */
+  tree newvphilhs = make_ssa_name (gimple_vop (cfun));
+  tree vdef = gimple_phi_result (vphi);
+  gimple_set_vuse (new_stmt, newvphilhs);
+  gimple_set_vdef (new_stmt, vdef);
+  gimple_phi_set_result (vphi, newvphilhs);
+  SSA_NAME_DEF_STMT (vdef) = new_stmt;
+  update_stmt (vphi);
+  if (dump_file && (dump_flags & TDF_DETAILS))
+    {
+      if (newphi)
+	{
+	 fprintf(dump_file, "to use phi:\n");
+	  print_gimple_stmt (dump_file, newphi, 0,
+			     TDF_VOPS|TDF_MEMSYMS);
+          fprintf(dump_file, "\n");
+	}
+      else
+	fprintf(dump_file, "to:\n");
+      print_gimple_stmt (dump_file, new_stmt, 0,
+			 TDF_VOPS|TDF_MEMSYMS);
+      fprintf(dump_file, "\n\n");
+    }
 
-  /* 3) Insert that PHI node.  */
+  /* 3) Insert that new store.  */
   gsi = gsi_after_labels (join_bb);
   if (gsi_end_p (gsi))
     {
@@ -3536,11 +3256,13 @@ cond_if_else_store_replacement_1 (basic_block then_bb, basic_block else_bb,
   return true;
 }
 
-/* Return the single store in BB with VDEF or NULL if there are
-   other stores in the BB or loads following the store.  */
+/* Return the last store in BB with VDEF or NULL if there are
+   loads following the store. VPHI is where the only use of the
+   vdef should be.  If ONLYONESTORE is true, then the store is
+   the only store in the BB.  */
 
 static gimple *
-single_trailing_store_in_bb (basic_block bb, tree vdef)
+trailing_store_in_bb (basic_block bb, tree vdef, gphi *vphi, bool onlyonestore)
 {
   if (SSA_NAME_IS_DEFAULT_DEF (vdef))
     return NULL;
@@ -3549,21 +3271,72 @@ single_trailing_store_in_bb (basic_block bb, tree vdef)
       || gimple_code (store) == GIMPLE_PHI)
     return NULL;
 
-  /* Verify there is no other store in this BB.  */
-  if (!SSA_NAME_IS_DEFAULT_DEF (gimple_vuse (store))
+  /* Verify there is no other store in this BB if requested.  */
+  if (onlyonestore
+      && !SSA_NAME_IS_DEFAULT_DEF (gimple_vuse (store))
       && gimple_bb (SSA_NAME_DEF_STMT (gimple_vuse (store))) == bb
       && gimple_code (SSA_NAME_DEF_STMT (gimple_vuse (store))) != GIMPLE_PHI)
     return NULL;
 
-  /* Verify there is no load or store after the store.  */
+
+  /* Verify there is no load or store after the store, the vdef of the store
+     should only be used by the vphi joining the 2 bbs.  */
   use_operand_p use_p;
-  imm_use_iterator imm_iter;
-  FOR_EACH_IMM_USE_FAST (use_p, imm_iter, gimple_vdef (store))
-    if (USE_STMT (use_p) != store
-	&& gimple_bb (USE_STMT (use_p)) == bb)
-      return NULL;
+  gimple *use_stmt;
+  if (!single_imm_use (gimple_vdef (store), &use_p, &use_stmt))
+    return NULL;
+  if (use_stmt != vphi)
+    return NULL;
 
   return store;
+}
+
+/* Limited Conditional store replacement.  We already know
+   that the recognized pattern looks like so:
+
+   split:
+     if (cond) goto THEN_BB; else goto ELSE_BB (edge E1)
+   THEN_BB:
+     ...
+     STORE = Y;
+     ...
+     goto JOIN_BB;
+   ELSE_BB:
+     ...
+     STORE = Z;
+     ...
+     fallthrough (edge E0)
+   JOIN_BB:
+     some more
+
+   Handles only the case with store in THEN_BB and ELSE_BB.  That is
+   cheap enough due to in phiopt and not worry about heurstics.  Moving the store
+   out might provide an opportunity for a phiopt to happen.
+   At -O1 (!flag_expensive_optimizations), this only handles the only store in
+   the BBs.  */
+
+static bool
+cond_if_else_store_replacement_limited (basic_block then_bb, basic_block else_bb,
+					basic_block join_bb)
+{
+  gphi *vphi = get_virtual_phi (join_bb);
+  if (!vphi)
+    return false;
+
+  tree then_vdef = PHI_ARG_DEF_FROM_EDGE (vphi, single_succ_edge (then_bb));
+  gimple *then_assign = trailing_store_in_bb (then_bb, then_vdef, vphi,
+					      !flag_expensive_optimizations);
+  if (!then_assign)
+    return false;
+
+  tree else_vdef = PHI_ARG_DEF_FROM_EDGE (vphi, single_succ_edge (else_bb));
+  gimple *else_assign = trailing_store_in_bb (else_bb, else_vdef, vphi,
+					      !flag_expensive_optimizations);
+  if (!else_assign)
+    return false;
+
+  return cond_if_else_store_replacement_1 (then_bb, else_bb, join_bb,
+					   then_assign, else_assign, vphi);
 }
 
 /* Conditional store replacement.  We already know
@@ -3596,35 +3369,17 @@ cond_if_else_store_replacement (basic_block then_bb, basic_block else_bb,
   vec<ddr_p> then_ddrs, else_ddrs;
   gimple *then_store, *else_store;
   bool found, ok = false, res;
-  struct data_dependence_relation *ddr;
-  data_reference_p then_dr, else_dr;
-  int i, j;
   tree then_lhs, else_lhs;
   basic_block blocks[3];
-
-  /* Handle the case with single store in THEN_BB and ELSE_BB.  That is
-     cheap enough to always handle as it allows us to elide dependence
-     checking.  */
-  gphi *vphi = NULL;
-  for (gphi_iterator si = gsi_start_phis (join_bb); !gsi_end_p (si);
-       gsi_next (&si))
-    if (virtual_operand_p (gimple_phi_result (si.phi ())))
-      {
-	vphi = si.phi ();
-	break;
-      }
+  gphi *vphi = get_virtual_phi (join_bb);
   if (!vphi)
     return false;
-  tree then_vdef = PHI_ARG_DEF_FROM_EDGE (vphi, single_succ_edge (then_bb));
-  tree else_vdef = PHI_ARG_DEF_FROM_EDGE (vphi, single_succ_edge (else_bb));
-  gimple *then_assign = single_trailing_store_in_bb (then_bb, then_vdef);
-  if (then_assign)
-    {
-      gimple *else_assign = single_trailing_store_in_bb (else_bb, else_vdef);
-      if (else_assign)
-	return cond_if_else_store_replacement_1 (then_bb, else_bb, join_bb,
-						 then_assign, else_assign);
-    }
+
+  /* Handle the case with trailing stores in THEN_BB and ELSE_BB.  That is
+     cheap enough to always handle as it allows us to elide dependence
+     checking.  */
+  while (cond_if_else_store_replacement_limited (then_bb, else_bb, join_bb))
+    ;
 
   /* If either vectorization or if-conversion is disabled then do
      not sink any stores.  */
@@ -3648,9 +3403,21 @@ cond_if_else_store_replacement (basic_block then_bb, basic_block else_bb,
       return false;
     }
 
-  /* Find pairs of stores with equal LHS.  */
-  auto_vec<gimple *, 1> then_stores, else_stores;
-  FOR_EACH_VEC_ELT (then_datarefs, i, then_dr)
+  /* Clear visited on else stores, we want to make sure to pick each store
+     at most once to avoid quadratic behavior.  */
+  for (auto else_dr : else_datarefs)
+    {
+      if (DR_IS_READ (else_dr))
+	continue;
+      gimple_set_visited (DR_STMT (else_dr), false);
+    }
+
+  /* Find pairs of stores with equal LHS.  Work from the end to avoid
+     re-ordering stores unnecessarily.  */
+  auto_vec<std::pair<gimple *, gimple *>, 1> stores_pairs;
+  unsigned i;
+  data_reference_p then_dr;
+  FOR_EACH_VEC_ELT_REVERSE (then_datarefs, i, then_dr)
     {
       if (DR_IS_READ (then_dr))
         continue;
@@ -3661,12 +3428,16 @@ cond_if_else_store_replacement (basic_block then_bb, basic_block else_bb,
 	continue;
       found = false;
 
-      FOR_EACH_VEC_ELT (else_datarefs, j, else_dr)
+      unsigned j;
+      data_reference_p else_dr;
+      FOR_EACH_VEC_ELT_REVERSE (else_datarefs, j, else_dr)
         {
           if (DR_IS_READ (else_dr))
             continue;
 
           else_store = DR_STMT (else_dr);
+	  if (gimple_visited_p (else_store))
+	    continue;
           else_lhs = gimple_get_lhs (else_store);
 	  if (else_lhs == NULL_TREE)
 	    continue;
@@ -3681,13 +3452,13 @@ cond_if_else_store_replacement (basic_block then_bb, basic_block else_bb,
       if (!found)
         continue;
 
-      then_stores.safe_push (then_store);
-      else_stores.safe_push (else_store);
+      gimple_set_visited (else_store, true);
+      stores_pairs.safe_push (std::make_pair (then_store, else_store));
     }
 
   /* No pairs of stores found.  */
-  if (!then_stores.length ()
-      || then_stores.length () > (unsigned) param_max_stores_to_sink)
+  if (!stores_pairs.length ()
+      || stores_pairs.length () > (unsigned) param_max_stores_to_sink)
     {
       free_data_refs (then_datarefs);
       free_data_refs (else_datarefs);
@@ -3715,7 +3486,7 @@ cond_if_else_store_replacement (basic_block then_bb, basic_block else_bb,
 
   /* Check that there are no read-after-write or write-after-write dependencies
      in THEN_BB.  */
-  FOR_EACH_VEC_ELT (then_ddrs, i, ddr)
+  for (auto ddr : then_ddrs)
     {
       struct data_reference *dra = DDR_A (ddr);
       struct data_reference *drb = DDR_B (ddr);
@@ -3737,7 +3508,7 @@ cond_if_else_store_replacement (basic_block then_bb, basic_block else_bb,
 
   /* Check that there are no read-after-write or write-after-write dependencies
      in ELSE_BB.  */
-  FOR_EACH_VEC_ELT (else_ddrs, i, ddr)
+  for (auto ddr : else_ddrs)
     {
       struct data_reference *dra = DDR_A (ddr);
       struct data_reference *drb = DDR_B (ddr);
@@ -3758,11 +3529,12 @@ cond_if_else_store_replacement (basic_block then_bb, basic_block else_bb,
     }
 
   /* Sink stores with same LHS.  */
-  FOR_EACH_VEC_ELT (then_stores, i, then_store)
+  for (auto &store_pair : stores_pairs)
     {
-      else_store = else_stores[i];
+      then_store = store_pair.first;
+      else_store = store_pair.second;
       res = cond_if_else_store_replacement_1 (then_bb, else_bb, join_bb,
-                                              then_store, else_store);
+					      then_store, else_store, vphi);
       ok = ok || res;
     }
 
@@ -3971,6 +3743,83 @@ gate_hoist_loads (void)
 	  && HAVE_conditional_move);
 }
 
+template <class func_type>
+static void
+execute_over_cond_phis (func_type func)
+{
+  unsigned n, i;
+  basic_block *bb_order;
+  basic_block bb;
+  /* Search every basic block for COND_EXPR we may be able to optimize.
+
+     We walk the blocks in order that guarantees that a block with
+     a single predecessor is processed before the predecessor.
+     This ensures that we collapse inner ifs before visiting the
+     outer ones, and also that we do not try to visit a removed
+     block.  */
+  bb_order = single_pred_before_succ_order ();
+  n = n_basic_blocks_for_fn (cfun) - NUM_FIXED_BLOCKS;
+
+  for (i = 0; i < n; i++)
+    {
+      basic_block bb1, bb2;
+      edge e1, e2;
+      bool diamond_p = false;
+
+      bb = bb_order[i];
+
+      /* Check to see if the last statement is a GIMPLE_COND.  */
+      gcond *cond_stmt = safe_dyn_cast <gcond *> (*gsi_last_bb (bb));
+      if (!cond_stmt)
+	continue;
+
+      e1 = EDGE_SUCC (bb, 0);
+      bb1 = e1->dest;
+      e2 = EDGE_SUCC (bb, 1);
+      bb2 = e2->dest;
+
+      /* We cannot do the optimization on abnormal edges.  */
+      if ((e1->flags & EDGE_ABNORMAL) != 0
+	  || (e2->flags & EDGE_ABNORMAL) != 0)
+	continue;
+
+      /* If either bb1's succ or bb2 or bb2's succ is non NULL.  */
+      if (EDGE_COUNT (bb1->succs) == 0
+	  || EDGE_COUNT (bb2->succs) == 0)
+	continue;
+
+      /* Find the bb which is the fall through to the other.  */
+      if (EDGE_SUCC (bb1, 0)->dest == bb2)
+	;
+      else if (EDGE_SUCC (bb2, 0)->dest == bb1)
+	{
+	  std::swap (bb1, bb2);
+	  std::swap (e1, e2);
+	}
+      else if (EDGE_SUCC (bb1, 0)->dest == EDGE_SUCC (bb2, 0)->dest
+	       && single_succ_p (bb2))
+	{
+	  diamond_p = true;
+	  e2 = EDGE_SUCC (bb2, 0);
+	  /* Make sure bb2 is just a fall through. */
+	  if ((e2->flags & EDGE_FALLTHRU) == 0)
+	    continue;
+	}
+      else
+	continue;
+
+      e1 = EDGE_SUCC (bb1, 0);
+
+      /* Make sure that bb1 is just a fall through.  */
+      if (!single_succ_p (bb1)
+	  || (e1->flags & EDGE_FALLTHRU) == 0)
+	continue;
+
+      func (bb, bb1, bb2, e1, e2, diamond_p, cond_stmt);
+    }
+  free (bb_order);
+}
+
 /* This pass tries to replaces an if-then-else block with an
    assignment.  We have different kinds of transformations.
    Some of these transformations are also performed by the ifcvt
@@ -4018,9 +3867,8 @@ gate_hoist_loads (void)
    But in this case bb1/bb2 can only be forwarding basic blocks.
 
    This fully replaces the old "Conditional Replacement",
-   "ABS Replacement" transformations as they are now
+   "ABS Replacement" and "MIN/MAX Replacement" transformations as they are now
    implmeneted in match.pd.
-   Some parts of the "MIN/MAX Replacement" are re-implemented in match.pd.
 
    Value Replacement
    -----------------
@@ -4061,26 +3909,6 @@ gate_hoist_loads (void)
        t2 = b > c;
        t3 = t1 & t2;
        x = a;
-
-   MIN/MAX Replacement
-   -------------------
-
-   This transformation, minmax_replacement replaces
-
-     bb0:
-       if (a <= b) goto bb2; else goto bb1;
-     bb1:
-     bb2:
-       x = PHI <b (bb1), a (bb0), ...>;
-
-   with
-
-     bb0:
-       x' = MIN_EXPR (a, b)
-     bb2:
-       x = PHI <x' (bb0), ...>;
-
-   A similar transformation is done for MAX_EXPR.
 
 
    This pass also performs a fifth transformation of a slightly different
@@ -4194,88 +4022,22 @@ unsigned int
 pass_phiopt::execute (function *)
 {
   bool do_hoist_loads = !early_p ? gate_hoist_loads () : false;
-  basic_block bb;
-  basic_block *bb_order;
-  unsigned n, i;
   bool cfgchanged = false;
 
   calculate_dominance_info (CDI_DOMINATORS);
   mark_ssa_maybe_undefs ();
 
-  /* Search every basic block for COND_EXPR we may be able to optimize.
-
-     We walk the blocks in order that guarantees that a block with
-     a single predecessor is processed before the predecessor.
-     This ensures that we collapse inner ifs before visiting the
-     outer ones, and also that we do not try to visit a removed
-     block.  */
-  bb_order = single_pred_before_succ_order ();
-  n = n_basic_blocks_for_fn (cfun) - NUM_FIXED_BLOCKS;
-
-  for (i = 0; i < n; i++)
+  auto phiopt_exec = [&] (basic_block bb, basic_block bb1,
+			  basic_block bb2, edge e1, edge e2,
+			  bool diamond_p, gcond *cond_stmt)
     {
-      gphi *phi;
-      basic_block bb1, bb2;
-      edge e1, e2;
-      tree arg0, arg1;
-      bool diamond_p = false;
-
-      bb = bb_order[i];
-
-      /* Check to see if the last statement is a GIMPLE_COND.  */
-      gcond *cond_stmt = safe_dyn_cast <gcond *> (*gsi_last_bb (bb));
-      if (!cond_stmt)
-	continue;
-
-      e1 = EDGE_SUCC (bb, 0);
-      bb1 = e1->dest;
-      e2 = EDGE_SUCC (bb, 1);
-      bb2 = e2->dest;
-
-      /* We cannot do the optimization on abnormal edges.  */
-      if ((e1->flags & EDGE_ABNORMAL) != 0
-	  || (e2->flags & EDGE_ABNORMAL) != 0)
-	continue;
-
-      /* If either bb1's succ or bb2 or bb2's succ is non NULL.  */
-      if (EDGE_COUNT (bb1->succs) == 0
-	  || EDGE_COUNT (bb2->succs) == 0)
-	continue;
-
-      /* Find the bb which is the fall through to the other.  */
-      if (EDGE_SUCC (bb1, 0)->dest == bb2)
-	;
-      else if (EDGE_SUCC (bb2, 0)->dest == bb1)
-	{
-	  std::swap (bb1, bb2);
-	  std::swap (e1, e2);
-	}
-      else if (EDGE_SUCC (bb1, 0)->dest == EDGE_SUCC (bb2, 0)->dest
-	       && single_succ_p (bb2))
-	{
-	  diamond_p = true;
-	  e2 = EDGE_SUCC (bb2, 0);
-	  /* Make sure bb2 is just a fall through. */
-	  if ((e2->flags & EDGE_FALLTHRU) == 0)
-	    continue;
-	}
-      else
-	continue;
-
-      e1 = EDGE_SUCC (bb1, 0);
-
-      /* Make sure that bb1 is just a fall through.  */
-      if (!single_succ_p (bb1)
-	  || (e1->flags & EDGE_FALLTHRU) == 0)
-	continue;
-
       if (diamond_p)
 	{
 	  basic_block bb3 = e1->dest;
 
 	  if (!single_pred_p (bb1)
 	      || !single_pred_p (bb2))
-	    continue;
+	    return;
 
 	  if (do_hoist_loads
 	      && !FLOAT_TYPE_P (TREE_TYPE (gimple_cond_lhs (cond_stmt)))
@@ -4286,63 +4048,70 @@ pass_phiopt::execute (function *)
 	      && !predictable_edge_p (EDGE_SUCC (bb, 0))
 	      && !predictable_edge_p (EDGE_SUCC (bb, 1)))
 	    hoist_adjacent_loads (bb, bb1, bb2, bb3);
+
+	  /* Try to see if there are only store in each side of the if
+	     and try to remove that; don't do this for -Og.  */
+	  if (EDGE_COUNT (bb3->preds) == 2 && !optimize_debug)
+	    while (cond_if_else_store_replacement_limited (bb1, bb2, bb3))
+	      ;
 	}
 
       gimple_stmt_iterator gsi;
-      bool candorest = true;
 
       /* Check that we're looking for nested phis.  */
       basic_block merge = diamond_p ? EDGE_SUCC (bb2, 0)->dest : bb2;
       gimple_seq phis = phi_nodes (merge);
+
+      if (gimple_seq_empty_p (phis))
+	return;
+
+      /* Factor out operations from the phi if possible. */
+      if (single_pred_p (bb1)
+	  && EDGE_COUNT (merge->preds) == 2
+	  && !optimize_debug)
+	{
+	  for (gsi = gsi_start (phis); !gsi_end_p (gsi); )
+	    {
+	      gphi *phi = as_a <gphi *> (gsi_stmt (gsi));
+
+	      if (factor_out_conditional_operation (e1, e2, merge, phi,
+		  cond_stmt))
+		{
+		  /* Start over if there was an operation that was factored out because the new phi might have another opportunity.  */
+		  phis = phi_nodes (merge);
+		  gsi = gsi_start (phis);
+		}
+	      else
+		gsi_next (&gsi);
+	    }
+	}
 
       /* Value replacement can work with more than one PHI
 	 so try that first. */
       if (!early_p && !diamond_p)
 	for (gsi = gsi_start (phis); !gsi_end_p (gsi); gsi_next (&gsi))
 	  {
-	    phi = as_a <gphi *> (gsi_stmt (gsi));
-	    arg0 = gimple_phi_arg_def (phi, e1->dest_idx);
-	    arg1 = gimple_phi_arg_def (phi, e2->dest_idx);
+	    gphi *phi = as_a <gphi *> (gsi_stmt (gsi));
+	    tree arg0 = gimple_phi_arg_def (phi, e1->dest_idx);
+	    tree arg1 = gimple_phi_arg_def (phi, e2->dest_idx);
 	    if (value_replacement (bb, bb1, e1, e2, phi, arg0, arg1) == 2)
 	      {
-		candorest = false;
 		cfgchanged = true;
-		break;
+		return;
 	      }
 	  }
 
-      if (!candorest)
-	continue;
-
-      phi = single_non_singleton_phi_for_edges (phis, e1, e2);
+      gphi *phi = single_non_singleton_phi_for_edges (phis, e1, e2);
       if (!phi)
-	continue;
+	return;
 
-      arg0 = gimple_phi_arg_def (phi, e1->dest_idx);
-      arg1 = gimple_phi_arg_def (phi, e2->dest_idx);
+      tree arg0 = gimple_phi_arg_def (phi, e1->dest_idx);
+      tree arg1 = gimple_phi_arg_def (phi, e2->dest_idx);
 
       /* Something is wrong if we cannot find the arguments in the PHI
 	  node.  */
       gcc_assert (arg0 != NULL_TREE && arg1 != NULL_TREE);
 
-      if (single_pred_p (bb1)
-	  && EDGE_COUNT (merge->preds) == 2)
-	{
-	  gphi *newphi = phi;
-	  while (newphi)
-	    {
-	      phi = newphi;
-	      /* factor_out_conditional_operation may create a new PHI in
-		 BB2 and eliminate an existing PHI in BB2.  Recompute values
-		 that may be affected by that change.  */
-	      arg0 = gimple_phi_arg_def (phi, e1->dest_idx);
-	      arg1 = gimple_phi_arg_def (phi, e2->dest_idx);
-	      gcc_assert (arg0 != NULL_TREE && arg1 != NULL_TREE);
-	      newphi = factor_out_conditional_operation (e1, e2, phi,
-							 arg0, arg1,
-							 cond_stmt);
-	    }
-	}
 
       /* Do the replacement of conditional if it can be done.  */
       if (match_simplify_replacement (bb, bb1, bb2, e1, e2, phi,
@@ -4354,16 +4123,13 @@ pass_phiopt::execute (function *)
 	       && cond_removal_in_builtin_zero_pattern (bb, bb1, e1, e2,
 							phi, arg0, arg1))
 	cfgchanged = true;
-      else if (minmax_replacement (bb, bb1, bb2, e1, e2, phi, arg0, arg1,
-				   diamond_p))
-	cfgchanged = true;
       else if (single_pred_p (bb1)
 	       && !diamond_p
 	       && spaceship_replacement (bb, bb1, e1, e2, phi, arg0, arg1))
 	cfgchanged = true;
-    }
+    };
 
-  free (bb_order);
+  execute_over_cond_phis (phiopt_exec);
 
   if (cfgchanged)
     return TODO_cleanup_cfg;
@@ -4450,9 +4216,6 @@ make_pass_cselim (gcc::context *ctxt)
 unsigned int
 pass_cselim::execute (function *)
 {
-  basic_block bb;
-  basic_block *bb_order;
-  unsigned n, i;
   bool cfgchanged = false;
   hash_set<tree> *nontrap = 0;
   unsigned todo = 0;
@@ -4468,71 +4231,10 @@ pass_cselim::execute (function *)
   /* Calculate the set of non-trapping memory accesses.  */
   nontrap = get_non_trapping ();
 
-  /* Search every basic block for COND_EXPR we may be able to optimize.
-
-     We walk the blocks in order that guarantees that a block with
-     a single predecessor is processed before the predecessor.
-     This ensures that we collapse inner ifs before visiting the
-     outer ones, and also that we do not try to visit a removed
-     block.  */
-  bb_order = single_pred_before_succ_order ();
-  n = n_basic_blocks_for_fn (cfun) - NUM_FIXED_BLOCKS;
-
-  for (i = 0; i < n; i++)
+  auto cselim_exec = [&] (basic_block bb, basic_block bb1,
+			  basic_block bb2, edge e1, edge e2,
+			  bool diamond_p, gcond *)
     {
-      basic_block bb1, bb2;
-      edge e1, e2;
-      bool diamond_p = false;
-
-      bb = bb_order[i];
-
-      /* Check to see if the last statement is a GIMPLE_COND.  */
-      gcond *cond_stmt = safe_dyn_cast <gcond *> (*gsi_last_bb (bb));
-      if (!cond_stmt)
-	continue;
-
-      e1 = EDGE_SUCC (bb, 0);
-      bb1 = e1->dest;
-      e2 = EDGE_SUCC (bb, 1);
-      bb2 = e2->dest;
-
-      /* We cannot do the optimization on abnormal edges.  */
-      if ((e1->flags & EDGE_ABNORMAL) != 0
-	  || (e2->flags & EDGE_ABNORMAL) != 0)
-	continue;
-
-      /* If either bb1's succ or bb2 or bb2's succ is non NULL.  */
-      if (EDGE_COUNT (bb1->succs) == 0
-	  || EDGE_COUNT (bb2->succs) == 0)
-	continue;
-
-      /* Find the bb which is the fall through to the other.  */
-      if (EDGE_SUCC (bb1, 0)->dest == bb2)
-	;
-      else if (EDGE_SUCC (bb2, 0)->dest == bb1)
-	{
-	  std::swap (bb1, bb2);
-	  std::swap (e1, e2);
-	}
-      else if (EDGE_SUCC (bb1, 0)->dest == EDGE_SUCC (bb2, 0)->dest
-	       && single_succ_p (bb2))
-	{
-	  diamond_p = true;
-	  e2 = EDGE_SUCC (bb2, 0);
-	  /* Make sure bb2 is just a fall through. */
-	  if ((e2->flags & EDGE_FALLTHRU) == 0)
-	    continue;
-	}
-      else
-	continue;
-
-      e1 = EDGE_SUCC (bb1, 0);
-
-      /* Make sure that bb1 is just a fall through.  */
-      if (!single_succ_p (bb1)
-	  || (e1->flags & EDGE_FALLTHRU) == 0)
-	continue;
-
       if (diamond_p)
 	{
 	  basic_block bb3 = e1->dest;
@@ -4542,28 +4244,28 @@ pass_cselim::execute (function *)
 	     if always since we are sinking rather than
 	     hoisting. */
 	  if (EDGE_COUNT (bb3->preds) != 2)
-	    continue;
+	    return;
 	  if (cond_if_else_store_replacement (bb1, bb2, bb3))
 	    cfgchanged = true;
-	  continue;
+	  return;
 	}
 
       /* Also make sure that bb1 only have one predecessor and that it
 	 is bb.  */
       if (!single_pred_p (bb1)
 	  || single_pred (bb1) != bb)
-	continue;
+	return;
 
       /* bb1 is the middle block, bb2 the join block, bb the split block,
 	 e1 the fallthrough edge from bb1 to bb2.  We can't do the
 	 optimization if the join block has more than two predecessors.  */
       if (EDGE_COUNT (bb2->preds) > 2)
-	continue;
+	return;
       if (cond_store_replacement (bb1, bb2, e1, e2, nontrap))
 	cfgchanged = true;
-    }
+    };
 
-  free (bb_order);
+  execute_over_cond_phis (cselim_exec);
 
   delete nontrap;
   /* If the CFG has changed, we should cleanup the CFG.  */

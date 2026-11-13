@@ -1,5 +1,5 @@
 /* Nested function decomposition for GIMPLE.
-   Copyright (C) 2004-2024 Free Software Foundation, Inc.
+   Copyright (C) 2004-2026 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -46,6 +46,7 @@
 #include "tree-nested.h"
 #include "symbol-summary.h"
 #include "symtab-thunks.h"
+#include "attribs.h"
 
 /* Summary of nested functions.  */
 static function_summary <nested_function_info *>
@@ -782,8 +783,8 @@ get_nl_goto_field (struct nesting_info *info)
       else
 	type = lang_hooks.types.type_for_mode (Pmode, 1);
 
-      scalar_int_mode mode
-	= as_a <scalar_int_mode> (STACK_SAVEAREA_MODE (SAVE_NONLOCAL));
+      fixed_size_mode mode
+	= as_a <fixed_size_mode> (STACK_SAVEAREA_MODE (SAVE_NONLOCAL));
       size = GET_MODE_SIZE (mode);
       size = size / GET_MODE_SIZE (Pmode);
       size = size + 1;
@@ -907,7 +908,11 @@ walk_all_functions (walk_stmt_fn callback_stmt, walk_tree_fn callback_op,
    add a VIEW_CONVERT_EXPR to each such operand for each call to the nested
    function.  The former is not practical.  The latter would still require
    detecting this case to know when to add the conversions.  So, for now at
-   least, we don't inline such an enclosing function.
+   least, we don't inline such an enclosing function.  A similar issue
+   applies if the nested function has a variably modified return type, and
+   is not inlined, but the enclosing function is inlined and so the type of
+   the return slot as used in the enclosing function is remapped, so also
+   avoid inlining in that case.
 
    We have to do that check recursively, so here return indicating whether
    FNDECL has such a nested function.  ORIG_FN is the function we were
@@ -928,6 +933,9 @@ check_for_nested_with_variably_modified (tree fndecl, tree orig_fndecl)
   for (cgn = first_nested_function (cgn); cgn;
        cgn = next_nested_function (cgn))
     {
+      if (variably_modified_type_p (TREE_TYPE (TREE_TYPE (cgn->decl)),
+				    orig_fndecl))
+	return true;
       for (arg = DECL_ARGUMENTS (cgn->decl); arg; arg = DECL_CHAIN (arg))
 	if (variably_modified_type_p (TREE_TYPE (arg), orig_fndecl))
 	  return true;
@@ -966,7 +974,13 @@ create_nesting_tree (struct cgraph_node *cgn)
   /* See discussion at check_for_nested_with_variably_modified for a
      discussion of why this has to be here.  */
   if (check_for_nested_with_variably_modified (info->context, info->context))
-    DECL_UNINLINABLE (info->context) = true;
+    {
+      DECL_UNINLINABLE (info->context) = true;
+      tree attrs = DECL_ATTRIBUTES (info->context);
+      if (lookup_attribute ("noclone", attrs) == NULL)
+	DECL_ATTRIBUTES (info->context)
+	  = tree_cons (get_identifier ("noclone"), NULL, attrs);
+    }
 
   return info;
 }
@@ -1397,6 +1411,7 @@ convert_nonlocal_omp_clauses (tree *pclauses, struct walk_stmt_info *wi)
 	case OMP_CLAUSE_DEPEND:
 	case OMP_CLAUSE_DOACROSS:
 	case OMP_CLAUSE_DEVICE:
+	case OMP_CLAUSE_DYN_GROUPPRIVATE:
 	case OMP_CLAUSE_NUM_TEAMS:
 	case OMP_CLAUSE_THREAD_LIMIT:
 	case OMP_CLAUSE_SAFELEN:
@@ -1782,6 +1797,8 @@ convert_nonlocal_reference_stmt (gimple_stmt_iterator *gsi, bool *handled_ops_p,
       break;
 
     case GIMPLE_OMP_TARGET:
+      walk_body (convert_nonlocal_reference_stmt, convert_nonlocal_reference_op,
+		 info, gimple_omp_target_iterator_loops_ptr (stmt));
       if (!is_gimple_omp_offloaded (stmt))
 	{
 	  save_suppress = info->suppress_expansion;
@@ -2176,6 +2193,7 @@ convert_local_omp_clauses (tree *pclauses, struct walk_stmt_info *wi)
 	case OMP_CLAUSE_DEPEND:
 	case OMP_CLAUSE_DOACROSS:
 	case OMP_CLAUSE_DEVICE:
+	case OMP_CLAUSE_DYN_GROUPPRIVATE:
 	case OMP_CLAUSE_NUM_TEAMS:
 	case OMP_CLAUSE_THREAD_LIMIT:
 	case OMP_CLAUSE_SAFELEN:
@@ -2503,6 +2521,9 @@ convert_local_reference_stmt (gimple_stmt_iterator *gsi, bool *handled_ops_p,
       break;
 
     case GIMPLE_OMP_TARGET:
+      walk_body (convert_local_reference_stmt, convert_local_reference_op, info,
+		 gimple_omp_target_iterator_loops_ptr (stmt));
+
       if (!is_gimple_omp_offloaded (stmt))
 	{
 	  save_suppress = info->suppress_expansion;
@@ -2680,6 +2701,7 @@ convert_nl_goto_reference (gimple_stmt_iterator *gsi, bool *handled_ops_p,
     {
       new_label = create_artificial_label (UNKNOWN_LOCATION);
       DECL_NONLOCAL (new_label) = 1;
+      DECL_CONTEXT (new_label) = target_context;
       *slot = new_label;
     }
   else
@@ -2883,6 +2905,8 @@ convert_tramp_reference_stmt (gimple_stmt_iterator *gsi, bool *handled_ops_p,
 	  *handled_ops_p = false;
 	  return NULL_TREE;
 	}
+      walk_body (convert_tramp_reference_stmt, convert_tramp_reference_op,
+		 info, gimple_omp_target_iterator_loops_ptr (stmt));
       /* FALLTHRU */
     case GIMPLE_OMP_PARALLEL:
     case GIMPLE_OMP_TASK:
@@ -2906,9 +2930,11 @@ convert_tramp_reference_stmt (gimple_stmt_iterator *gsi, bool *handled_ops_p,
 	      continue;
 	    decl = i ? get_chain_decl (info) : info->frame_decl;
 	    /* Don't add CHAIN.* or FRAME.* twice.  */
-	    for (c = gimple_omp_taskreg_clauses (stmt);
-		 c;
-		 c = OMP_CLAUSE_CHAIN (c))
+	    if (gimple_code (stmt) == GIMPLE_OMP_TARGET)
+	      c = gimple_omp_target_clauses (stmt);
+	    else
+	      c = gimple_omp_taskreg_clauses (stmt);
+	    for (; c; c = OMP_CLAUSE_CHAIN (c))
 	      if ((OMP_CLAUSE_CODE (c) == OMP_CLAUSE_FIRSTPRIVATE
 		   || OMP_CLAUSE_CODE (c) == OMP_CLAUSE_SHARED)
 		  && OMP_CLAUSE_DECL (c) == decl)
@@ -3371,7 +3397,7 @@ fixup_vla_decls (tree block)
 bool
 fold_mem_refs (tree *const &e, void *data ATTRIBUTE_UNUSED)
 {
-  tree *ref_p = CONST_CAST2 (tree *, const tree *, (const tree *)e);
+  tree *ref_p = const_cast<tree *> (e);
   *ref_p = fold (*ref_p);
   return true;
 }

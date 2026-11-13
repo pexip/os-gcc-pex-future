@@ -1,6 +1,6 @@
 /* Breadth-first and depth-first routines for
    searching multiple-inheritance lattice for GNU C++.
-   Copyright (C) 1987-2024 Free Software Foundation, Inc.
+   Copyright (C) 1987-2026 Free Software Foundation, Inc.
    Contributed by Michael Tiemann (tiemann@cygnus.com)
 
 This file is part of GCC.
@@ -31,6 +31,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "stringpool.h"
 #include "attribs.h"
 #include "tree-inline.h"
+#include "contracts.h"
 
 static int is_subobject_of_p (tree, tree);
 static tree dfs_lookup_base (tree, void *);
@@ -65,6 +66,7 @@ struct lookup_base_data_s
   bool repeated_base;	/* Whether there are repeated bases in the
 			    hierarchy.  */
   bool want_any;	/* Whether we want any matching binfo.  */
+  bool require_virtual;	/* Whether we require a virtual path.  */
 };
 
 /* Worker function for lookup_base.  See if we've found the desired
@@ -93,11 +95,18 @@ dfs_lookup_base (tree binfo, void *data_)
 
   if (SAME_BINFO_TYPE_P (BINFO_TYPE (binfo), data->base))
     {
+      const bool via_virtual
+	= binfo_via_virtual (binfo, data->t) != NULL_TREE;
+
+      if (data->require_virtual && !via_virtual)
+	/* Skip this result if we require virtual inheritance
+	   and this is not a virtual base.  */
+	return dfs_skip_bases;
+
       if (!data->binfo)
 	{
 	  data->binfo = binfo;
-	  data->via_virtual
-	    = binfo_via_virtual (data->binfo, data->t) != NULL_TREE;
+	  data->via_virtual = via_virtual;
 
 	  if (!data->repeated_base)
 	    /* If there are no repeated bases, we can stop now.  */
@@ -124,7 +133,7 @@ dfs_lookup_base (tree binfo, void *data_)
 	    }
 
 	  /* Prefer one via a non-virtual path.  */
-	  if (!binfo_via_virtual (binfo, data->t))
+	  if (!via_virtual)
 	    {
 	      data->binfo = binfo;
 	      data->via_virtual = false;
@@ -160,12 +169,16 @@ get_parent_with_private_access (tree decl, tree binfo)
 
   tree base_binfo = NULL_TREE;
 
-  /* Iterate through immediate parent classes.  */
+  /* Iterate through immediate parent classes.
+     Note that the base list might contain WILDCARD_TYPE_P types, that
+     should be ignored here.  */
   for (int i = 0; BINFO_BASE_ITERATE (binfo, i, base_binfo); i++)
     {
+      tree base_binfo_type = BINFO_TYPE (base_binfo);
       /* This parent had private access.  Therefore that's why BINFO can't
 	  access DECL.  */
-      if (access_in_type (BINFO_TYPE (base_binfo), decl) == ak_private)
+      if (RECORD_OR_UNION_TYPE_P (base_binfo_type)
+	  && access_in_type (base_binfo_type, decl) == ak_private)
 	return base_binfo;
     }
 
@@ -267,6 +280,7 @@ lookup_base (tree t, tree base, base_access access,
       data.repeated_base = (offset == -1) && CLASSTYPE_REPEATED_BASE_P (t);
       data.want_any = access == ba_any;
       data.offset = offset;
+      data.require_virtual = (access & ba_require_virtual);
 
       dfs_walk_once (t_binfo, dfs_lookup_base, NULL, &data);
       binfo = data.binfo;
@@ -1227,8 +1241,9 @@ lookup_member (tree xbasetype, tree name, int protect, bool want_type,
 	{
 	  if (complain & tf_error)
 	    {
+	      auto_diagnostic_group d;
 	      error ("request for member %qD is ambiguous", name);
-	      print_candidates (lfi.ambiguous);
+	      print_candidates (input_location, lfi.ambiguous);
 	    }
 	  return error_mark_node;
 	}
@@ -1242,14 +1257,14 @@ lookup_member (tree xbasetype, tree name, int protect, bool want_type,
   /* [class.access]
 
      In the case of overloaded function names, access control is
-     applied to the function selected by overloaded resolution.  
+     applied to the function selected by overloaded resolution.
 
      We cannot check here, even if RVAL is only a single non-static
      member function, since we do not know what the "this" pointer
      will be.  For:
 
         class A { protected: void f(); };
-        class B : public A { 
+        class B : public A {
           void g(A *p) {
             f(); // OK
             p->f(); // Not OK.
@@ -1276,7 +1291,7 @@ lookup_member (tree xbasetype, tree name, int protect, bool want_type,
       && !dguide_name_p (name))
     rval = build_baselink (rval_binfo, basetype_path, rval,
 			   (IDENTIFIER_CONV_OP_P (name)
-			   ? TREE_TYPE (name): NULL_TREE));
+			    ? TREE_TYPE (name) : NULL_TREE));
   return rval;
 }
 
@@ -1450,21 +1465,26 @@ adjust_result_of_qualified_name_lookup (tree decl,
 					tree qualifying_scope,
 					tree context_class)
 {
-  if (context_class && context_class != error_mark_node
+  if (!BASELINK_P (decl))
+    return decl;
+
+  const bool qualified_p = qualifying_scope != NULL_TREE;
+  if (!qualified_p)
+    qualifying_scope = BINFO_TYPE (BASELINK_ACCESS_BINFO (decl));
+
+  if (context_class
+      && context_class != error_mark_node
       && CLASS_TYPE_P (context_class)
       && CLASS_TYPE_P (qualifying_scope)
-      && DERIVED_FROM_P (qualifying_scope, context_class)
-      && BASELINK_P (decl))
+      && DERIVED_FROM_P (qualifying_scope, context_class))
     {
-      tree base;
-
       /* Look for the QUALIFYING_SCOPE as a base of the CONTEXT_CLASS.
 	 Because we do not yet know which function will be chosen by
 	 overload resolution, we cannot yet check either accessibility
 	 or ambiguity -- in either case, the choice of a static member
 	 function might make the usage valid.  */
-      base = lookup_base (context_class, qualifying_scope,
-			  ba_unique, NULL, tf_none);
+      tree base = lookup_base (context_class, qualifying_scope,
+			       ba_unique, NULL, tf_none);
       if (base && base != error_mark_node)
 	{
 	  BASELINK_ACCESS_BINFO (decl) = base;
@@ -1476,8 +1496,7 @@ adjust_result_of_qualified_name_lookup (tree decl,
 	}
     }
 
-  if (BASELINK_P (decl))
-    BASELINK_QUALIFIED_P (decl) = true;
+  BASELINK_QUALIFIED_P (decl) = qualified_p;
 
   return decl;
 }
@@ -2108,11 +2127,15 @@ check_final_overrider (tree overrider, tree basefn)
       return 0;
     }
 
-  /* A consteval virtual function shall not override a virtual function that is
-     not consteval. A consteval virtual function shall not be overridden by a
-     virtual function that is not consteval.  */
-  if (DECL_IMMEDIATE_FUNCTION_P (overrider)
-      != DECL_IMMEDIATE_FUNCTION_P (basefn))
+  /* A class with a consteval virtual function that overrides a virtual
+     function that is not consteval shall have consteval-only type (CWG 3117).
+     A consteval virtual function shall not be overridden by a virtual
+     function that is not consteval.  */
+  if ((DECL_IMMEDIATE_FUNCTION_P (basefn)
+       && !DECL_IMMEDIATE_FUNCTION_P (overrider))
+      || (!DECL_IMMEDIATE_FUNCTION_P (basefn)
+	  && DECL_IMMEDIATE_FUNCTION_P (overrider)
+	  && !consteval_only_p (overrider)))
     {
       auto_diagnostic_group d;
       if (DECL_IMMEDIATE_FUNCTION_P (overrider))
@@ -2163,32 +2186,6 @@ check_final_overrider (tree overrider, tree basefn)
 		  "overridden function is %qD", basefn);
 	}
       return 0;
-    }
-
-  if (!DECL_HAS_CONTRACTS_P (basefn) && DECL_HAS_CONTRACTS_P (overrider))
-    {
-      auto_diagnostic_group d;
-      error ("function with contracts %q+D overriding contractless function",
-	     overrider);
-      inform (DECL_SOURCE_LOCATION (basefn),
-	      "overridden function is %qD", basefn);
-      return 0;
-    }
-  else if (DECL_HAS_CONTRACTS_P (basefn) && !DECL_HAS_CONTRACTS_P (overrider))
-    {
-      /* We're inheriting basefn's contracts; create a copy of them but
-	 replace references to their parms to our parms.  */
-      inherit_base_contracts (overrider, basefn);
-    }
-  else if (DECL_HAS_CONTRACTS_P (basefn) && DECL_HAS_CONTRACTS_P (overrider))
-    {
-      /* We're in the process of completing the overrider's class, which means
-	 our conditions definitely are not parsed so simply chain on the
-	 basefn for later checking.
-
-	 Note that OVERRIDER's contracts will have been fully parsed at the
-	 point the deferred match is run.  */
-      defer_guarded_contract_match (overrider, basefn, DECL_CONTRACTS (basefn));
     }
 
   if (DECL_FINAL_P (basefn))
@@ -2654,7 +2651,7 @@ lookup_conversions (tree type)
   lookup_conversions_r (TYPE_BINFO (type), 0, 0, NULL_TREE, NULL_TREE, &convs);
 
   tree list = NULL_TREE;
-  
+
   /* Flatten the list-of-lists */
   for (; convs; convs = TREE_CHAIN (convs))
     {
@@ -2829,7 +2826,7 @@ original_binfo (tree binfo, tree here)
    TYPE).  */
 
 bool
-any_dependent_bases_p (tree type)
+any_dependent_bases_p (tree type /* = current_nonlambda_class_type () */)
 {
   if (!type || !CLASS_TYPE_P (type) || !uses_template_parms (type))
     return false;
@@ -2844,7 +2841,10 @@ any_dependent_bases_p (tree type)
   unsigned i;
   tree base_binfo;
   FOR_EACH_VEC_SAFE_ELT (BINFO_BASE_BINFOS (TYPE_BINFO (type)), i, base_binfo)
-    if (BINFO_DEPENDENT_BASE_P (base_binfo))
+    if (BINFO_DEPENDENT_BASE_P (base_binfo)
+	/* Recurse to also consider possibly dependent bases of a base that
+	   is part of the current instantiation.  */
+	|| any_dependent_bases_p (BINFO_TYPE (base_binfo)))
       return true;
 
   return false;

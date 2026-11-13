@@ -1,5 +1,5 @@
 /* Convert RTL to assembler code and output it, for GNU compiler.
-   Copyright (C) 1987-2024 Free Software Foundation, Inc.
+   Copyright (C) 1987-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -83,6 +83,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "function-abi.h"
 #include "common/common-target.h"
 #include "diagnostic.h"
+#include "diagnostics/file-cache.h"
 
 #include "dwarf2out.h"
 
@@ -149,7 +150,7 @@ extern const int length_unit_log; /* This is defined in insn-attrtab.cc.  */
 const rtx_insn *this_is_asm_operands;
 
 /* Number of operands of this insn, for an `asm' with operands.  */
-static unsigned int insn_noperands;
+unsigned int insn_noperands;
 
 /* Compare optimization flag.  */
 
@@ -1517,6 +1518,8 @@ reemit_insn_block_notes (void)
 	  case NOTE_INSN_BEGIN_STMT:
 	  case NOTE_INSN_INLINE_ENTRY:
 	    this_block = LOCATION_BLOCK (NOTE_MARKER_LOCATION (insn));
+	    if (!this_block)
+	      continue;
 	    goto set_cur_block_to_this_block;
 
 	  default:
@@ -1542,7 +1545,6 @@ reemit_insn_block_notes (void)
 	    this_block = choose_inner_scope (this_block,
 					     insn_scope (body->insn (i)));
 	}
-    set_cur_block_to_this_block:
       if (! this_block)
 	{
 	  if (INSN_LOCATION (insn) == UNKNOWN_LOCATION)
@@ -1551,6 +1553,7 @@ reemit_insn_block_notes (void)
 	    this_block = DECL_INITIAL (cfun->decl);
 	}
 
+    set_cur_block_to_this_block:
       if (this_block != cur_block)
 	{
 	  change_scope (insn, cur_block, this_block);
@@ -2070,7 +2073,7 @@ output_alternate_entry_point (FILE *file, rtx_insn *insn)
 
 /* Given a CALL_INSN, find and return the nested CALL. */
 static rtx
-call_from_call_insn (rtx_call_insn *insn)
+call_from_call_insn (const rtx_call_insn *insn)
 {
   rtx x;
   gcc_assert (CALL_P (insn));
@@ -2096,6 +2099,15 @@ call_from_call_insn (rtx_call_insn *insn)
   return x;
 }
 
+/* Return the CALL in X if there is one.  */
+
+rtx
+get_call_rtx_from (const rtx_insn *insn)
+{
+  const rtx_call_insn *call_insn = as_a<const rtx_call_insn *> (insn);
+  return call_from_call_insn (call_insn);
+}
+
 /* Print a comment into the asm showing FILENAME, LINENUM, and the
    corresponding source line, if available.  */
 
@@ -2105,7 +2117,7 @@ asm_show_source (const char *filename, int linenum)
   if (!filename)
     return;
 
-  char_span line
+  diagnostics::char_span line
     = global_dc->get_file_cache ().get_source_line (filename, linenum);
   if (!line)
     return;
@@ -2303,7 +2315,7 @@ final_scan_insn_1 (rtx_insn *insn, FILE *file, int optimize_p ATTRIBUTE_UNUSED,
 
 	      /* Output debugging info about the symbol-block beginning.  */
 	      if (!DECL_IGNORED_P (current_function_decl))
-		debug_hooks->begin_block (last_linenum, n);
+		debug_hooks->begin_block (last_linenum, n, NOTE_BLOCK (insn));
 
 	      /* Mark this block as output.  */
 	      TREE_ASM_WRITTEN (NOTE_BLOCK (insn)) = 1;
@@ -3150,6 +3162,7 @@ walk_alter_subreg (rtx *xp, bool *changed)
     case PLUS:
     case MULT:
     case AND:
+    case ASHIFT:
       XEXP (x, 0) = walk_alter_subreg (&XEXP (x, 0), changed);
       XEXP (x, 1) = walk_alter_subreg (&XEXP (x, 1), changed);
       break;
@@ -3282,7 +3295,11 @@ output_asm_operand_names (rtx *operands, int *oporder, int nops)
   for (i = 0; i < nops; i++)
     {
       int addressp;
-      rtx op = operands[oporder[i]];
+      int opnum = oporder[i];
+      /* Skip invalid ops. */
+      if (opnum == MAX_RECOG_OPERANDS)
+	continue;
+      rtx op = operands[opnum];
       tree expr = get_mem_expr_from_op (op, &addressp);
 
       fprintf (asm_out_file, "%c%s",
@@ -3415,8 +3432,8 @@ output_asm_insn (const char *templ, rtx *operands)
 #ifdef ASSEMBLER_DIALECT
   int dialect = 0;
 #endif
-  int oporder[MAX_RECOG_OPERANDS];
-  char opoutput[MAX_RECOG_OPERANDS];
+  int oporder[MAX_RECOG_OPERANDS+1];
+  char opoutput[MAX_RECOG_OPERANDS+1];
   int ops = 0;
 
   /* An insn may return a null string template
@@ -3494,21 +3511,28 @@ output_asm_insn (const char *templ, rtx *operands)
 	    int letter = *p++;
 	    unsigned long opnum;
 	    char *endptr;
+	    int letter2 = 0;
 
+	    if (letter == 'c' && *p == 'c')
+	      letter2 = *p++;
 	    opnum = strtoul (p, &endptr, 10);
 
 	    if (endptr == p)
 	      output_operand_lossage ("operand number missing "
 				      "after %%-letter");
 	    else if (this_is_asm_operands && opnum >= insn_noperands)
-	      output_operand_lossage ("operand number out of range");
+	      {
+		/* Force the opnum in bounds to a bogus location. */
+		opnum = MAX_RECOG_OPERANDS;
+		output_operand_lossage ("operand number out of range");
+	      }
 	    else if (letter == 'l')
 	      output_asm_label (operands[opnum]);
 	    else if (letter == 'a')
 	      output_address (VOIDmode, operands[opnum]);
 	    else if (letter == 'c')
 	      {
-		if (CONSTANT_ADDRESS_P (operands[opnum]))
+		if (letter2 == 'c' || CONSTANT_ADDRESS_P (operands[opnum]))
 		  output_addr_const (asm_out_file, operands[opnum]);
 		else
 		  output_operand (operands[opnum], 'c');
@@ -3542,7 +3566,11 @@ output_asm_insn (const char *templ, rtx *operands)
 
 	    opnum = strtoul (p, &endptr, 10);
 	    if (this_is_asm_operands && opnum >= insn_noperands)
-	      output_operand_lossage ("operand number out of range");
+	      {
+		/* Force the opnum in bounds to a bogus location. */
+		opnum = MAX_RECOG_OPERANDS;
+		output_operand_lossage ("operand number out of range");
+	      }
 	    else
 	      output_operand (operands[opnum], 0);
 
@@ -4213,6 +4241,7 @@ leaf_renumber_regs_insn (rtx in_rtx)
       case 's':
       case '0':
       case 'i':
+      case 'L':
       case 'w':
       case 'p':
       case 'n':

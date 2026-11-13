@@ -1,5 +1,5 @@
 /* Wrapper for ar/ranlib/nm to pass the LTO plugin.
-   Copyright (C) 2011-2024 Free Software Foundation, Inc.
+   Copyright (C) 2011-2026 Free Software Foundation, Inc.
    Contributed by Andi Kleen.
 
 This file is part of GCC.
@@ -105,7 +105,7 @@ setup_prefixes (const char *exec_path)
   /* Build the relative path to the target-specific tool directory.  */
   self_tooldir_prefix = concat (tooldir_base_prefix, target_machine,
 				dir_separator, NULL);
-  self_tooldir_prefix = concat (self_exec_prefix, target_machine, 
+  self_tooldir_prefix = concat (self_exec_prefix, target_machine,
 				dir_separator, target_version, dir_separator,
 				self_tooldir_prefix, NULL);
 
@@ -113,7 +113,7 @@ setup_prefixes (const char *exec_path)
   prefix_from_string (concat (self_tooldir_prefix, "bin", NULL), &target_path);
 
   /* Add the target-specific libexec prefix.  */
-  self_libexec_prefix = concat (self_libexec_prefix, target_machine, 
+  self_libexec_prefix = concat (self_libexec_prefix, target_machine,
 				dir_separator, target_version,
 				dir_separator, NULL);
   prefix_from_string (self_libexec_prefix, &target_path);
@@ -122,7 +122,7 @@ setup_prefixes (const char *exec_path)
   prefix_from_env ("PATH", &path);
 }
 
-int 
+int
 main (int ac, char **av)
 {
   const char *exe_name;
@@ -223,7 +223,7 @@ main (int ac, char **av)
   /* Prepend - if necessary.  */
   if (is_ar && av[1] && av[1][0] != '-')
     av[1] = concat ("-", av[1], NULL);
-  
+
   /* Create new command line with plugin - if we have one, otherwise just
      copy the command through.  */
   nargv = XCNEWVEC (const char *, ac + j + 1); /* +j plugin args +1 for NULL.  */
@@ -249,8 +249,7 @@ main (int ac, char **av)
 	  fprintf (stderr, "Cannot open temporary file %s\n", rsp_file);
 	  exit (1);
 	}
-      status = writeargv (
-	  CONST_CAST2 (char * const *, const char **, nargv) + 1, f);
+      status = writeargv (const_cast<char * const *> (nargv) + 1, f);
       if (status)
 	{
 	  fprintf (stderr, "Cannot write to temporary file %s\n", rsp_file);
@@ -271,12 +270,12 @@ main (int ac, char **av)
 
   /* Run utility */
   /* ??? the const is misplaced in pex_one's argv? */
-  err_msg = pex_one (PEX_LAST|PEX_SEARCH, 
-		     exe_name, 
-		     CONST_CAST2 (char * const *, const char **, nargv),
+  err_msg = pex_one (PEX_LAST|PEX_SEARCH,
+		     exe_name,
+		     const_cast<char * const *> (nargv),
 		     concat ("gcc-", exe_name, NULL),
 		     NULL,NULL,  &status, &err);
-  if (err_msg) 
+  if (err_msg)
     fprintf (stderr, "Error running %s: %s\n", exe_name, err_msg);
   else if (status)
     {

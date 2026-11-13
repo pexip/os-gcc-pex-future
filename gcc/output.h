@@ -1,6 +1,6 @@
 /* Declarations for insn-output.cc and other code to write to asm_out_file.
    These functions are defined in final.cc, and varasm.cc.
-   Copyright (C) 1987-2024 Free Software Foundation, Inc.
+   Copyright (C) 1987-2026 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -338,6 +338,9 @@ extern rtx_insn *current_output_insn;
    The precise value is the insn being output, to pass to error_for_asm.  */
 extern const rtx_insn *this_is_asm_operands;
 
+/* Number of operands of this insn, for an `asm' with operands.  */
+extern unsigned int insn_noperands;
+
 /* Carry information from ASM_DECLARE_OBJECT_NAME
    to ASM_FINISH_DECLARE_OBJECT.  */
 extern int size_directive_output;
@@ -542,6 +545,9 @@ extern GTY(()) section *bss_noswitch_section;
 extern GTY(()) section *in_section;
 extern GTY(()) bool in_cold_section_p;
 
+/* MAX size for mergeable sections in bits. */
+#define MAX_MERGEABLE_BITSIZE 256
+
 extern section *get_unnamed_section (unsigned int, void (*) (const char *),
 				     const char *);
 extern section *get_section (const char *, unsigned int, tree,
@@ -552,6 +558,9 @@ extern void place_block_symbol (rtx);
 extern rtx get_section_anchor (struct object_block *, HOST_WIDE_INT,
 			       enum tls_model);
 extern section *mergeable_constant_section (machine_mode,
+					    unsigned HOST_WIDE_INT,
+					    unsigned int);
+extern section *mergeable_constant_section (unsigned HOST_WIDE_INT,
 					    unsigned HOST_WIDE_INT,
 					    unsigned int);
 extern section *function_section (tree);
@@ -635,5 +644,7 @@ extern int default_address_cost (rtx, machine_mode, addr_space_t, bool);
 
 /* Stack usage.  */
 extern void output_stack_usage (void);
+
+extern void verify_reg_names_in_constraints ();
 
 #endif /* ! GCC_OUTPUT_H */

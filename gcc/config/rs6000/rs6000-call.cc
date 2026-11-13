@@ -1,6 +1,6 @@
 /* Subroutines used to generate function calls and handle built-in
    instructions on IBM RS/6000.
-   Copyright (C) 1991-2024 Free Software Foundation, Inc.
+   Copyright (C) 1991-2026 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -407,15 +407,15 @@ rs6000_discover_homogeneous_aggregate (machine_mode mode, const_tree type,
 
    The AIX ABI for the RS/6000 specifies that all structures are
    returned in memory.  The Darwin ABI does the same.
-   
+
    For the Darwin 64 Bit ABI, a function result can be returned in
    registers or in memory, depending on the size of the return data
    type.  If it is returned in registers, the value occupies the same
    registers as it would if it were the first and only function
    argument.  Otherwise, the function places its result in memory at
    the location pointed to by GPR3.
-   
-   The SVR4 ABI specifies that structures <= 8 bytes are returned in r3/r4, 
+
+   The SVR4 ABI specifies that structures <= 8 bytes are returned in r3/r4,
    but a draft put them in memory, and GCC used to implement the draft
    instead of the final standard.  Therefore, aix_struct_return
    controls this instead of DEFAULT_ABI; V.4 targets needing backward
@@ -432,19 +432,24 @@ rs6000_discover_homogeneous_aggregate (machine_mode mode, const_tree type,
 bool
 rs6000_return_in_memory (const_tree type, const_tree fntype ATTRIBUTE_UNUSED)
 {
-  /* We do not allow MMA types being used as return values.  Only report
-     the invalid return value usage the first time we encounter it.  */
+  /* We do not allow Dense Math/MMA types being used as return values.  Only
+     report the invalid return value usage the first time we encounter it.  */
   if (cfun
       && !cfun->machine->mma_return_type_error
       && TREE_TYPE (cfun->decl) == fntype
-      && (TYPE_MODE (type) == OOmode || TYPE_MODE (type) == XOmode))
+      && (TYPE_MODE (type) == OOmode
+	   || TYPE_MODE (type) == XOmode
+	   || TYPE_MODE (type) == TDOmode))
     {
       /* Record we have now handled function CFUN, so the next time we
 	 are called, we do not re-report the same error.  */
       cfun->machine->mma_return_type_error = true;
       if (TYPE_CANONICAL (type) != NULL_TREE)
 	type = TYPE_CANONICAL (type);
-      error ("invalid use of MMA type %qs as a function return value",
+      const char *type_class =
+	 (TYPE_MODE (type) == TDOmode) ? "Dense Math" : "MMA";
+      error ("invalid use of %s type %qs as a function return value",
+	     type_class,
 	     IDENTIFIER_POINTER (DECL_NAME (TYPE_NAME (type))));
     }
 
@@ -1045,10 +1050,10 @@ int
 rs6000_darwin64_struct_check_p (machine_mode mode, const_tree type)
 {
   return rs6000_darwin64_abi
-	 && ((mode == BLKmode 
-	      && TREE_CODE (type) == RECORD_TYPE 
+	 && ((mode == BLKmode
+	      && TREE_CODE (type) == RECORD_TYPE
 	      && int_size_in_bytes (type) > 0)
-	  || (type && TREE_CODE (type) == RECORD_TYPE 
+	  || (type && TREE_CODE (type) == RECORD_TYPE
 	      && int_size_in_bytes (type) == 8)) ? 1 : 0;
 }
 
@@ -1178,7 +1183,7 @@ rs6000_function_arg_advance_1 (CUMULATIVE_ARGS *cum, machine_mode mode,
 	    {
 	      fprintf (stderr, "function_adv: words = %2d, align=%d, size=%d",
 		       cum->words, TYPE_ALIGN (type), size);
-	      fprintf (stderr, 
+	      fprintf (stderr,
 	           "nargs = %4d, proto = %d, mode = %4s (darwin64 abi)\n",
 		       cum->nargs_prototype, cum->prototype,
 		       GET_MODE_NAME (mode));
@@ -1391,7 +1396,7 @@ rs6000_darwin64_record_arg_recurse (CUMULATIVE_ARGS *cum, const_tree type,
 	    if (cum->fregno + n_fpreg > FP_ARG_MAX_REG + 1)
 	      {
 		gcc_assert (cum->fregno == FP_ARG_MAX_REG
-			    && (mode == TFmode || mode == TDmode));
+			    && FLOAT128_2REG_P (mode));
 		/* Long double or _Decimal128 split over regs and memory.  */
 		mode = DECIMAL_FLOAT_MODE_P (mode) ? DDmode : DFmode;
 		cum->use_stack=1;
@@ -1631,12 +1636,15 @@ rs6000_function_arg (cumulative_args_t cum_v, const function_arg_info &arg)
   machine_mode elt_mode;
   int n_elts;
 
-  /* We do not allow MMA types being used as function arguments.  */
-  if (mode == OOmode || mode == XOmode)
+  /* We do not allow Dense Math/MMA types being used as function arguments.  */
+  if (mode == OOmode || mode == XOmode || mode == TDOmode)
     {
       if (TYPE_CANONICAL (type) != NULL_TREE)
 	type = TYPE_CANONICAL (type);
-      error ("invalid use of MMA operand of type %qs as a function parameter",
+      const char *type_class =
+	 (mode == TDOmode) ? "Dense Math" : "MMA";
+      error ("invalid use of %s operand of type %qs as a function parameter",
+	     type_class,
 	     IDENTIFIER_POINTER (DECL_NAME (TYPE_NAME (type))));
       return NULL_RTX;
     }
@@ -2568,9 +2576,9 @@ rs6000_gimplify_va_arg (tree valist, tree type, gimple_seq *pre_p,
   /* We need to deal with the fact that the darwin ppc64 ABI is defined by an
      earlier version of gcc, with the property that it always applied alignment
      adjustments to the va-args (even for zero-sized types).  The cheapest way
-     to deal with this is to replicate the effect of the part of 
-     std_gimplify_va_arg_expr that carries out the align adjust, for the case 
-     of relevance.  
+     to deal with this is to replicate the effect of the part of
+     std_gimplify_va_arg_expr that carries out the align adjust, for the case
+     of relevance.
      We don't need to check for pass-by-reference because of the test above.
      We can return a simplifed answer, since we know there's no offset to add.  */
 
