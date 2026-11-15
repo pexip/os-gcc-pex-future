@@ -1,10 +1,11 @@
 gcc-pex-future (16.2.0-stripped-0+pexip25u1) pexip-trixie; urgency=medium
 
   * Switch to using gcc-16.2.0 with stripped upstream tarball
-  * Tweak build-deps
   * Add a README.source describing the sooure tarball
+  * Tweak build-deps
+  * Disable a failing test
 
- -- Steve McIntyre <steve.mcintyre@pexip.com>  Fri, 13 Nov 2026 17:30:26 +0000
+ -- Steve McIntyre <steve.mcintyre@pexip.com>  Sun, 15 Nov 2026 17:30:26 +0000
 
 gcc-pex-future (14.3.0-0+pexip25u1) pexip-trixie; urgency=medium
 
